@@ -50,10 +50,20 @@ on:
         required: false
         type: string
         default: "Dockerfile"
+      node_version:
+        description: "Node.js version for TS projects (e.g. '20')"
+        required: false
+        type: string
+        default: "20"
+      go_version:
+        description: "Go version for Go projects (e.g. '1.22')"
+        required: false
+        type: string
+        default: "1.22"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATE 1: validate-commits
-#   • Branch target: PRs must not target 'main'
+#   • Branch target: PRs from feature branches must not target 'main' directly
 #   • Attribution:   No AI co-authorship trailers permitted (via attribution-check.sh)
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -73,15 +83,16 @@ jobs:
           path: .ci-workflows
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check branch target (no direct-to-main PRs)
+      - name: Check branch target (feature branches must target dev, not main)
         run: |
           BASE_REF="${{ github.base_ref }}"
-          echo "PR base branch: $BASE_REF"
-          if [ "$BASE_REF" = "main" ]; then
-            echo "::error::PRs must target 'dev', not 'main'. Please retarget your PR."
+          HEAD_REF="${{ github.head_ref }}"
+          echo "PR: $HEAD_REF → $BASE_REF"
+          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::Feature PRs must target 'dev', not 'main'. Only 'dev' can merge to 'main'. Please retarget your PR."
             exit 1
           fi
-          echo "Branch target OK: targeting '$BASE_REF'"
+          echo "Branch target OK: $HEAD_REF → $BASE_REF"
 
       - name: Compute merge-base SHAs for attribution check
         id: shas
