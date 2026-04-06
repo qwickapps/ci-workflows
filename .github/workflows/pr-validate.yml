@@ -1,0 +1,400 @@
+name: PR Validate
+
+# Reusable PR validation workflow for QwickApps repositories.
+#
+# Provides 6 sequential gates:
+#   1. validate-commits  — attribution check + branch target
+#   2a. lint-and-typecheck — tsc --noEmit (TS) or go vet + golangci-lint (Go)
+#   2b. test              — pnpm test (TS) or go test ./... (Go)
+#   3. build              — optional build command + Docker image build
+#   4. push-image         — GHCR push with PR tag (if has_dockerfile)
+#   5. report-status      — PR comment + "validated" label management
+#
+# Uses shared scripts from qwickapps/ci-workflows:
+#   - scripts/attribution-check.sh  — rejects AI co-authorship in commits
+#   - scripts/pr-status-comment.sh  — posts formatted validation comment
+#
+# Runner: [self-hosted, macmini]
+# GHCR auth: printf pattern (not docker/login-action)
+# Ref: Design doc 37421058 §4.1
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "Project language: 'ts' or 'go'"
+        required: true
+        type: string
+      has_dockerfile:
+        description: "Whether the project has a Dockerfile to build and push"
+        required: false
+        type: boolean
+        default: false
+      image_name:
+        description: "Docker image name for GHCR (e.g. 'my-app'). Required when has_dockerfile=true."
+        required: false
+        type: string
+        default: ""
+      build_command:
+        description: "Build command (e.g. 'pnpm build' or 'go build ./...'). Leave empty to skip app build step."
+        required: false
+        type: string
+        default: ""
+      test_command:
+        description: "Test command override. Defaults: 'pnpm test' (ts) / 'go test ./... -v -race -count=1' (go)"
+        required: false
+        type: string
+        default: ""
+      dockerfile_path:
+        description: "Path to Dockerfile relative to repo root"
+        required: false
+        type: string
+        default: "Dockerfile"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 1: validate-commits
+#   • Branch target: PRs must not target 'main'
+#   • Attribution:   No AI co-authorship trailers permitted (via attribution-check.sh)
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  validate-commits:
+    name: "Gate 1 · Validate Commits"
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout calling repo (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          path: .ci-workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check branch target (no direct-to-main PRs)
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          echo "PR base branch: $BASE_REF"
+          if [ "$BASE_REF" = "main" ]; then
+            echo "::error::PRs must target 'dev', not 'main'. Please retarget your PR."
+            exit 1
+          fi
+          echo "Branch target OK: targeting '$BASE_REF'"
+
+      - name: Compute merge-base SHAs for attribution check
+        id: shas
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=50
+          BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          HEAD_SHA="${{ github.sha }}"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "Merge-base: $BASE_SHA → HEAD: $HEAD_SHA"
+
+      - name: Run attribution check (no AI co-authorship permitted)
+        env:
+          BASE_SHA: ${{ steps.shas.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.shas.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          chmod +x .ci-workflows/scripts/attribution-check.sh
+          .ci-workflows/scripts/attribution-check.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 2a: lint-and-typecheck  (needs: validate-commits)
+#   TS:  tsc --noEmit  [+ ESLint if configured]
+#   Go:  go vet ./...  +  golangci-lint run
+# ─────────────────────────────────────────────────────────────────────────────
+  lint-and-typecheck:
+    name: "Gate 2a · Lint & Type-check"
+    runs-on: [self-hosted, macmini]
+    needs: [validate-commits]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── TypeScript ──────────────────────────────────────────────────────────
+      - name: Install dependencies (TS)
+        if: ${{ inputs.language == 'ts' }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check (tsc --noEmit)
+        if: ${{ inputs.language == 'ts' }}
+        run: pnpm exec tsc --noEmit
+
+      - name: Lint (ESLint — warning if not configured)
+        if: ${{ inputs.language == 'ts' }}
+        run: |
+          if [ -f ".eslintrc.json" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] || \
+             [ -f ".eslintrc.yaml" ] || [ -f ".eslintrc.yml" ] || \
+             grep -q '"eslint"' package.json 2>/dev/null; then
+            pnpm exec eslint . --max-warnings 0
+          else
+            echo "::notice::No ESLint config found — skipping lint step"
+          fi
+
+      # ── Go ──────────────────────────────────────────────────────────────────
+      - name: go vet
+        if: ${{ inputs.language == 'go' }}
+        run: go vet ./...
+
+      - name: golangci-lint
+        if: ${{ inputs.language == 'go' }}
+        run: |
+          if ! command -v golangci-lint &>/dev/null; then
+            echo "Installing golangci-lint..."
+            go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          fi
+          golangci-lint run --timeout=5m
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 2b: test  (needs: validate-commits — runs in parallel with lint)
+#   TS:  pnpm test  (or test_command override)
+#   Go:  go test ./... -v -race -count=1  (or test_command override)
+# ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: "Gate 2b · Test"
+    runs-on: [self-hosted, macmini]
+    needs: [validate-commits]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies (TS)
+        if: ${{ inputs.language == 'ts' }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests (TS)
+        if: ${{ inputs.language == 'ts' }}
+        run: ${{ inputs.test_command != '' && inputs.test_command || 'pnpm test' }}
+
+      - name: Run tests (Go)
+        if: ${{ inputs.language == 'go' }}
+        run: ${{ inputs.test_command != '' && inputs.test_command || 'go test ./... -v -race -count=1' }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 3: build  (needs: lint-and-typecheck + test — both must pass)
+#   • Runs optional build_command (app build)
+#   • Builds Docker image locally for validation (if has_dockerfile)
+# ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: "Gate 3 · Build"
+    runs-on: [self-hosted, macmini]
+    needs: [lint-and-typecheck, test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies (TS)
+        if: ${{ inputs.language == 'ts' }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Run app build command
+        if: ${{ inputs.build_command != '' }}
+        run: ${{ inputs.build_command }}
+
+      - name: Build Docker image (validation)
+        if: ${{ inputs.has_dockerfile }}
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}"
+          TAG="pr-${{ github.event.pull_request.number }}"
+          echo "Building ${IMAGE}:${TAG} from ${{ inputs.dockerfile_path }}"
+          docker build \
+            -f "${{ inputs.dockerfile_path }}" \
+            -t "${IMAGE}:${TAG}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            .
+          echo "Docker build succeeded: ${IMAGE}:${TAG}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 4: push-image  (needs: build — only when has_dockerfile=true)
+#   • GHCR auth via printf pattern (not docker/login-action)
+#   • Tag format: ghcr.io/<org>/<image_name>:pr-<number>
+# ─────────────────────────────────────────────────────────────────────────────
+  push-image:
+    name: "Gate 4 · Push Image to GHCR"
+    runs-on: [self-hosted, macmini]
+    needs: [build]
+    if: ${{ inputs.has_dockerfile }}
+    outputs:
+      image_tag: ${{ steps.push.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Login to GHCR (printf pattern)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Build and push PR image
+        id: push
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}"
+          TAG="pr-${{ github.event.pull_request.number }}"
+          FULL_TAG="${IMAGE}:${TAG}"
+
+          echo "Building and pushing ${FULL_TAG}"
+
+          docker build \
+            -f "${{ inputs.dockerfile_path }}" \
+            -t "${FULL_TAG}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+
+          docker push "${FULL_TAG}"
+          echo "image_tag=${FULL_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Pushed: ${FULL_TAG}"
+
+      - name: Logout from GHCR
+        if: always()
+        run: docker logout ghcr.io || true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 5: report-status  (always() — runs regardless of prior gate outcomes)
+#   • Deletes stale validation comment, then posts fresh one via pr-status-comment.sh
+#   • Adds "validated" label on full pass; removes it on any failure
+# ─────────────────────────────────────────────────────────────────────────────
+  report-status:
+    name: "Gate 5 · Report Status"
+    runs-on: [self-hosted, macmini]
+    if: always()
+    needs: [validate-commits, lint-and-typecheck, test, build, push-image]
+    steps:
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          path: .ci-workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute overall result
+        id: overall
+        env:
+          VALIDATE_RESULT: ${{ needs.validate-commits.result }}
+          LINT_RESULT:     ${{ needs.lint-and-typecheck.result }}
+          TEST_RESULT:     ${{ needs.test.result }}
+          BUILD_RESULT:    ${{ needs.build.result }}
+          PUSH_RESULT:     ${{ needs.push-image.result }}
+          HAS_DOCKERFILE:  ${{ inputs.has_dockerfile }}
+          IMAGE_TAG:       ${{ needs.push-image.outputs.image_tag }}
+        run: |
+          icon() {
+            case "$1" in
+              success)   echo "✅" ;;
+              failure)   echo "❌" ;;
+              skipped)   echo "⏭️" ;;
+              cancelled) echo "🚫" ;;
+              *)         echo "⏸️" ;;
+            esac
+          }
+
+          OVERALL="success"
+          for R in "$VALIDATE_RESULT" "$LINT_RESULT" "$TEST_RESULT" "$BUILD_RESULT"; do
+            if [ "$R" = "failure" ] || [ "$R" = "cancelled" ]; then
+              OVERALL="failure"; break
+            fi
+          done
+          if [ "$HAS_DOCKERFILE" = "true" ] && \
+             { [ "$PUSH_RESULT" = "failure" ] || [ "$PUSH_RESULT" = "cancelled" ]; }; then
+            OVERALL="failure"
+          fi
+          echo "overall=$OVERALL" >> "$GITHUB_OUTPUT"
+
+          # Build the results table for CHECK_OUTPUT
+          PUSH_LINE="Push Image    $(icon "$PUSH_RESULT")  ${PUSH_RESULT}"
+          if [ "$HAS_DOCKERFILE" = "true" ] && [ "$PUSH_RESULT" = "success" ] && [ -n "$IMAGE_TAG" ]; then
+            PUSH_LINE="Push Image    $(icon "$PUSH_RESULT")  ${IMAGE_TAG}"
+          elif [ "$HAS_DOCKERFILE" != "true" ]; then
+            PUSH_LINE="Push Image    ⏭️  skipped (no Dockerfile)"
+          fi
+
+          CHECK_OUTPUT="Gate              Status    Details
+─────────────────────────────────────────────────────
+Validate Commits  $(icon "$VALIDATE_RESULT")  ${VALIDATE_RESULT}  (attribution + branch target)
+Lint & Typecheck  $(icon "$LINT_RESULT")  ${LINT_RESULT}  (language: ${{ inputs.language }})
+Tests             $(icon "$TEST_RESULT")  ${TEST_RESULT}  (language: ${{ inputs.language }})
+Build             $(icon "$BUILD_RESULT")  ${BUILD_RESULT}  (${{ inputs.build_command != '' && inputs.build_command || 'no build command' }})
+${PUSH_LINE}"
+
+          {
+            echo "CHECK_OUTPUT<<EOCHECK"
+            echo "$CHECK_OUTPUT"
+            echo "EOCHECK"
+          } >> "$GITHUB_ENV"
+
+      - name: Delete stale validation comment (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          # Find and delete any previous CI Validation Report comment from the bot
+          COMMENT_ID=$(gh api \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq '[.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("CI Validation Report"))] | last | .id // ""' \
+            2>/dev/null || echo "")
+          if [ -n "$COMMENT_ID" ]; then
+            echo "Deleting stale comment $COMMENT_ID"
+            gh api --method DELETE \
+              "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" || true
+          fi
+
+      - name: Post PR validation comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO:  ${{ github.repository }}
+          PR_NUMBER:    ${{ github.event.pull_request.number }}
+          CHECK_STATUS: ${{ steps.overall.outputs.overall == 'success' && 'pass' || 'fail' }}
+        run: |
+          chmod +x .ci-workflows/scripts/pr-status-comment.sh
+          .ci-workflows/scripts/pr-status-comment.sh
+
+      - name: Ensure "validated" label exists in repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          gh api "repos/${REPO}/labels" --jq '.[].name' 2>/dev/null | grep -q '^validated$' || \
+            gh api --method POST "repos/${REPO}/labels" \
+              -f name="validated" \
+              -f color="0e8a16" \
+              -f description="All PR validation gates passed" 2>/dev/null || true
+
+      - name: Add "validated" label on success
+        if: ${{ steps.overall.outputs.overall == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          echo "All gates passed — adding 'validated' label to PR #${PR_NUMBER}"
+          gh api \
+            --method POST \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/labels" \
+            -f labels[]="validated" 2>/dev/null || true
+
+      - name: Remove "validated" label on failure
+        if: ${{ steps.overall.outputs.overall != 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          echo "Gates failed — removing 'validated' label from PR #${PR_NUMBER} (if present)"
+          gh api \
+            --method DELETE \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/labels/validated" 2>/dev/null || true
