@@ -1,0 +1,127 @@
+name: Main Push Guard (Reusable)
+
+# Reusable workflow — called by thin caller workflows in consuming repos.
+# Runs on pushes to main/dev: type-check, tests, Docker build+push to GHCR.
+# This is the gate that produces the deployable artifact after merge.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'Project language (ts | js | go | python)'
+        required: false
+        type: string
+        default: 'ts'
+      image_name:
+        description: 'Docker image name (e.g. img-forge)'
+        required: true
+        type: string
+      dockerfile_path:
+        description: 'Path to the Dockerfile relative to repo root'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      node_version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '20'
+      runs_on:
+        description: 'Runner label(s) as a JSON array string'
+        required: false
+        type: string
+        default: '["self-hosted", "macmini"]'
+    secrets:
+      GHCR_PUSH_TOKEN:
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: qwickapps
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Test (type-check + unit tests)
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Node.js
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install pnpm
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check + build
+        if: inputs.language == 'ts'
+        run: pnpm build
+
+      - name: Run tests
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm test
+
+  # ---------------------------------------------------------------------------
+  # 2. Build and push Docker image (tagged with commit SHA)
+  # ---------------------------------------------------------------------------
+  build-push:
+    name: Build and Push Docker Image
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    needs: [test]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_CONFIG: /tmp/docker-config-${{ github.run_id }}
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA="${{ github.sha }}"
+          TAG="sha-${SHA:0:7}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ inputs.image_name }}:${TAG}"
+          echo "image_ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PUSH_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image_ref }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
