@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # attribution-check.sh
 # Checks all commits in a PR for AI co-authorship attribution patterns.
-# Exits with code 1 if any AI attribution is found.
+# Exits with code 1 if any AI attribution is found (unless ATTRIBUTION_MODE=warn).
 #
 # Usage:
 #   ./scripts/attribution-check.sh <base_sha> <head_sha>
 #
 # Environment variables:
-#   BASE_SHA   - Base commit SHA (default: $1)
-#   HEAD_SHA   - Head commit SHA (default: $2)
-#   PR_NUMBER  - Pull request number (optional, for reporting)
+#   BASE_SHA          - Base commit SHA (default: $1)
+#   HEAD_SHA          - Head commit SHA (default: $2)
+#   PR_NUMBER         - Pull request number (optional, for reporting)
+#   ATTRIBUTION_MODE  - "fail" (default) exit 1 on violation; "warn" log and exit 0
 #
 # Exit codes:
-#   0 - No AI attribution found
-#   1 - AI attribution detected
+#   0 - No AI attribution found (or ATTRIBUTION_MODE=warn)
+#   1 - AI attribution detected (only when ATTRIBUTION_MODE=fail)
 #   2 - Usage error
 
 set -euo pipefail
@@ -24,6 +25,7 @@ set -euo pipefail
 
 BASE_SHA="${BASE_SHA:-${1:-}}"
 HEAD_SHA="${HEAD_SHA:-${2:-}}"
+ATTRIBUTION_MODE="${ATTRIBUTION_MODE:-fail}"
 
 # Patterns to detect AI co-authorship in commit trailers
 AI_PATTERNS=(
@@ -120,16 +122,28 @@ log_info "Scanned ${CHECKED} commit(s)."
 
 if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
   echo ""
-  log_error "AI co-authorship attribution detected in ${#VIOLATIONS[@]} commit(s):"
-  echo ""
-  for v in "${VIOLATIONS[@]}"; do
-    echo -e "  ${RED}✗${NC}  ${v}"
-  done
-  echo ""
-  log_error "Commits containing AI co-authorship trailers are not permitted in PRs."
-  log_error "Please squash or reword the affected commits to remove the attribution."
-  echo ""
-  exit 1
+  if [[ "$ATTRIBUTION_MODE" == "warn" ]]; then
+    log_warn "AI co-authorship attribution detected in ${#VIOLATIONS[@]} commit(s) (warning only — ATTRIBUTION_MODE=warn):"
+    echo ""
+    for v in "${VIOLATIONS[@]}"; do
+      echo -e "  ${YELLOW}⚠${NC}  ${v}"
+    done
+    echo ""
+    log_warn "AI attribution recorded for traceability. No action required."
+    echo ""
+    exit 0
+  else
+    log_error "AI co-authorship attribution detected in ${#VIOLATIONS[@]} commit(s):"
+    echo ""
+    for v in "${VIOLATIONS[@]}"; do
+      echo -e "  ${RED}✗${NC}  ${v}"
+    done
+    echo ""
+    log_error "Commits containing AI co-authorship trailers are not permitted in PRs."
+    log_error "Please squash or reword the affected commits to remove the attribution."
+    echo ""
+    exit 1
+  fi
 fi
 
 log_info "No AI attribution found. All ${CHECKED} commit(s) are clean."
