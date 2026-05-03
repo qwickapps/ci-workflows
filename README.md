@@ -8,9 +8,9 @@ Shared CI workflow scripts for QwickApps repositories. Used as a **git submodule
 
 ```
 ci-workflows/
-└── scripts/
-    ├── attribution-check.sh    # Detects AI co-authorship in PR commits
-    └── pr-status-comment.sh    # Posts CI validation results as a PR comment
+`-- scripts/
+    |-- attribution-check.sh    # Detects AI co-authorship in PR commits
+    `-- pr-status-comment.sh    # Posts CI validation results as a PR comment
 ```
 
 ---
@@ -32,6 +32,29 @@ git commit -m "chore: update ci-workflows submodule"
 ---
 
 ## Scripts
+
+### `scripts/blue-green-workflow-guard.sh`
+
+Enforces ADR 56623128 for workflow changes. Any changed file matching
+`.github/workflows/*deploy*.yml` or `.github/workflows/*deploy*.yaml` must
+either call the canonical reusable deploy workflow:
+
+```yaml
+uses: qwickapps/ci-workflows/.github/workflows/deploy-app.yml@main
+```
+
+or include an explicit exemption with a reason:
+
+```yaml
+# blue-green-exempt: <reason>
+```
+
+This check is wired into `workflows/main-push-guard.yml` and can also be run
+locally:
+
+```bash
+./scripts/blue-green-workflow-guard.sh
+```
 
 ### `scripts/attribution-check.sh`
 
@@ -160,4 +183,96 @@ export CHECK_OUTPUT="$(./scripts/attribution-check.sh $BASE $HEAD 2>&1)"
 
 ## Reference
 
-- Design doc 37421058, section 4.5 — PR Pipeline architecture
+- Design doc 37421058, section 4.5 - PR Pipeline architecture
+- ADR doc-id 56623128 - Blue-Green (Build -> Live -> Stable) is the
+  mandatory deploy contract
+
+---
+
+## Blue-Green Deploy Contract
+
+Issue qwickapps/ci-workflows#7 publishes the canonical QwickApps deploy SOP.
+Product repositories should remove vendored deploy pipelines and call the
+central workflow from their caller workflow:
+
+```yaml
+jobs:
+  deploy:
+    uses: qwickapps/ci-workflows/.github/workflows/deploy-app.yml@main
+    secrets: inherit
+    with:
+      app_name: billing
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      dockerfile_path: Dockerfile
+      package_json_path: package.json
+      workspace_packages: ""
+      image_ref: ""
+      container_port: "3000"
+      health_path: /_health
+      caprover_host: ${{ needs.resolve-env.outputs.caprover_host }}
+      caprover_url: ""
+      public_url: ${{ needs.resolve-env.outputs.public_url }}
+      smoke_test_path: ""
+      smoke_test_command: ""
+```
+
+### `deploy-app.yml`
+
+Required inputs:
+
+| Input | Description |
+|---|---|
+| `app_name` | Lowercase product/app slug used for CapRover slot names. |
+| `environment` | `dev`, `uat`, or `prod`. |
+| `dockerfile_path` | Dockerfile path in the caller repository. |
+| `package_json_path` | `package.json` path used to derive the image version tag. |
+| `container_port` | Container port exposed through CapRover. |
+| `health_path` | Health endpoint. Must start with `/`. |
+| `caprover_host` | Hostname fallback when `caprover_url` and OCI URL secrets are absent. |
+| `public_url` | Public URL for the target environment. |
+
+Common optional inputs:
+
+| Input | Default | Description |
+|---|---:|---|
+| `workspace_packages` | `schema,logging,auth,react-framework,auth-client,cms,server` | Comma-separated workspace packages to build before Docker. Use `""` for standalone repos. |
+| `image_ref` | `""` | Prebuilt image ref. When set, the workflow skips its build job. |
+| `caprover_url` | `""` | Explicit CapRover URL; otherwise the workflow uses the OCI CapRover URL secret for the environment. |
+| `run_migrations` | `false` | Whether the traffic-light deploy runs migrations. |
+| `run_e2e` | `false` | Whether the traffic-light deploy runs E2E tests. |
+| `smoke_test_path` | `""` | HTTP path to check after build-slot health validation. |
+| `smoke_test_command` | `""` | Shell command run after health validation with `APP_URL`, `HEALTH_PATH`, `IMAGE_REF`, `APP_NAME`, and `ENVIRONMENT` exported. |
+| `critical_subsystems` | `postgres` | Comma-separated subsystem names that block deploy when unhealthy. |
+| `warning_subsystems` | `""` | Comma-separated non-blocking subsystem names. |
+| `prod_critical_subsystems` | `""` | Subsystems promoted from warning to critical outside `dev`. |
+| `cmd` | `""` | Optional container CMD override. Use `__clear__` to remove an existing override. |
+
+Required inherited secrets:
+
+| Secret | Used for |
+|---|---|
+| `OCI_DEV_CAPROVER_URL`, `OCI_DEV_CAPROVER_PASSWORD` | Dev CapRover deploys. |
+| `OCI_MAIN_CAPROVER_URL`, `OCI_MAIN_CAPROVER_PASSWORD` | UAT and prod CapRover deploys. |
+| `OCI_GATEWAY_CAPROVER_URL`, `OCI_GATEWAY_CAPROVER_PASSWORD` | QwickWay route updates. |
+| `GHCR_PUSH_TOKEN` | Building and pushing images when `image_ref` is not supplied. |
+| `GHCR_PULL_TOKEN` | Deploying images from GHCR. |
+
+### Manual Promotion
+
+Repository-local operator workflows can wrap the central promotion jobs:
+
+```yaml
+jobs:
+  promote:
+    uses: qwickapps/ci-workflows/.github/workflows/promote-to-live.yml@main
+    secrets: inherit
+    with:
+      app_name: billing
+      image_ref: ghcr.io/qwickapps/img-billing-prod:1.2.3
+      environment: prod
+      health_path: /_health
+```
+
+`promote-to-stable.yml` accepts the same `app_name`, `image_ref`,
+`environment`, `health_path`, `image_name`, and `caprover_url` inputs, then
+re-tags the promoted image as stable and deploys it to the stable slot.

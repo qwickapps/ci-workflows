@@ -84,9 +84,10 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check branch target (feature branches must target dev, not main)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          BASE_REF="${{ github.base_ref }}"
-          HEAD_REF="${{ github.head_ref }}"
           echo "PR: $HEAD_REF → $BASE_REF"
           if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" != "dev" ]; then
             echo "::error::Feature PRs must target 'dev', not 'main'. Only 'dev' can merge to 'main'. Please retarget your PR."
@@ -337,12 +338,12 @@ jobs:
           fi
 
           CHECK_OUTPUT="Gate              Status    Details
-─────────────────────────────────────────────────────
-Validate Commits  $(icon "$VALIDATE_RESULT")  ${VALIDATE_RESULT}  (attribution + branch target)
-Lint & Typecheck  $(icon "$LINT_RESULT")  ${LINT_RESULT}  (language: ${{ inputs.language }})
-Tests             $(icon "$TEST_RESULT")  ${TEST_RESULT}  (language: ${{ inputs.language }})
-Build             $(icon "$BUILD_RESULT")  ${BUILD_RESULT}  (${{ inputs.build_command != '' && inputs.build_command || 'no build command' }})
-${PUSH_LINE}"
+          -----------------------------------------------------
+          Validate Commits  $(icon "$VALIDATE_RESULT")  ${VALIDATE_RESULT}  (attribution + branch target)
+          Lint & Typecheck  $(icon "$LINT_RESULT")  ${LINT_RESULT}  (language: ${{ inputs.language }})
+          Tests             $(icon "$TEST_RESULT")  ${TEST_RESULT}  (language: ${{ inputs.language }})
+          Build             $(icon "$BUILD_RESULT")  ${BUILD_RESULT}  (${{ inputs.build_command != '' && inputs.build_command || 'no build command' }})
+          ${PUSH_LINE}"
 
           {
             echo "CHECK_OUTPUT<<EOCHECK"
