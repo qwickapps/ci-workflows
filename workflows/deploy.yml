@@ -28,6 +28,35 @@ name: Deploy (Reusable)
 # This workflow does NOT execute the deploy itself — the caller passes
 # the commands. The contract is "you wire up the commands; we enforce
 # the order, the evidence, and the audit shape."
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SECURITY: untrusted-input caveat — READ BEFORE INVOKING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# The contract accepts shell-command strings (test_command,
+# build_command, deploy_command, validate_command, preflight_command).
+# GitHub Actions interpolates `${{ inputs.X }}` BEFORE the runner shell
+# sees it — values flow into the run script as raw text. That means:
+#
+#   *  CALLERS MUST NOT pass attacker-controlled data as any *_command
+#      input. Specifically: never pass `${{ github.event.pull_request.body }}`,
+#      issue/comment text, branch names, or any field that an external
+#      contributor can write to. Treat the *_command inputs the same
+#      way you would treat a secret: the values must come from the
+#      caller workflow file (committed code) or from a trusted secret.
+#
+#   *  CALLERS MUST NOT invoke this workflow from `pull_request_target`
+#      against forks. That trigger runs with the base-repo's token and
+#      secrets while checking out the forked HEAD — combining it with
+#      command-string inputs is a remote-code-execution shape. Use
+#      `pull_request` (which runs in fork context, no secrets) or gate
+#      `pull_request_target` to label-trusted PRs only.
+#
+#   *  Required inputs are validated for non-empty in preflight; this
+#      is a contract guard, not a security control. Defense-in-depth
+#      lives at the caller (where the *_command values come from).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+permissions: read-all  # callers explicitly grant additional scopes
 
 on:
   workflow_call:
@@ -81,6 +110,18 @@ on:
         required: false
         type: string
         default: '{}'
+      evidence_script_path:
+        description: |
+          Path to deploy-evidence.sh, relative to the caller's repo root.
+          Defaults to autodiscovery (.ci-workflows/scripts/... then scripts/...).
+          Set explicitly when vendoring this repo under a non-default
+          submodule path, or use the canonical .ci-workflows submodule
+          path. A future release will also ship a composite-action form
+          (qwickapps/ci-workflows#TBD) so callers can drop the vendoring
+          requirement entirely.
+        required: false
+        type: string
+        default: ''
     outputs:
       commit:
         description: 'Git sha of the deployed change'
@@ -101,6 +142,11 @@ on:
         description: 'Image ref displaced by this deploy'
         value: ${{ jobs.preflight.outputs.rollback_target }}
     secrets:
+      # Callers that need additional secrets (e.g. deploy keys, tag
+      # signing tokens) should reference this workflow with
+      # `secrets: inherit` so the full secret context flows through.
+      # The explicit declaration here is a backstop for callers that
+      # pass an explicit `secrets:` mapping.
       GHCR_PUSH_TOKEN:
         required: false
 
@@ -291,22 +337,31 @@ jobs:
           IMAGE_DIGEST:  ${{ needs.build.outputs.image_digest }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           VALIDATION:    ${{ needs.validate.outputs.result }}
-          EXTRA_JSON:    ${{ inputs.evidence_extra_json }}
+          EXTRA_JSON:        ${{ inputs.evidence_extra_json }}
+          EXPLICIT_SCRIPT:   ${{ inputs.evidence_script_path }}
         run: |
-          chmod +x .ci-workflows/scripts/deploy-evidence.sh 2>/dev/null \
-            || chmod +x scripts/deploy-evidence.sh 2>/dev/null \
-            || true
-
-          # Resolve the script path: callers vendor this repo as
-          # .ci-workflows submodule; the script ships at
-          # .ci-workflows/scripts/deploy-evidence.sh. Direct-call
-          # consumers (this repo's own tests) use scripts/...
-          if [ -x .ci-workflows/scripts/deploy-evidence.sh ]; then
+          # Resolve the script path. Order:
+          #   1. caller-supplied evidence_script_path (the explicit
+          #      escape hatch for non-default vendoring layouts);
+          #   2. canonical submodule path (.ci-workflows/scripts/...);
+          #   3. direct-call layout (this repo's own tests).
+          # File is shipped 100755 on disk; chmod is unnecessary.
+          if [ -n "$EXPLICIT_SCRIPT" ]; then
+            if [ ! -x "$EXPLICIT_SCRIPT" ]; then
+              echo "::error::evidence_script_path='$EXPLICIT_SCRIPT' is not executable"
+              exit 2
+            fi
+            SCRIPT="$EXPLICIT_SCRIPT"
+          elif [ -x .ci-workflows/scripts/deploy-evidence.sh ]; then
             SCRIPT=".ci-workflows/scripts/deploy-evidence.sh"
           elif [ -x scripts/deploy-evidence.sh ]; then
             SCRIPT="scripts/deploy-evidence.sh"
           else
-            echo "::error::deploy-evidence.sh not found"
+            echo "::error::deploy-evidence.sh not found at any of:"
+            echo "  - \$evidence_script_path (input)"
+            echo "  - .ci-workflows/scripts/deploy-evidence.sh"
+            echo "  - scripts/deploy-evidence.sh"
+            echo "Set inputs.evidence_script_path to the path in your repo."
             exit 2
           fi
 

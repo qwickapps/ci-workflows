@@ -28,19 +28,23 @@ if [ ! -f "$DEPLOY_FILE" ]; then
   exit 2
 fi
 
-# We use python3 + the yaml stdlib (PyYAML, available on every
-# self-hosted runner via pip; falls back to a manual parse if not
-# installed) rather than yq to keep the runtime dependency surface
-# down to "python3, which we already need for everything else."
-if ! python3 -c "import yaml" >/dev/null 2>&1; then
-  echo "::error::PyYAML is required to validate the deploy contract; pip install PyYAML" >&2
-  exit 2
-fi
+# We use python3 + PyYAML rather than yq to keep the runtime
+# dependency surface down to "python3, which we already need for
+# everything else." The import is checked inside the heredoc so the
+# error message is the standard ImportError trace + a hint, not a
+# duplicate guard.
 
 # ── Drive the assertions in Python ───────────────────────────────────────
 python3 - "$DEPLOY_FILE" <<'PY'
 import sys
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.stderr.write(
+        "::error::PyYAML is required to validate the deploy contract; "
+        "install with `pip install PyYAML`\n"
+    )
+    sys.exit(2)
 
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as fh:
