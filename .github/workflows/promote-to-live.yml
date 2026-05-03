@@ -1,0 +1,233 @@
+# Reusable manual promote-to-live job for the QwickApps blue-green pipeline.
+
+name: Promote App to Live (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'App to promote'
+        required: true
+        type: string
+      image_ref:
+        description: |
+          Full GHCR image reference to deploy as live.
+          Examples:
+            ghcr.io/qwickapps/img-billing-dev@sha256:<digest>
+            ghcr.io/qwickapps/img-documents-prod:1.0.0.42
+        required: true
+        type: string
+      image_name:
+        description: 'Optional GHCR image name without ghcr.io/qwickapps/ prefix. Defaults to img-<app_name>-<environment>.'
+        required: false
+        type: string
+        default: ''
+      environment:
+        description: 'Target environment for live slot'
+        required: true
+        type: string
+      health_path:
+        description: 'Health path to validate on the live slot. Defaults to /_health.'
+        required: false
+        type: string
+        default: '/_health'
+      caprover_url:
+        description: 'Optional explicit CapRover URL. Defaults to the OCI_*_CAPROVER_URL secret for the selected environment.'
+        required: false
+        type: string
+        default: ''
+      live_url:
+        description: 'Optional explicit live slot URL. Defaults to the qwickforge live slot URL for the selected environment.'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      OCI_DEV_CAPROVER_URL:
+        required: false
+      OCI_DEV_CAPROVER_PASSWORD:
+        required: false
+      OCI_MAIN_CAPROVER_URL:
+        required: false
+      OCI_MAIN_CAPROVER_PASSWORD:
+        required: false
+      GHCR_PULL_TOKEN:
+        required: true
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+concurrency:
+  group: promote-live-${{ inputs.app_name }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  OWNER: qwickapps
+
+jobs:
+  promote-to-live:
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Validate inputs
+        run: |
+          IMAGE_REF="${{ inputs.image_ref }}"
+          APP="${{ inputs.app_name }}"
+          ENV="${{ inputs.environment }}"
+          IMAGE_NAME="${{ inputs.image_name }}"
+
+          if [ -z "$IMAGE_REF" ]; then
+            echo "ERROR: image_ref input is required."
+            exit 1
+          fi
+
+          case "$APP" in
+            *[!a-z0-9-]*|""|-*|*-) echo "ERROR: app_name must be a lowercase slug"; exit 1 ;;
+          esac
+          case "$ENV" in
+            dev|uat|prod) ;;
+            *)
+              echo "ERROR: unsupported environment: $ENV"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$IMAGE_NAME" ]; then
+            IMAGE_NAME="img-${APP}-${ENV}"
+          fi
+          if ! echo "$IMAGE_REF" | grep -Eq "^ghcr.io/qwickapps/${IMAGE_NAME}([:@])"; then
+            echo "ERROR: image_ref does not match app/environment."
+            echo "  Got: $IMAGE_REF"
+            echo "  Expected: ghcr.io/qwickapps/${IMAGE_NAME}:<tag>"
+            echo "        or: ghcr.io/qwickapps/${IMAGE_NAME}@sha256:<digest>"
+            exit 1
+          fi
+
+          HEALTH_PATH="${{ inputs.health_path }}"
+          case "$HEALTH_PATH" in
+            /*) ;;
+            *)
+              echo "ERROR: health_path must start with /"
+              exit 1
+              ;;
+          esac
+
+          echo "image_ref=${IMAGE_REF}"       >> "$GITHUB_ENV"
+          echo "APP_NAME=${APP}"              >> "$GITHUB_ENV"
+          echo "HEALTH_PATH=${HEALTH_PATH}"   >> "$GITHUB_ENV"
+
+      - name: Resolve CapRover credentials and slot names
+        run: |
+          ENV="${{ inputs.environment }}"
+          APP="${{ inputs.app_name }}"
+
+          case "$ENV" in
+            dev)
+              LIVE_APP="${APP}-live"
+              CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_DEV_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+              LIVE_APP_URL="https://${LIVE_APP}.dev.qwickforge.com"
+              ;;
+            prod)
+              LIVE_APP="${APP}-live"
+              CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
+              ;;
+            uat)
+              LIVE_APP="${APP}-uat"
+              CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
+              ;;
+          esac
+          if [ -n "${{ inputs.live_url }}" ]; then
+            LIVE_APP_URL="${{ inputs.live_url }}"
+          fi
+
+          if [ -z "$CAPROVER_URL" ] || [ -z "$CAPROVER_PASSWORD" ]; then
+            echo "ERROR: CapRover credentials not found for ${ENV}."
+            exit 1
+          fi
+
+          echo "::add-mask::$CAPROVER_PASSWORD"
+          echo "::add-mask::${{ secrets.GHCR_PULL_TOKEN }}"
+
+          echo "LIVE_APP=${LIVE_APP}"                   >> "$GITHUB_ENV"
+          echo "CAPROVER_URL=${CAPROVER_URL}"           >> "$GITHUB_ENV"
+          echo "CAPROVER_PASSWORD=${CAPROVER_PASSWORD}" >> "$GITHUB_ENV"
+          echo "LIVE_APP_URL=${LIVE_APP_URL}"           >> "$GITHUB_ENV"
+          echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}" >> "$GITHUB_ENV"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Promote build slot to live
+        run: |
+          chmod +x .github/scripts/*.sh
+          .github/scripts/swap-instances.sh \
+            --product "$APP_NAME" \
+            --environment "${{ inputs.environment }}" \
+            --direction promote \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --github-token "$GHCR_PULL_TOKEN" \
+            --github-owner "${{ env.OWNER }}" \
+            --build-image-ref "$image_ref"
+
+      - name: Validate live slot health
+        run: |
+          HEALTH_URL="${LIVE_APP_URL}${HEALTH_PATH}"
+          echo "Waiting for ${HEALTH_URL} to become healthy..."
+          MAX_ATTEMPTS=15
+          SLEEP_SEC=20
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1
+            rc=$?
+            echo "  Attempt ${attempt}/${MAX_ATTEMPTS}: curl exit ${rc}"
+            if [ $rc -eq 0 ]; then
+              echo "Health check passed."
+              exit 0
+            fi
+            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep "$SLEEP_SEC"
+          done
+          echo "ERROR: Health check failed after ${MAX_ATTEMPTS} attempts."
+          exit 1
+
+      - name: Notify via Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          STATUS="${{ job.status }}"
+          ENV="${{ inputs.environment }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="[OK]"
+            printf -v MSG '%s\n\n%s\n%s\n%s\n%s\n\n%s\n  app_name: %s\n  image_ref: %s' \
+              "${EMOJI} ${APP_NAME} promoted to LIVE (${ENV})" \
+              "Image: ${image_ref}" \
+              "Live URL: ${LIVE_APP_URL}" \
+              "Health: ${LIVE_APP_URL}${HEALTH_PATH}" \
+              "Run: ${RUN_URL}" \
+              "Next step - to promote to stable, run promote-to-stable.yml with:" \
+              "${APP_NAME}" \
+              "${image_ref}"
+          else
+            EMOJI="[FAIL]"
+            printf -v MSG '%s\n\n%s\n%s\n\n%s' \
+              "${EMOJI} ${APP_NAME} promote-to-live FAILED (${ENV})" \
+              "Image: ${image_ref}" \
+              "Run: ${RUN_URL}" \
+              "Check logs before re-attempting."
+          fi
+
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":$(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+              || echo "WARN: Telegram notification failed (non-fatal)"
+          else
+            echo "WARN: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set - skipping notification"
+          fi
