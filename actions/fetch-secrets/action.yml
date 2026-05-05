@@ -1,0 +1,42 @@
+name: Fetch QwickSecrets Deploy Secrets
+description: Fetch deploy-allowlisted QwickSecrets values into a local env file.
+
+inputs:
+  base-url:
+    description: QwickSecrets base URL.
+    required: false
+    default: https://qwicksecrets.dev.qwickforge.com
+  token:
+    description: Deploy read token from QWICKSECRETS_DEPLOY_READ_TOKEN.
+    required: true
+  project:
+    description: QwickApps project name.
+    required: true
+  env:
+    description: QwickApps environment name.
+    required: true
+  keys:
+    description: Comma-separated secret keys to fetch.
+    required: true
+  env-file:
+    description: Env file to append KEY=value lines to.
+    required: true
+
+outputs:
+  env-file:
+    description: Path to the env file that received fetched secrets.
+    value: ${{ inputs.env-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch deploy secrets
+      shell: bash
+      run: |
+        "${GITHUB_ACTION_PATH}/../../scripts/fetch-secrets.sh" \
+          --base-url "${{ inputs.base-url }}" \
+          --token "${{ inputs.token }}" \
+          --project "${{ inputs.project }}" \
+          --env "${{ inputs.env }}" \
+          --keys "${{ inputs.keys }}" \
+          --env-file "${{ inputs.env-file }}"

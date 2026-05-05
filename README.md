@@ -8,8 +8,11 @@ Shared CI workflow scripts for QwickApps repositories. Used as a **git submodule
 
 ```
 ci-workflows/
+├── actions/
+│   └── fetch-secrets/          # Composite action for deploy-time secret injection
 └── scripts/
     ├── attribution-check.sh    # Detects AI co-authorship in PR commits
+    ├── fetch-secrets.sh        # Fetches deploy-allowlisted QwickSecrets values
     └── pr-status-comment.sh    # Posts CI validation results as a PR comment
 ```
 
@@ -148,6 +151,29 @@ export CHECK_OUTPUT="$(./scripts/attribution-check.sh $BASE $HEAD 2>&1)"
     CHECK_STATUS: ${{ steps.attr_check.outputs.status }}
     CHECK_OUTPUT: ${{ steps.attr_check.outputs.output }}
 ```
+
+---
+
+### `actions/fetch-secrets`
+
+Fetches deploy-allowlisted QwickSecrets values into a caller-provided env file.
+The action masks every returned value and writes only `KEY=value` lines to the
+file. It expects the org-level secret `QWICKSECRETS_DEPLOY_READ_TOKEN`.
+
+```yaml
+- name: Fetch Tailscale auth key
+  uses: qwickapps/ci-workflows/actions/fetch-secrets@main
+  with:
+    base-url: https://qwicksecrets.dev.qwickforge.com
+    token: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+    project: memories
+    env: prod
+    keys: TS_AUTHKEY
+    env-file: /tmp/app-env-${{ github.run_id }}
+```
+
+The reusable contract workflow at `.github/workflows/fetch-secrets.yml` verifies
+health/auth/key existence without returning secret values across job boundaries.
 
 ---
 
