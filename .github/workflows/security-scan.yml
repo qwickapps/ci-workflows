@@ -1,0 +1,222 @@
+name: Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      go_version_file:
+        description: "Path to go.mod for actions/setup-go"
+        required: false
+        type: string
+        default: "go.mod"
+      runs_on:
+        description: "Runner label(s) as a JSON array string"
+        required: false
+        type: string
+        default: '["self-hosted", "linux"]'
+      semgrep_configs:
+        description: "Newline-delimited Semgrep config list"
+        required: false
+        type: string
+        default: |
+          p/golang
+          p/security-audit
+      semgrep_severity:
+        description: "Semgrep severity threshold for alerting"
+        required: false
+        type: string
+        default: "ERROR"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dependency-audit:
+    name: Dependency Audit (govulncheck)
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    outputs:
+      has_findings: ${{ steps.audit.outputs.has_findings }}
+      summary: ${{ steps.audit.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ inputs.go_version_file }}
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        id: audit
+        run: |
+          set +e
+          govulncheck -json ./... > vuln-report.json 2> govulncheck-error.log
+          EXIT=$?
+          set -e
+
+          # govulncheck -json emits newline-delimited JSON. Alerting is based
+          # only on parsed findings, not the scanner exit code.
+          VULNS=$(jq -s '[.[] | select(.finding != null) | .finding | select(.osv != null)] | length' vuln-report.json 2>/dev/null || echo 0)
+          echo "Vulnerabilities found: $VULNS"
+
+          if [ "$VULNS" -gt 0 ]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+            echo "summary=govulncheck: ${VULNS} vulnerabilities found in Go dependencies" >> "$GITHUB_OUTPUT"
+            jq -s -r '.[] | select(.finding != null) | .finding | select(.osv != null) | "  [\(.osv)] \(.trace[0].function // "unknown")"' vuln-report.json | head -20
+            exit 1
+          fi
+
+          echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          echo "summary=No Go dependency vulnerabilities found" >> "$GITHUB_OUTPUT"
+
+          if [ "$EXIT" -ne 0 ]; then
+            echo "::warning::govulncheck exited ${EXIT}, but no vulnerability findings were parsed. Suppressing security alert."
+            if [ -s govulncheck-error.log ]; then
+              echo "govulncheck stderr:"
+              head -30 govulncheck-error.log
+            fi
+          fi
+
+      - name: Upload vuln report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: govulncheck-report
+          path: |
+            vuln-report.json
+            govulncheck-error.log
+          retention-days: 14
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    outputs:
+      has_findings: ${{ steps.scan.outputs.has_findings }}
+      summary: ${{ steps.scan.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Semgrep
+        run: |
+          if ! python3 -m pip --version >/dev/null 2>&1; then
+            python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+          fi
+          if ! python3 -m pip --version >/dev/null 2>&1; then
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+            python3 /tmp/get-pip.py --user
+          fi
+          python3 -m pip install --upgrade pip --quiet
+          python3 -m pip install semgrep --quiet
+
+      - name: Run Semgrep SAST
+        id: scan
+        env:
+          SEMGREP_CONFIGS: ${{ inputs.semgrep_configs }}
+          SEMGREP_SEVERITY: ${{ inputs.semgrep_severity }}
+        run: |
+          CONFIG_ARGS=()
+          while IFS= read -r CONFIG; do
+            [ -n "$CONFIG" ] && CONFIG_ARGS+=(--config "$CONFIG")
+          done <<< "$SEMGREP_CONFIGS"
+
+          set +e
+          semgrep scan \
+            "${CONFIG_ARGS[@]}" \
+            --severity "$SEMGREP_SEVERITY" \
+            --json \
+            --output semgrep-report.json \
+            --no-rewrite-rule-ids \
+            . 2> semgrep-error.log
+          EXIT=$?
+          set -e
+
+          FINDINGS=$(jq '.results | length' semgrep-report.json 2>/dev/null || echo 0)
+          echo "SAST findings (${SEMGREP_SEVERITY} severity): $FINDINGS"
+
+          if [ "$FINDINGS" -gt 0 ]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+            echo "summary=SAST: ${FINDINGS} ${SEMGREP_SEVERITY}-severity findings" >> "$GITHUB_OUTPUT"
+            jq -r '.results[] | "  [\(.check_id)] \(.path):\(.start.line) - \(.extra.message)"' semgrep-report.json | head -20
+            exit 1
+          fi
+
+          echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          echo "summary=No ${SEMGREP_SEVERITY}-severity SAST findings" >> "$GITHUB_OUTPUT"
+
+          if [ "$EXIT" -ne 0 ]; then
+            echo "::warning::semgrep exited ${EXIT}, but no SAST findings were parsed. Suppressing security alert."
+            if [ -s semgrep-error.log ]; then
+              echo "semgrep stderr:"
+              head -30 semgrep-error.log
+            fi
+          fi
+
+      - name: Upload SAST report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-report
+          path: |
+            semgrep-report.json
+            semgrep-error.log
+          retention-days: 14
+
+  create-security-issue:
+    name: Create Security Issue (72h SLA)
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    needs: [dependency-audit, sast]
+    if: |
+      failure() &&
+      github.event_name != 'pull_request' &&
+      (needs.dependency-audit.outputs.has_findings == 'true' || needs.sast.outputs.has_findings == 'true')
+    permissions:
+      issues: write
+    steps:
+      - name: Ensure security labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create "security"      --color "d73a4a" --description "Security vulnerability"           --repo "$REPO" --force 2>/dev/null || true
+          gh label create "72h-sla"       --color "e4e669" --description "Must be resolved within 72 hours" --repo "$REPO" --force 2>/dev/null || true
+          gh label create "priority:high" --color "e11d48" --description "High priority issue"              --repo "$REPO" --force 2>/dev/null || true
+
+      - name: Create or update security issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+          AUDIT_SUMMARY: ${{ needs.dependency-audit.outputs.summary }}
+          SAST_SUMMARY: ${{ needs.sast.outputs.summary }}
+        run: |
+          EXISTING=$(gh issue list \
+            --repo "$REPO" \
+            --label "security,72h-sla" \
+            --state open \
+            --json number \
+            --jq 'length' 2>/dev/null || echo 0)
+
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            ISSUE_NUM=$(gh issue list \
+              --repo "$REPO" \
+              --label "security,72h-sla" \
+              --state open \
+              --json number \
+              --jq '.[0].number')
+            BODY="New confirmed findings on ${BRANCH} (${COMMIT:0:7}). Dependency audit: ${AUDIT_SUMMARY}. SAST: ${SAST_SUMMARY}. See ${RUN_URL}"
+            gh issue comment "$ISSUE_NUM" --repo "$REPO" --body "$BODY"
+            echo "Commented on existing issue #$ISSUE_NUM"
+          else
+            OPENED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            DEADLINE=$(date -u -d "+72 hours" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -v+72H +"%Y-%m-%dT%H:%M:%SZ")
+            BODY="Security Alert: Confirmed critical or high severity findings detected in CI. Repo: ${REPO}. Branch: ${BRANCH}. Commit: ${COMMIT:0:7}. Detected: ${OPENED}. SLA Deadline: ${DEADLINE} (72h). Findings - Dependency audit: ${AUDIT_SUMMARY}. SAST: ${SAST_SUMMARY}. Must resolve within 72h per L3 Gate 3.10. Update Go deps: go get -u <module>@<safe-version> and go mod tidy. For SAST findings: fix flagged code patterns. Re-run CI to confirm 0 vulnerabilities. Close issue with reference to fix PR. See ${RUN_URL}"
+            gh issue create \
+              --repo "$REPO" \
+              --title "[SECURITY] Critical/High findings detected - 72h SLA" \
+              --label "security,72h-sla,priority:high" \
+              --body "$BODY"
+            echo "Created new security issue"
+          fi

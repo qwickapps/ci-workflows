@@ -8,6 +8,8 @@ Shared CI workflow scripts for QwickApps repositories. Used as a **git submodule
 
 ```
 ci-workflows/
+├── .github/workflows/
+│   └── security-scan.yml       # Reusable govulncheck + Semgrep security scan
 └── scripts/
     ├── attribution-check.sh    # Detects AI co-authorship in PR commits
     └── pr-status-comment.sh    # Posts CI validation results as a PR comment
@@ -30,6 +32,37 @@ git commit -m "chore: update ci-workflows submodule"
 ```
 
 ---
+
+## Reusable Workflows
+
+### `.github/workflows/security-scan.yml`
+
+Runs govulncheck and Semgrep, then opens a 72-hour SLA security issue only when there are confirmed findings:
+
+- govulncheck alerts require parsed vulnerability findings greater than zero.
+- SAST alerts require parsed Semgrep findings greater than zero at the configured severity.
+- Scanner non-zero exits without parsed findings are logged as warnings and do not create security issues.
+
+#### Caller example
+
+```yaml
+name: Security Scan
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  security-scan:
+    uses: qwickapps/ci-workflows/.github/workflows/security-scan.yml@main
+```
 
 ## Scripts
 
