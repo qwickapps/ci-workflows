@@ -1,0 +1,392 @@
+name: Deploy (Reusable)
+
+# Reusable deploy workflow that enforces the qwickapps/ci-workflows#6
+# reliability validation contract:
+#
+#   preflight  →  tests  →  build  →  deploy  →  validate  →  evidence
+#                                                              ↓
+#                                                         (rollback hook)
+#
+# Calling repos cannot skip preflight, tests, validation, or evidence
+# upload — each downstream job declares the upstream as `needs`, so
+# disabling any single step breaks the chain at workflow_call time.
+# This is the defense-in-depth lever for the parent epic
+# (raajkumars/qwickguard#54): every deploy that uses this contract
+# produces a tamper-evident audit record (the evidence artifact)
+# regardless of whether the caller wired up its own checks.
+#
+# Standardized outputs (per the issue AC):
+#   commit            — git sha of the deployed change
+#   image_digest      — sha256 digest of the built image
+#   target            — environment / instance the deploy aimed at
+#   actor             — github.actor at deploy time
+#   validation_result — pass | fail | skipped (skipped only when the
+#                       caller passed validate_command='')
+#   rollback_target   — image ref that the deploy displaces (empty
+#                       on first deploy)
+#
+# This workflow does NOT execute the deploy itself — the caller passes
+# the commands. The contract is "you wire up the commands; we enforce
+# the order, the evidence, and the audit shape."
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SECURITY: untrusted-input caveat — READ BEFORE INVOKING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# The contract accepts shell-command strings (test_command,
+# build_command, deploy_command, validate_command, preflight_command).
+# GitHub Actions interpolates `${{ inputs.X }}` BEFORE the runner shell
+# sees it — values flow into the run script as raw text. That means:
+#
+#   *  CALLERS MUST NOT pass attacker-controlled data as any *_command
+#      input. Specifically: never pass `${{ github.event.pull_request.body }}`,
+#      issue/comment text, branch names, or any field that an external
+#      contributor can write to. Treat the *_command inputs the same
+#      way you would treat a secret: the values must come from the
+#      caller workflow file (committed code) or from a trusted secret.
+#
+#   *  CALLERS MUST NOT invoke this workflow from `pull_request_target`
+#      against forks. That trigger runs with the base-repo's token and
+#      secrets while checking out the forked HEAD — combining it with
+#      command-string inputs is a remote-code-execution shape. Use
+#      `pull_request` (which runs in fork context, no secrets) or gate
+#      `pull_request_target` to label-trusted PRs only.
+#
+#   *  Required inputs are validated for non-empty in preflight; this
+#      is a contract guard, not a security control. Defense-in-depth
+#      lives at the caller (where the *_command values come from).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+permissions: read-all  # callers explicitly grant additional scopes
+
+on:
+  workflow_call:
+    inputs:
+      target_environment:
+        description: 'Environment label the deploy aims at (dev | uat | prod)'
+        required: true
+        type: string
+      runner_labels:
+        description: 'Runner label(s) as a JSON array string'
+        required: false
+        type: string
+        default: '["self-hosted", "linux"]'
+      image_name:
+        description: 'Image name (e.g. img-forge). Required for evidence.'
+        required: true
+        type: string
+      image_ref:
+        description: 'Full image ref to be deployed (e.g. ghcr.io/qwickapps/img-forge:1.2.3)'
+        required: true
+        type: string
+      rollback_target:
+        description: 'Image ref to roll back to if validation fails. Empty on first deploy.'
+        required: false
+        type: string
+        default: ''
+      preflight_command:
+        description: 'Preflight check (returns non-zero to abort). Empty defaults to "true".'
+        required: false
+        type: string
+        default: 'true'
+      test_command:
+        description: 'Test command. REQUIRED — empty rejects.'
+        required: true
+        type: string
+      build_command:
+        description: 'Build + publish command. REQUIRED — empty rejects.'
+        required: true
+        type: string
+      deploy_command:
+        description: 'Deploy command. REQUIRED — empty rejects.'
+        required: true
+        type: string
+      validate_command:
+        description: 'Post-deploy validation command. Empty marks validation_result=skipped (allowed for non-prod environments only).'
+        required: false
+        type: string
+        default: ''
+      evidence_extra_json:
+        description: 'Optional JSON object merged into the evidence record under .caller_metadata'
+        required: false
+        type: string
+        default: '{}'
+      evidence_script_path:
+        description: |
+          Path to deploy-evidence.sh, relative to the caller's repo root.
+          Defaults to autodiscovery (.ci-workflows/scripts/... then scripts/...).
+          Set explicitly when vendoring this repo under a non-default
+          submodule path, or use the canonical .ci-workflows submodule
+          path. A future release will also ship a composite-action form
+          (qwickapps/ci-workflows#TBD) so callers can drop the vendoring
+          requirement entirely.
+        required: false
+        type: string
+        default: ''
+    outputs:
+      commit:
+        description: 'Git sha of the deployed change'
+        value: ${{ jobs.preflight.outputs.commit }}
+      image_digest:
+        description: 'Sha256 digest of the built image'
+        value: ${{ jobs.build.outputs.image_digest }}
+      target:
+        description: 'Target environment label'
+        value: ${{ jobs.preflight.outputs.target }}
+      actor:
+        description: 'github.actor at deploy time'
+        value: ${{ jobs.preflight.outputs.actor }}
+      validation_result:
+        description: 'pass | fail | skipped'
+        value: ${{ jobs.validate.outputs.result }}
+      rollback_target:
+        description: 'Image ref displaced by this deploy'
+        value: ${{ jobs.preflight.outputs.rollback_target }}
+    secrets:
+      # Callers that need additional secrets (e.g. deploy keys, tag
+      # signing tokens) should reference this workflow with
+      # `secrets: inherit` so the full secret context flows through.
+      # The explicit declaration here is a backstop for callers that
+      # pass an explicit `secrets:` mapping.
+      GHCR_PUSH_TOKEN:
+        required: false
+
+jobs:
+  # 1. Preflight — input validation + actor/commit capture
+  preflight:
+    name: Preflight
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    outputs:
+      commit:           ${{ steps.snapshot.outputs.commit }}
+      target:           ${{ steps.snapshot.outputs.target }}
+      actor:            ${{ steps.snapshot.outputs.actor }}
+      rollback_target:  ${{ steps.snapshot.outputs.rollback_target }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required inputs
+        run: |
+          # Required commands MUST be non-empty. Empty values defeat
+          # the contract — they would let a caller disable a gate by
+          # passing "". Reject explicitly.
+          if [ -z "${{ inputs.test_command }}" ]; then
+            echo "::error::test_command is required and must not be empty"
+            exit 2
+          fi
+          if [ -z "${{ inputs.build_command }}" ]; then
+            echo "::error::build_command is required and must not be empty"
+            exit 2
+          fi
+          if [ -z "${{ inputs.deploy_command }}" ]; then
+            echo "::error::deploy_command is required and must not be empty"
+            exit 2
+          fi
+
+          # Production deploys must validate post-deploy. Skipping
+          # validation in prod would defeat the AC ("validation
+          # cannot be skipped").
+          if [ "${{ inputs.target_environment }}" = "prod" ] && [ -z "${{ inputs.validate_command }}" ]; then
+            echo "::error::validate_command is required for target_environment=prod"
+            exit 2
+          fi
+
+      - name: Snapshot deploy context
+        id: snapshot
+        run: |
+          {
+            echo "commit=${{ github.sha }}"
+            echo "target=${{ inputs.target_environment }}"
+            echo "actor=${{ github.actor }}"
+            echo "rollback_target=${{ inputs.rollback_target }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run preflight command
+        run: |
+          set -e
+          ${{ inputs.preflight_command }}
+
+  # 2. Tests — the only "skip" path is "tests pass". A failing test
+  # halts the chain because deploy `needs: tests`.
+  tests:
+    name: Tests
+    needs: preflight
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run test command
+        run: |
+          set -e
+          ${{ inputs.test_command }}
+
+  # 3. Build + publish — produces the image_digest output downstream
+  # jobs (deploy + evidence) need.
+  build:
+    name: Build + Publish
+    needs: tests
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    outputs:
+      image_digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run build command
+        run: |
+          set -e
+          ${{ inputs.build_command }}
+
+      - name: Capture image digest
+        id: digest
+        run: |
+          # The caller's build_command is expected to either:
+          #   (a) push the image and write its digest to
+          #       $GITHUB_ENV as IMAGE_DIGEST, OR
+          #   (b) write the digest to ./image-digest.txt
+          # We accept either so the caller's existing build pipelines
+          # don't need to change shape to adopt this contract.
+          digest=""
+          if [ -n "${IMAGE_DIGEST:-}" ]; then
+            digest="$IMAGE_DIGEST"
+          elif [ -f ./image-digest.txt ]; then
+            digest="$(tr -d '[:space:]' < ./image-digest.txt)"
+          fi
+          if [ -z "$digest" ]; then
+            echo "::warning::no image digest captured; the evidence record will record the image_ref instead"
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  # 4. Deploy — runs the caller's deploy command against the build's
+  # image. Evidence captures the rollback_target BEFORE this runs.
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run deploy command
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          TARGET_ENV: ${{ inputs.target_environment }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+        run: |
+          set -e
+          ${{ inputs.deploy_command }}
+
+  # 5. Validate — post-deploy health/contract check. Empty for non-prod
+  # marks validation_result=skipped; prod requires non-empty per
+  # preflight.
+  validate:
+    name: Validate
+    needs: deploy
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    outputs:
+      result: ${{ steps.run.outputs.result }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run validate command
+        id: run
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          TARGET_ENV: ${{ inputs.target_environment }}
+        run: |
+          if [ -z "${{ inputs.validate_command }}" ]; then
+            echo "::notice::validate_command empty; marking validation_result=skipped"
+            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          ${{ inputs.validate_command }}
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+            echo "::error::validate_command failed (rc=$rc); evidence job will mark this deploy as failed"
+            exit "$rc"
+          fi
+
+  # 6. Evidence — emit the rollback evidence JSON + upload as an
+  # artifact. This is the audit record that satisfies the AC. Runs
+  # `if: always()` so a failed validate step still produces evidence
+  # (the evidence carries `validation_result: fail` in that case so
+  # the audit pipeline knows the deploy did not succeed).
+  evidence:
+    name: Emit Evidence
+    needs: [preflight, build, deploy, validate]
+    if: always() && needs.preflight.result == 'success'
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build evidence record
+        id: emit
+        env:
+          COMMIT:        ${{ needs.preflight.outputs.commit }}
+          TARGET:        ${{ needs.preflight.outputs.target }}
+          ACTOR:         ${{ needs.preflight.outputs.actor }}
+          ROLLBACK_TGT:  ${{ needs.preflight.outputs.rollback_target }}
+          IMAGE_REF:     ${{ inputs.image_ref }}
+          IMAGE_DIGEST:  ${{ needs.build.outputs.image_digest }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          VALIDATION:    ${{ needs.validate.outputs.result }}
+          EXTRA_JSON:        ${{ inputs.evidence_extra_json }}
+          EXPLICIT_SCRIPT:   ${{ inputs.evidence_script_path }}
+        run: |
+          # Resolve the script path. Order:
+          #   1. caller-supplied evidence_script_path (the explicit
+          #      escape hatch for non-default vendoring layouts);
+          #   2. canonical submodule path (.ci-workflows/scripts/...);
+          #   3. direct-call layout (this repo's own tests).
+          # File is shipped 100755 on disk; chmod is unnecessary.
+          if [ -n "$EXPLICIT_SCRIPT" ]; then
+            if [ ! -x "$EXPLICIT_SCRIPT" ]; then
+              echo "::error::evidence_script_path='$EXPLICIT_SCRIPT' is not executable"
+              exit 2
+            fi
+            SCRIPT="$EXPLICIT_SCRIPT"
+          elif [ -x .ci-workflows/scripts/deploy-evidence.sh ]; then
+            SCRIPT=".ci-workflows/scripts/deploy-evidence.sh"
+          elif [ -x scripts/deploy-evidence.sh ]; then
+            SCRIPT="scripts/deploy-evidence.sh"
+          else
+            echo "::error::deploy-evidence.sh not found at any of:"
+            echo "  - \$evidence_script_path (input)"
+            echo "  - .ci-workflows/scripts/deploy-evidence.sh"
+            echo "  - scripts/deploy-evidence.sh"
+            echo "Set inputs.evidence_script_path to the path in your repo."
+            exit 2
+          fi
+
+          mkdir -p evidence
+          OUT="evidence/deploy-evidence-${{ github.run_id }}.json"
+          "$SCRIPT" \
+            --commit          "$COMMIT" \
+            --target          "$TARGET" \
+            --actor           "$ACTOR" \
+            --image-ref       "$IMAGE_REF" \
+            --image-digest    "$IMAGE_DIGEST" \
+            --rollback-target "$ROLLBACK_TGT" \
+            --deploy-result   "$DEPLOY_RESULT" \
+            --validation      "${VALIDATION:-skipped}" \
+            --extra-json      "$EXTRA_JSON" \
+            > "$OUT"
+
+          # Echo to stdout for the workflow log + summary.
+          jq . "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-evidence-${{ github.run_id }}
+          path: ${{ steps.emit.outputs.path }}
+          retention-days: 90
+          if-no-files-found: error
