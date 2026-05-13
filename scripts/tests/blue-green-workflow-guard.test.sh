@@ -73,3 +73,5 @@ cat > docs/deploy.yml <<'YAML'
 not: a workflow
 YAML
 assert_pass "ignores deploy files outside workflow directory" "$SCRIPT" docs/deploy.yml
+
+# re-trigger CI
