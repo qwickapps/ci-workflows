@@ -38,9 +38,14 @@ on:
         required: true
 
       package_json_path:
-        description: 'Path to package.json for version extraction (e.g. clients/faabzi/package.json)'
+        description: 'Path to package.json for version extraction (e.g. clients/faabzi/package.json). Not required when dockerfile_only is true.'
         type: string
-        required: true
+        default: ''
+
+      dockerfile_only:
+        description: 'Set to "true" for Dockerfile-only builds with no Node project. Skips corepack/pnpm setup, dependency install, and version extraction from package.json. Image tag uses 0.0.0.<run_number>.'
+        type: string
+        default: 'false'
 
       workspace_packages:
         description: 'Comma-separated workspace packages to build before docker build'
@@ -153,7 +158,11 @@ jobs:
       - name: Generate image metadata
         id: meta
         run: |
-          VERSION=$(node -p "require('./${{ inputs.package_json_path }}').version")
+          if [ "${{ inputs.dockerfile_only }}" = "true" ]; then
+            VERSION="0.0.0"
+          else
+            VERSION=$(node -p "require('./${{ inputs.package_json_path }}').version")
+          fi
           TAG="${VERSION}.${{ github.run_number }}"
           ENV="${{ inputs.environment }}"
           APP="${{ inputs.app_name }}"
@@ -241,12 +250,14 @@ jobs:
           node-version: '20'
 
       - name: Setup pnpm
+        if: inputs.dockerfile_only != 'true'
         run: |
           corepack enable
           corepack install
           pnpm --version
 
       - name: Install dependencies
+        if: inputs.dockerfile_only != 'true'
         run: pnpm install --no-frozen-lockfile --store-dir .pnpm-store
 
       # Standalone repos pass workspace_packages='' to skip the monorepo-only build step.
