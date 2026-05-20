@@ -1,0 +1,381 @@
+# Reusable config-apply workflow: diff-gate + rollback-capable env var sync.
+#
+# Resolves the authoritative env var set from the secrets service, compares it
+# to the live CapRover app definition, and optionally applies the diff.
+# If confirm_apply=false (default) the workflow runs as a dry-run and exits 0
+# after printing the diff — useful for scheduled drift detection.
+#
+# Rollback: if the health check after apply fails, the workflow restores the
+# live config snapshot captured before apply and exits non-zero.
+#
+# Closes qwickapps/ci-workflows#16
+
+# blue-green-exempt: operational config management workflow — does not deploy images
+
+name: Config Apply (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'CapRover app name (e.g. qwickapps-projects-main)'
+        type: string
+        required: true
+      slot:
+        description: 'Deployment slot: main (CapRover on oci-main) or backup (Coolify on macmini)'
+        type: string
+        required: true
+      health_path:
+        description: 'Health check path (must start with /)'
+        type: string
+        default: '/health'
+      confirm_apply:
+        description: 'false = dry-run diff only; true = apply authoritative config and health-check'
+        type: boolean
+        required: true
+    secrets:
+      OCI_MAIN_CAPROVER_URL:
+        required: false
+      OCI_MAIN_CAPROVER_PASSWORD:
+        required: false
+      COOLIFY_BASE_URL:
+        required: false
+      COOLIFY_TOKEN:
+        required: false
+      SECRETS_SERVICE_URL:
+        required: true
+      SECRETS_SERVICE_KEY:
+        required: true
+
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'CapRover app name (e.g. qwickapps-projects-main)'
+        type: string
+        required: true
+      slot:
+        description: 'Deployment slot: main or backup'
+        type: choice
+        required: true
+        options:
+          - main
+          - backup
+      health_path:
+        description: 'Health check path (must start with /)'
+        type: string
+        default: '/health'
+      confirm_apply:
+        description: 'Set to true to apply the config. false = dry-run only.'
+        type: boolean
+        required: true
+        default: false
+
+jobs:
+  config-apply:
+    name: Config Apply (${{ inputs.app_name }})
+    runs-on: [self-hosted, macmini]
+    concurrency:
+      group: config-apply-${{ inputs.app_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Validate inputs
+        run: |
+          APP="${{ inputs.app_name }}"
+          SLOT="${{ inputs.slot }}"
+          HEALTH="${{ inputs.health_path }}"
+
+          if [[ -z "$APP" ]]; then
+            echo "::error::app_name is required"
+            exit 1
+          fi
+          case "$SLOT" in
+            main|backup) ;;
+            *)
+              echo "::error::slot must be 'main' or 'backup', got: $SLOT"
+              exit 1
+              ;;
+          esac
+          case "$HEALTH" in
+            /*) ;;
+            *)
+              echo "::error::health_path must start with /"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Make scripts executable
+        run: chmod +x .ci-workflows/scripts/*.sh .ci-workflows/scripts/lib/*.sh
+
+      - name: Resolve CapRover / Coolify credentials
+        run: |
+          SLOT="${{ inputs.slot }}"
+
+          case "$SLOT" in
+            main)
+              CAPROVER_URL="${{ secrets.OCI_MAIN_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+
+              if [[ -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+                echo "::error::OCI_MAIN_CAPROVER_URL and OCI_MAIN_CAPROVER_PASSWORD are required for slot=main"
+                exit 1
+              fi
+              ;;
+            backup)
+              # Coolify on macmini uses its own API but exposes a compatible
+              # env-var interface. COOLIFY_BASE_URL and COOLIFY_TOKEN map to the
+              # same CAPROVER_URL / CAPROVER_PASSWORD env vars used by scripts.
+              CAPROVER_URL="${{ secrets.COOLIFY_BASE_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.COOLIFY_TOKEN }}"
+
+              if [[ -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+                echo "::error::COOLIFY_BASE_URL and COOLIFY_TOKEN are required for slot=backup"
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "::add-mask::$CAPROVER_PASSWORD"
+          {
+            echo "CAPROVER_URL=$CAPROVER_URL"
+            echo "CAPROVER_PASSWORD=$CAPROVER_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve authoritative config from secrets service
+        env:
+          SECRETS_SERVICE_URL: ${{ secrets.SECRETS_SERVICE_URL }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+        run: |
+          APP="${{ inputs.app_name }}"
+          echo "::add-mask::$SECRETS_SERVICE_KEY"
+
+          # The secrets service API returns a JSON object of key -> value.
+          # Endpoint: GET /v1/secrets/<app-slug>
+          # Authorization: Bearer <key>
+          echo "Fetching authoritative config for ${APP} from secrets service..."
+          response=$(curl -sf \
+            -H "Authorization: Bearer ${SECRETS_SERVICE_KEY}" \
+            "${SECRETS_SERVICE_URL}/v1/secrets/${APP}" 2>/dev/null) || {
+            echo "::error::Failed to reach secrets service at ${SECRETS_SERVICE_URL}/v1/secrets/${APP}"
+            exit 1
+          }
+
+          if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+            echo "::error::Secrets service returned non-JSON response"
+            exit 1
+          fi
+
+          key_count=$(echo "$response" | jq 'length')
+          echo "Resolved ${key_count} authoritative key(s) for ${APP}"
+
+          # Mask all secret values before writing them to any file or log.
+          while IFS='=' read -r key value; do
+            [[ -z "$key" ]] && continue
+            [[ -n "$value" ]] && echo "::add-mask::${value}"
+          done < <(echo "$response" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+
+          # Write as sorted KEY=VALUE file.
+          echo "$response" | jq -r 'to_entries | sort_by(.key)[] | "\(.key)=\(.value)"' \
+            > authoritative.env
+
+          echo "AUTHORITATIVE_KEY_COUNT=${key_count}" >> "$GITHUB_ENV"
+
+      - name: Read live config from CapRover
+        run: |
+          APP="${{ inputs.app_name }}"
+
+          echo "Dumping live env vars for ${APP}..."
+          .ci-workflows/scripts/caprover-slot-admin.sh env-dump \
+            --app-name "$APP" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            > live.env
+
+          live_count=$(grep -c '.' live.env || true)
+          echo "Live config has ${live_count} key(s)"
+          echo "LIVE_KEY_COUNT=${live_count}" >> "$GITHUB_ENV"
+
+      - name: Diff authoritative vs live
+        id: diff
+        run: |
+          diff authoritative.env live.env > drift.diff || true
+
+          if [[ ! -s drift.diff ]]; then
+            echo "No drift detected — authoritative config matches live config."
+            echo "HAS_DRIFT=false" >> "$GITHUB_ENV"
+          else
+            line_count=$(wc -l < drift.diff | tr -d ' ')
+            echo "Drift detected: ${line_count} changed line(s)"
+            echo "HAS_DRIFT=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Show diff
+        run: |
+          if [[ "${HAS_DRIFT}" == "true" ]]; then
+            echo "=== Config Drift ==="
+            echo "Lines prefixed with < are in authoritative but differ from live."
+            echo "Lines prefixed with > are in live but not in authoritative."
+            echo ""
+            cat drift.diff
+          else
+            echo "No drift — authoritative and live configs are identical."
+          fi
+
+      - name: Gate on dry-run
+        run: |
+          if [[ "${{ inputs.confirm_apply }}" != "true" ]]; then
+            echo ""
+            echo "Dry-run complete — no changes applied."
+            echo "To apply, re-run with confirm_apply=true."
+            exit 0
+          fi
+          if [[ "${HAS_DRIFT}" != "true" ]]; then
+            echo "No drift detected — nothing to apply."
+            exit 0
+          fi
+          echo "confirm_apply=true and drift detected — proceeding with apply."
+
+      - name: Apply authoritative config
+        if: inputs.confirm_apply == true && env.HAS_DRIFT == 'true'
+        run: |
+          APP="${{ inputs.app_name }}"
+          echo "Applying authoritative config to ${APP}..."
+
+          # configure-caprover-app.sh does a full read-then-write of the app
+          # definition to preserve all other settings (volumes, ports, CMD
+          # overrides, SSL, etc.) while replacing only the env var set.
+          #
+          # The script must be available. For workflow_call callers that vendor
+          # .github/scripts/, it is sourced from there. For standalone
+          # workflow_dispatch, the caller must ensure the script is present.
+          CONFIGURE_SCRIPT=""
+          if [[ -f ".github/scripts/configure-caprover-app.sh" ]]; then
+            CONFIGURE_SCRIPT=".github/scripts/configure-caprover-app.sh"
+          elif [[ -f ".ci-workflows/scripts/configure-caprover-app.sh" ]]; then
+            CONFIGURE_SCRIPT=".ci-workflows/scripts/configure-caprover-app.sh"
+          else
+            echo "::error::configure-caprover-app.sh not found at .github/scripts/ or .ci-workflows/scripts/"
+            echo "Callers must vendor this script or call from a repo that does."
+            exit 1
+          fi
+          chmod +x "$CONFIGURE_SCRIPT"
+
+          "$CONFIGURE_SCRIPT" \
+            --app-name         "$APP" \
+            --caprover-url     "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --env-file         authoritative.env
+
+          echo "Config applied."
+
+      - name: Health check after apply
+        if: inputs.confirm_apply == true && env.HAS_DRIFT == 'true'
+        id: health
+        run: |
+          APP="${{ inputs.app_name }}"
+          HEALTH_PATH="${{ inputs.health_path }}"
+          SLOT="${{ inputs.slot }}"
+
+          # Derive the app URL from slot and app name.
+          case "$SLOT" in
+            main)
+              APP_URL="https://${APP}.app.qwickforge.com"
+              ;;
+            backup)
+              # Coolify backup service URL follows macmini naming convention.
+              APP_URL="https://${APP}.macmini.qwickforge.com"
+              ;;
+          esac
+
+          HEALTH_SCRIPT=""
+          if [[ -f ".github/scripts/validate-deployment-health.sh" ]]; then
+            HEALTH_SCRIPT=".github/scripts/validate-deployment-health.sh"
+          elif [[ -f ".ci-workflows/scripts/validate-deployment-health.sh" ]]; then
+            HEALTH_SCRIPT=".ci-workflows/scripts/validate-deployment-health.sh"
+          else
+            echo "::error::validate-deployment-health.sh not found"
+            exit 1
+          fi
+          chmod +x "$HEALTH_SCRIPT"
+
+          "$HEALTH_SCRIPT" \
+            --app-name         "$APP" \
+            --caprover-url     "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --app-url          "$APP_URL" \
+            --health-path      "$HEALTH_PATH" \
+            --max-attempts     15 \
+            --sleep            20
+
+      - name: Rollback on health check failure
+        if: inputs.confirm_apply == true && env.HAS_DRIFT == 'true' && failure() && steps.health.conclusion == 'failure'
+        run: |
+          APP="${{ inputs.app_name }}"
+          echo "Health check failed — rolling back ${APP} to pre-apply config..."
+
+          CONFIGURE_SCRIPT=""
+          if [[ -f ".github/scripts/configure-caprover-app.sh" ]]; then
+            CONFIGURE_SCRIPT=".github/scripts/configure-caprover-app.sh"
+          elif [[ -f ".ci-workflows/scripts/configure-caprover-app.sh" ]]; then
+            CONFIGURE_SCRIPT=".ci-workflows/scripts/configure-caprover-app.sh"
+          fi
+
+          if [[ -n "$CONFIGURE_SCRIPT" ]]; then
+            "$CONFIGURE_SCRIPT" \
+              --app-name         "$APP" \
+              --caprover-url     "$CAPROVER_URL" \
+              --caprover-password "$CAPROVER_PASSWORD" \
+              --env-file         live.env
+            echo "Rollback complete — restored pre-apply config."
+          else
+            echo "::error::Cannot rollback: configure-caprover-app.sh not found."
+          fi
+          exit 1
+
+      - name: Write job summary
+        if: always()
+        run: |
+          APP="${{ inputs.app_name }}"
+          SLOT="${{ inputs.slot }}"
+          CONFIRM="${{ inputs.confirm_apply }}"
+          DRIFT="${HAS_DRIFT:-unknown}"
+          AUTH_COUNT="${AUTHORITATIVE_KEY_COUNT:-0}"
+          LIVE_COUNT="${LIVE_KEY_COUNT:-0}"
+
+          {
+            echo "## Config Apply: ${APP}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| App | \`${APP}\` |"
+            echo "| Slot | \`${SLOT}\` |"
+            echo "| Confirm Apply | \`${CONFIRM}\` |"
+            echo "| Drift Detected | \`${DRIFT}\` |"
+            echo "| Authoritative Keys | ${AUTH_COUNT} |"
+            echo "| Live Keys Before Apply | ${LIVE_COUNT} |"
+            echo ""
+            if [[ "$DRIFT" == "true" ]]; then
+              echo "### Drift"
+              echo '```diff'
+              cat drift.diff 2>/dev/null || echo "(diff file unavailable)"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload drift artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-drift-${{ inputs.app_name }}-${{ github.run_id }}
+          path: drift.diff
+          retention-days: 30
+          if-no-files-found: warn
