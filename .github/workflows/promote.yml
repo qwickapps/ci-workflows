@@ -1,0 +1,281 @@
+# Reusable promote workflow: deploy an image to a slot with health-check and rollback.
+#
+# Consolidates the promote-to-stable / promote-to-live logic into a single
+# reusable primitive. Callers pass the image ref and target slot; this workflow
+# handles configure, deploy, health-check, and rollback.
+#
+# Rollback: if the health check fails, the workflow redeploys the previous image
+# read from the target slot before deploy, then exits non-zero.
+#
+# Closes qwickapps/ci-workflows#18
+
+# blue-green-exempt: operational promote workflow — wraps image promotion logic
+
+name: Promote App (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'CapRover app slug (e.g. qwickapps-mcp)'
+        type: string
+        required: true
+      image_ref:
+        description: 'Full GHCR image reference to deploy (e.g. ghcr.io/qwickapps/img-mcp-dev:1.0.0.42)'
+        type: string
+        required: true
+      slot:
+        description: 'Target slot: main or backup'
+        type: string
+        required: true
+      health_path:
+        description: 'Health check path (must start with /)'
+        type: string
+        default: '/health'
+    secrets:
+      OCI_MAIN_CAPROVER_URL:
+        required: false
+      OCI_MAIN_CAPROVER_PASSWORD:
+        required: false
+      COOLIFY_BASE_URL:
+        required: false
+      COOLIFY_TOKEN:
+        required: false
+      GHCR_PULL_TOKEN:
+        required: true
+
+env:
+  OWNER: qwickapps
+
+concurrency:
+  group: promote-${{ inputs.app_name }}-${{ inputs.slot }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.app_name }} (${{ inputs.slot }})
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Validate inputs
+        run: |
+          APP="${{ inputs.app_name }}"
+          IMAGE="${{ inputs.image_ref }}"
+          SLOT="${{ inputs.slot }}"
+          HEALTH="${{ inputs.health_path }}"
+
+          if [[ -z "$APP" ]]; then
+            echo "::error::app_name is required"
+            exit 1
+          fi
+          if [[ -z "$IMAGE" ]]; then
+            echo "::error::image_ref is required"
+            exit 1
+          fi
+          case "$SLOT" in
+            main|backup) ;;
+            *)
+              echo "::error::slot must be 'main' or 'backup', got: $SLOT"
+              exit 1
+              ;;
+          esac
+          case "$HEALTH" in
+            /*) ;;
+            *)
+              echo "::error::health_path must start with /"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve credentials
+        run: |
+          SLOT="${{ inputs.slot }}"
+          GHCR_PULL_TOKEN="${{ secrets.GHCR_PULL_TOKEN }}"
+
+          case "$SLOT" in
+            main)
+              CAPROVER_URL="${{ secrets.OCI_MAIN_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              if [[ -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+                echo "::error::OCI_MAIN_CAPROVER_URL and OCI_MAIN_CAPROVER_PASSWORD required for slot=main"
+                exit 1
+              fi
+              ;;
+            backup)
+              CAPROVER_URL="${{ secrets.COOLIFY_BASE_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.COOLIFY_TOKEN }}"
+              if [[ -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+                echo "::error::COOLIFY_BASE_URL and COOLIFY_TOKEN required for slot=backup"
+                exit 1
+              fi
+              ;;
+          esac
+
+          if [[ -z "$GHCR_PULL_TOKEN" ]]; then
+            echo "::error::GHCR_PULL_TOKEN is required"
+            exit 1
+          fi
+
+          echo "::add-mask::$CAPROVER_PASSWORD"
+          echo "::add-mask::$GHCR_PULL_TOKEN"
+          {
+            echo "CAPROVER_URL=$CAPROVER_URL"
+            echo "CAPROVER_PASSWORD=$CAPROVER_PASSWORD"
+            echo "GHCR_PULL_TOKEN=$GHCR_PULL_TOKEN"
+          } >> "$GITHUB_ENV"
+
+      - name: Derive app URL
+        id: meta
+        run: |
+          APP="${{ inputs.app_name }}"
+          SLOT="${{ inputs.slot }}"
+
+          case "$SLOT" in
+            main)
+              APP_URL="https://${APP}.app.qwickforge.com"
+              ;;
+            backup)
+              APP_URL="https://${APP}.macmini.qwickforge.com"
+              ;;
+          esac
+
+          echo "app_url=${APP_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Read current image (rollback target)
+        id: rollback
+        run: |
+          APP="${{ inputs.app_name }}"
+
+          chmod +x .ci-workflows/scripts/*.sh .ci-workflows/scripts/lib/*.sh
+
+          # Capture the current image before promotion so we can roll back if needed.
+          # A missing image (first deploy) is non-fatal — rollback is a no-op.
+          current_image="$(.ci-workflows/scripts/caprover-slot-admin.sh image \
+            --app-name "$APP" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" 2>/dev/null)" || current_image=""
+
+          echo "Current image (rollback target): ${current_image:-<none>}"
+          echo "previous_image=${current_image}" >> "$GITHUB_OUTPUT"
+
+      - name: Make caller scripts executable
+        run: |
+          if [[ -d ".github/scripts" ]]; then
+            chmod +x .github/scripts/*.sh 2>/dev/null || true
+          fi
+
+      - name: Configure app image
+        run: |
+          APP="${{ inputs.app_name }}"
+          IMAGE="${{ inputs.image_ref }}"
+
+          # configure-caprover-app.sh is sourced from the calling repo (vendors it
+          # at .github/scripts/) or from the ci-workflows checkout.
+          CONFIGURE_SCRIPT=""
+          if [[ -f ".github/scripts/configure-caprover-app.sh" ]]; then
+            CONFIGURE_SCRIPT=".github/scripts/configure-caprover-app.sh"
+          elif [[ -f ".ci-workflows/scripts/configure-caprover-app.sh" ]]; then
+            CONFIGURE_SCRIPT=".ci-workflows/scripts/configure-caprover-app.sh"
+          else
+            echo "::warning::configure-caprover-app.sh not found — skipping pre-deploy config step"
+            CONFIGURE_SCRIPT=""
+          fi
+
+          if [[ -n "$CONFIGURE_SCRIPT" ]]; then
+            "$CONFIGURE_SCRIPT" \
+              --app-name         "$APP" \
+              --caprover-url     "$CAPROVER_URL" \
+              --caprover-password "$CAPROVER_PASSWORD"
+          fi
+
+      - name: Deploy from GHCR
+        run: |
+          APP="${{ inputs.app_name }}"
+          IMAGE="${{ inputs.image_ref }}"
+
+          DEPLOY_SCRIPT=""
+          if [[ -f ".github/scripts/deploy-from-ghcr.sh" ]]; then
+            DEPLOY_SCRIPT=".github/scripts/deploy-from-ghcr.sh"
+          elif [[ -f ".ci-workflows/scripts/deploy-from-ghcr.sh" ]]; then
+            DEPLOY_SCRIPT=".ci-workflows/scripts/deploy-from-ghcr.sh"
+          else
+            echo "::error::deploy-from-ghcr.sh not found at .github/scripts/ or .ci-workflows/scripts/"
+            exit 1
+          fi
+
+          "$DEPLOY_SCRIPT" \
+            --app-name         "$APP" \
+            --image-ref        "$IMAGE" \
+            --caprover-url     "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --github-token     "$GHCR_PULL_TOKEN" \
+            --github-owner     "${{ env.OWNER }}"
+
+      - name: Validate deployment health
+        id: health
+        run: |
+          APP="${{ inputs.app_name }}"
+          APP_URL="${{ steps.meta.outputs.app_url }}"
+          HEALTH_PATH="${{ inputs.health_path }}"
+
+          HEALTH_SCRIPT=""
+          if [[ -f ".github/scripts/validate-deployment-health.sh" ]]; then
+            HEALTH_SCRIPT=".github/scripts/validate-deployment-health.sh"
+          elif [[ -f ".ci-workflows/scripts/validate-deployment-health.sh" ]]; then
+            HEALTH_SCRIPT=".ci-workflows/scripts/validate-deployment-health.sh"
+          else
+            echo "::error::validate-deployment-health.sh not found"
+            exit 1
+          fi
+
+          "$HEALTH_SCRIPT" \
+            --app-name         "$APP" \
+            --caprover-url     "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --app-url          "$APP_URL" \
+            --health-path      "$HEALTH_PATH" \
+            --max-attempts     15 \
+            --sleep            20
+
+      - name: Rollback to previous image on health failure
+        if: failure() && steps.health.conclusion == 'failure' && steps.rollback.outputs.previous_image != ''
+        run: |
+          APP="${{ inputs.app_name }}"
+          PREVIOUS_IMAGE="${{ steps.rollback.outputs.previous_image }}"
+          APP_URL="${{ steps.meta.outputs.app_url }}"
+          HEALTH_PATH="${{ inputs.health_path }}"
+
+          echo "Health check failed — rolling back ${APP} to ${PREVIOUS_IMAGE}..."
+
+          DEPLOY_SCRIPT=""
+          if [[ -f ".github/scripts/deploy-from-ghcr.sh" ]]; then
+            DEPLOY_SCRIPT=".github/scripts/deploy-from-ghcr.sh"
+          elif [[ -f ".ci-workflows/scripts/deploy-from-ghcr.sh" ]]; then
+            DEPLOY_SCRIPT=".ci-workflows/scripts/deploy-from-ghcr.sh"
+          fi
+
+          if [[ -n "$DEPLOY_SCRIPT" ]]; then
+            "$DEPLOY_SCRIPT" \
+              --app-name         "$APP" \
+              --image-ref        "$PREVIOUS_IMAGE" \
+              --caprover-url     "$CAPROVER_URL" \
+              --caprover-password "$CAPROVER_PASSWORD" \
+              --github-token     "$GHCR_PULL_TOKEN" \
+              --github-owner     "${{ env.OWNER }}"
+            echo "Rollback deploy triggered for ${APP}."
+          else
+            echo "::error::Cannot rollback: deploy-from-ghcr.sh not found."
+          fi
+          exit 1
