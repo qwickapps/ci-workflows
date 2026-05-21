@@ -9,6 +9,7 @@ Shared CI workflow scripts for QwickApps repositories. Used as a **git submodule
 ```
 ci-workflows/
 ├── .github/workflows/
+│   ├── fetch-secrets.yml       # Reusable deploy secrets fetcher
 │   └── security-scan.yml       # Reusable govulncheck + Semgrep security scan
 └── scripts/
     ├── attribution-check.sh    # Detects AI co-authorship in PR commits
@@ -34,6 +35,63 @@ git commit -m "chore: update ci-workflows submodule"
 ---
 
 ## Reusable Workflows
+
+### `.github/workflows/fetch-secrets.yml`
+
+Fetches one or more secrets from the QwickApps secrets service, masks their
+values in the Actions log, and emits them as a single JSON object so caller
+jobs can reference individual values with
+`${{ fromJson(needs.fetch-secrets.outputs.secrets_json).KEY }}`.
+
+#### Required secret
+
+| Secret | Description |
+|---|---|
+| `DEPLOY_READ_TOKEN` | Read token for the QwickApps secrets service. Set as an org-level GitHub secret. |
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `project` | yes | — | QwickApps project name (e.g. `memories`, `forge`). |
+| `env` | yes | — | Target environment (e.g. `prod`, `uat`, `dev`). |
+| `keys` | yes | — | JSON array of secret key names to fetch (e.g. `["TS_AUTHKEY"]`). |
+| `secrets_url` | no | `https://secrets.qwickapps.com` | Base URL of the secrets service. |
+| `runs_on` | no | `["self-hosted","macmini"]` | Runner labels as a JSON array string. |
+
+#### Output
+
+| Output | Description |
+|---|---|
+| `secrets_json` | Compact JSON object mapping each requested key to its value. |
+
+#### Caller example
+
+```yaml
+jobs:
+  fetch-secrets:
+    uses: qwickapps/ci-workflows/.github/workflows/fetch-secrets.yml@main
+    secrets: inherit
+    with:
+      project: memories
+      env: prod
+      keys: '["TS_AUTHKEY","SOME_OTHER_KEY"]'
+
+  deploy:
+    needs: [build, fetch-secrets]
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Write env file
+        run: |
+          printf '%s\n' \
+            "TS_AUTHKEY=${{ fromJson(needs.fetch-secrets.outputs.secrets_json).TS_AUTHKEY }}" \
+            > /tmp/app.env
+```
+
+> **Note**: `DEPLOY_READ_TOKEN` must be set as a GitHub org secret before
+> callers can use this workflow. Contact ops to provision it.
+
+---
 
 ### `.github/workflows/security-scan.yml`
 
