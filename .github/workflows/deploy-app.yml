@@ -237,11 +237,9 @@ jobs:
     needs: prepare
     if: inputs.image_ref == ''
     runs-on: [self-hosted, macmini]
-    permissions:
-      contents: read
-      packages: write
-    # GHCR push uses GHCR_PUSH_TOKEN PAT when available; falls back to GITHUB_TOKEN
-    # with explicit packages:write (overrides org read-only default for this job).
+    # GHCR push uses GHCR_PUSH_TOKEN PAT (see 'Login to GHCR' step) - we don't
+    # need elevated GITHUB_TOKEN packages:write, which the qwickapps org policy
+    # disables at the workflow-defaults level.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
