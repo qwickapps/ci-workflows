@@ -66,7 +66,77 @@ env:
   OWNER: qwickapps
 
 jobs:
+  drift-check:
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      - name: Checkout protocols
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/protocols
+          ref: main
+          path: .protocols
+
+      - name: Resolve CapRover credentials for drift check
+        run: |
+          ENV="${{ inputs.environment }}"
+          APP="${{ inputs.app_name }}"
+
+          case "$ENV" in
+            dev)
+              CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_DEV_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+              DRIFT_APP="${APP}-stable"
+              ;;
+            prod)
+              CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              DRIFT_APP="${APP}-stable"
+              ;;
+            uat)
+              CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
+              CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              DRIFT_APP="${APP}-uat-stable"
+              ;;
+          esac
+
+          if [ -z "$CAPROVER_URL" ] || [ -z "$CAPROVER_PASSWORD" ]; then
+            echo "ERROR: CapRover credentials not found for ${ENV}."
+            exit 1
+          fi
+
+          echo "::add-mask::$CAPROVER_PASSWORD"
+
+          TOKEN=$(curl -sf -X POST "${CAPROVER_URL}/api/v2/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"password\":\"${CAPROVER_PASSWORD}\"}" \
+            | tr -d '\n' \
+            | sed 's/.*"token":"\([^"]*\)".*/\1/')
+
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: Failed to obtain CapRover token for drift check"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+
+          echo "DRIFT_CAPROVER_URL=${CAPROVER_URL}"   >> "$GITHUB_ENV"
+          echo "DRIFT_CAPROVER_TOKEN=${TOKEN}"         >> "$GITHUB_ENV"
+          echo "DRIFT_APP_NAME=${DRIFT_APP}"           >> "$GITHUB_ENV"
+
+      - name: Run runtime drift check
+        run: |
+          chmod +x .protocols/scripts/check-runtime-drift.sh
+          .protocols/scripts/check-runtime-drift.sh \
+            --app-name "$DRIFT_APP_NAME" \
+            --host caprover \
+            --caprover-url "$DRIFT_CAPROVER_URL" \
+            --caprover-token "$DRIFT_CAPROVER_TOKEN" \
+            --manifest-path .qwickapps/runtime.env.manifest.yml
+
   promote-to-stable:
+    needs: [drift-check]
     runs-on: [self-hosted, macmini]
     steps:
       - name: Validate inputs
