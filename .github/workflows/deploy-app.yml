@@ -133,8 +133,14 @@ env:
   OWNER: qwickapps
 
 jobs:
-  # -- Phase 0: Compute metadata ------------------------------------------------
+  # -- Phase 0a: Deploy contract preflight --------------------------------------
+  preflight:
+    uses: qwickapps/ci-workflows/.github/workflows/deploy-preflight.yml@main
+    secrets: inherit
+
+  # -- Phase 0b: Compute metadata -----------------------------------------------
   prepare:
+    needs: [preflight]
     runs-on: [self-hosted, macmini]
     outputs:
       image_ref:        ${{ steps.meta.outputs.image_ref }}
