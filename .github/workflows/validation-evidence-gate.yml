@@ -1,0 +1,172 @@
+name: Validation Evidence Gate
+
+on:
+  workflow_call:
+    inputs:
+      repo_is_fleet_critical:
+        description: 'Set true for repos where all PRs are fleet-critical (e.g. protocols)'
+        type: boolean
+        default: false
+
+jobs:
+  evidence-gate:
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Determine if fleet-critical
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          FLEET_CRITICAL=false
+
+          if [ "${{ inputs.repo_is_fleet_critical }}" = "true" ]; then
+            echo "repo_is_fleet_critical=true — marking fleet-critical"
+            FLEET_CRITICAL=true
+          else
+            echo "Checking changed files against fleet-critical patterns..."
+            CHANGED_FILES="$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.[].path' 2>/dev/null || true)"
+            PATTERNS=(
+              "scripts/service-health-check.sh"
+              "scripts/checks/"
+              ".github/workflows/deploy"
+              ".github/workflows/promote"
+              "ci-workflows/"
+              "scripts/blue-green"
+              "scripts/bg-blue-green.sh"
+              "clients/.*/auth.*\.ts"
+              "faabzi/middleware.ts"
+              "faabzi/next.config."
+              "Dockerfile"
+            )
+            while IFS= read -r filepath; do
+              for pattern in "${PATTERNS[@]}"; do
+                if echo "$filepath" | grep -qE "$pattern"; then
+                  echo "Fleet-critical match: $filepath matches $pattern"
+                  FLEET_CRITICAL=true
+                  break 2
+                fi
+              done
+            done <<< "$CHANGED_FILES"
+          fi
+
+          echo "fleet_critical=$FLEET_CRITICAL" >> "$GITHUB_OUTPUT"
+
+          if [ "$FLEET_CRITICAL" = "false" ]; then
+            echo "not-fleet-critical — skipping evidence gate"
+          fi
+
+      - name: Skip if not fleet-critical
+        if: steps.classify.outputs.fleet_critical == 'false'
+        run: exit 0
+
+      - name: Ensure fleet-critical label exists
+        if: steps.classify.outputs.fleet_critical == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create fleet-critical \
+            --color b60205 \
+            --description "Requires validation evidence in PR" \
+            2>/dev/null || true
+
+      - name: Apply fleet-critical label
+        if: steps.classify.outputs.fleet_critical == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr edit ${{ github.event.pull_request.number }} --add-label fleet-critical
+
+      - name: Parse PR body for unchecked test plan items
+        if: steps.classify.outputs.fleet_critical == 'true'
+        id: parse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BODY="$(gh pr view ${{ github.event.pull_request.number }} --json body --jq '.body')"
+
+          HAS_SECTION=$(python3 - "$BODY" <<'PYEOF'
+          import re, sys
+          body = sys.argv[1]
+          if re.search(r'^##\s+(test plan|validation)\s*$', body, re.IGNORECASE | re.MULTILINE):
+              print("true")
+          else:
+              print("false")
+          PYEOF
+          )
+
+          echo "has_section=$HAS_SECTION" >> "$GITHUB_OUTPUT"
+
+          if [ "$HAS_SECTION" = "false" ]; then
+            echo "No test plan section found — warn-first mode (not blocking)"
+            exit 0
+          fi
+
+          UNCHECKED=$(python3 - "$BODY" <<'PYEOF'
+          import re, sys
+          body = sys.argv[1]
+          lines = body.split('\n')
+          in_section = False
+          unchecked = []
+          for i, line in enumerate(lines):
+              if re.match(r'^##\s+(test plan|validation)\s*$', line.strip(), re.IGNORECASE):
+                  in_section = True
+                  continue
+              if in_section and re.match(r'^##', line):
+                  in_section = False
+              if in_section and re.match(r'^- \[ \]', line) and 'SKIP:' not in line:
+                  unchecked.append((i+1, line.strip()))
+          for lineno, item in unchecked:
+              print(f"{lineno}:{item}")
+          PYEOF
+          )
+
+          echo "unchecked_items<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$UNCHECKED" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          COUNT=$(echo "$UNCHECKED" | grep -c '.' || true)
+          echo "unchecked_count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Warn if no test plan section
+        if: steps.classify.outputs.fleet_critical == 'true' && steps.parse.outputs.has_section == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body \
+            "**Validation evidence gate warning** — this PR is fleet-critical but has no \`## Test plan\` section.
+
+          Add a \`## Test plan\` section with checkable items to document validation steps.
+          Unchecked items will block merge once strict mode is enforced."
+
+      - name: Gate check — fail on unchecked items
+        if: steps.classify.outputs.fleet_critical == 'true' && steps.parse.outputs.has_section == 'true' && steps.parse.outputs.unchecked_count != '0' && steps.parse.outputs.unchecked_count != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ITEMS="${{ steps.parse.outputs.unchecked_items }}"
+
+          ITEM_LIST=""
+          while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            LINENO="${entry%%:*}"
+            TEXT="${entry#*:}"
+            ITEM_LIST="${ITEM_LIST}
+          - Line ${LINENO}: \`${TEXT}\`"
+          done <<< "$ITEMS"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body \
+            "**Validation evidence gate failed** — the following test plan items are unchecked:
+          ${ITEM_LIST}
+
+          Either execute and check these items, or mark them as skipped with:
+            \`- [ ] SKIP: <reason> — <item description>\`
+          and add a \`## Validation debt\` section explaining the skip."
+
+          echo "Failing: ${steps.parse.outputs.unchecked_count} unchecked test plan item(s)"
+          exit 1
