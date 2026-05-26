@@ -238,9 +238,45 @@ jobs:
           echo "gateway_app_name=${GATEWAY_APP_NAME}" >> "$GITHUB_OUTPUT"
           echo "live_app_url=${LIVE_APP_URL}"         >> "$GITHUB_OUTPUT"
 
+  # -- Phase 0c: Validate rendered env values (qwickapps/ci-workflows#36) --------
+  # BLOCKING gate. The caller's write-env-file job renders the deploy env to
+  # /tmp/app-env-<env>-<app>.env BEFORE this reusable workflow runs. We reject
+  # empty / placeholder / format-invalid values (e.g. TS_EPHEMERAL_AUTHKEY=`-`)
+  # here, before any build or CapRover provisioning happens, so a garbage secret
+  # cannot reach `tailscale up --authkey=-` and crash-loop the container.
+  # Both `build` and the provision jobs depend on this job, so neither the
+  # normal build path nor the prebuilt-image (image_ref) path can skip it.
+  validate-env:
+    needs: [prepare]
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Make scripts executable
+        run: chmod +x .ci-workflows/scripts/*.sh
+
+      - name: Validate rendered env values
+        run: |
+          ENV="${{ inputs.environment }}"
+          APP="${{ inputs.app_name }}"
+          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "::error::Rendered env file not found: ${ENV_FILE}. The caller's write-env-file job must render the deploy env before deploy-app.yml runs."
+            exit 1
+          fi
+          .ci-workflows/scripts/validate-env-values.sh "$ENV_FILE"
+
   # -- Phase 1: Build & push Docker image ---------------------------------------
   build:
-    needs: prepare
+    needs: [prepare, validate-env]
     if: inputs.image_ref == ''
     runs-on: [self-hosted, macmini]
     # GHCR push uses GHCR_PUSH_TOKEN PAT (see 'Login to GHCR' step) - we don't
@@ -328,10 +364,11 @@ jobs:
   # SOPS decrypt step in deploy-faabzi.yml. If no env file is present the job
   # skips env update and just ensures the app exists.
   provision-app:
-    needs: [prepare, build]
+    needs: [prepare, validate-env, build]
     if: |
       always() &&
       needs.prepare.result == 'success' &&
+      needs.validate-env.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
     concurrency:
@@ -424,10 +461,11 @@ jobs:
 
   # -- Phase 1.5 (parallel with build): Provision gateway route -----------------
   provision-gateway:
-    needs: [prepare, build]
+    needs: [prepare, validate-env, build]
     if: |
       always() &&
       needs.prepare.result == 'success' &&
+      needs.validate-env.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
     continue-on-error: true
