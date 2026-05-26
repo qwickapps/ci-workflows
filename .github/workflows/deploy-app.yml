@@ -834,6 +834,43 @@ jobs:
             --github-token      "$GHCR_PULL_TOKEN" \
             --github-owner      "${{ env.OWNER }}"
 
+      - name: Verify serving slot containerHttpPort
+        run: |
+          LIVE_APP="${{ needs.prepare.outputs.live_app }}"
+          EXPECTED_PORT="${{ inputs.container_port }}"
+
+          TOKEN=$(curl -s -k -X POST "${CAPROVER_URL}/api/v2/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"password\":\"${CAPROVER_PASSWORD}\"}" \
+            | tr -d '\n' \
+            | jq -r '.data.token // .token // empty')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "ERROR: Failed to obtain CapRover token"
+            exit 1
+          fi
+
+          APP_DEFINITIONS=$(curl -s -k -X GET "${CAPROVER_URL}/api/v2/user/apps/appDefinitions" \
+            -H "x-captain-auth: ${TOKEN}" \
+            -H "x-namespace: captain")
+
+          LIVE_SLOT_DEFINITION=$(echo "$APP_DEFINITIONS" | jq -r --arg app "$LIVE_APP" '.data.appDefinitions[] | select(.appName == $app)')
+          LIVE_PORT=$(echo "$LIVE_SLOT_DEFINITION" | jq -r '.containerHttpPort // empty')
+
+          if [ -z "$LIVE_SLOT_DEFINITION" ] || [ "$LIVE_SLOT_DEFINITION" = "null" ]; then
+            echo "ERROR: Failed to read live slot definition for $LIVE_APP"
+            exit 1
+          fi
+
+          if [ -z "$LIVE_PORT" ] || [ "$LIVE_PORT" = "null" ] || [ "$LIVE_PORT" != "$EXPECTED_PORT" ]; then
+            echo "ERROR: containerHttpPort mismatch for serving slot ${LIVE_APP}"
+            echo "  expected: ${EXPECTED_PORT}"
+            echo "  actual: ${LIVE_PORT:-<empty>}"
+            exit 1
+          fi
+
+          echo "Serving slot containerHttpPort matches contract: ${LIVE_APP}=${LIVE_PORT}"
+
   # -- Phase 4: Clean up old dev builds -----------------------------------------
   cleanup-dev:
     needs: [prepare, traffic-light-deploy]
