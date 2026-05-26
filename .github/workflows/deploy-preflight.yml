@@ -19,11 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout protocols scripts
-        uses: actions/checkout@v4
-        with:
-          repository: qwickapps/protocols
-          ref: main
-          path: .protocols
+        run: git clone --depth 1 https://github.com/qwickapps/protocols .protocols
 
       - name: Install PyYAML
         run: python3 -m pip install --user PyYAML --quiet 2>/dev/null || true
