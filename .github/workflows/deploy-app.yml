@@ -269,8 +269,12 @@ jobs:
           APP="${{ inputs.app_name }}"
           ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
           if [ ! -f "$ENV_FILE" ]; then
-            echo "::error::Rendered env file not found: ${ENV_FILE}. The caller's write-env-file job must render the deploy env before deploy-app.yml runs."
-            exit 1
+            # Some callers render env via an alternate mechanism (e.g. SOPS in
+            # deploy-faabzi.yml) and do not produce this file; provision-app
+            # tolerates that, so we must not block them here. SOPS-path value
+            # validation is tracked as a follow-up on #36.
+            echo "::notice::No rendered env file at ${ENV_FILE}; caller uses an alternate env mechanism — skipping rendered-env value validation."
+            exit 0
           fi
           .ci-workflows/scripts/validate-env-values.sh "$ENV_FILE"
 
