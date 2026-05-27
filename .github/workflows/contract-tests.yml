@@ -1,0 +1,61 @@
+name: Contract Tests
+
+# Runs the qwickapps/ci-workflows#6 contract test suite on every PR.
+# The contract is the spine of every consumer's audit trail — a future
+# commit that breaks the validator (or the evidence-emit shape) would
+# silently disable downstream audit guarantees, so this gate is
+# mandatory.
+#
+# Tests:
+#   bash scripts/tests/contract.test.sh
+#     - validator: golden path on shipped deploy.yml
+#     - validator: 11 mutation rejections (missing job, broken needs:
+#       chain, missing input/output, evidence-without-always(), etc.)
+#     - deploy-evidence.sh: schema-required field presence
+#     - deploy-evidence.sh: optional-field omission
+#     - deploy-evidence.sh: caller_metadata round-trip
+#     - deploy-evidence.sh: input validation rejection cases
+
+on:
+  pull_request:
+    paths:
+      - 'workflows/deploy.yml'
+      - 'scripts/deploy-evidence.sh'
+      - 'scripts/validate-deploy-contract.sh'
+      - 'scripts/tests/**'
+      - '.github/workflows/contract-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'workflows/deploy.yml'
+      - 'scripts/deploy-evidence.sh'
+      - 'scripts/validate-deploy-contract.sh'
+      - 'scripts/tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy.yml contract tests
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML + jq (for the validator and test assertions)
+        run: |
+          # PyYAML drives validate-deploy-contract.sh; jq drives the
+          # deploy-evidence.sh assertions. Self-hosted runners typically
+          # ship both, but pin the install so a runner-image drift
+          # doesn't silently mask test failures.
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required on the runner"
+            exit 2
+          fi
+
+      - name: Run contract test suite
+        run: bash scripts/tests/contract.test.sh

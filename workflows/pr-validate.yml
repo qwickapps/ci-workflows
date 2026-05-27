@@ -1,0 +1,219 @@
+name: PR Validate (Reusable)
+
+# Reusable workflow — called by thin caller workflows in consuming repos.
+# Runs: attribution check, lint, tests, Docker build.
+# Posts a CI validation status comment on the PR.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'Project language (ts | js | go | python)'
+        required: false
+        type: string
+        default: 'ts'
+      image_name:
+        description: 'Docker image name (e.g. img-forge)'
+        required: true
+        type: string
+      dockerfile_path:
+        description: 'Path to the Dockerfile relative to repo root'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      node_version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '20'
+      runs_on:
+        description: 'Runner label(s) as a JSON array string'
+        required: false
+        type: string
+        default: '["self-hosted", "linux"]'
+    secrets:
+      GHCR_PUSH_TOKEN:
+        required: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: qwickapps
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Attribution check — block AI co-authored commits
+  # ---------------------------------------------------------------------------
+  attribution:
+    name: Attribution Check
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: Run attribution check
+        id: attr_check
+        run: |
+          set +e
+          OUTPUT=$(.github/shared/scripts/attribution-check.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+          echo "output<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "status=$([ $EXIT_CODE -eq 0 ] && echo pass || echo fail)" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Post attribution result comment
+        if: always()
+        run: .github/shared/scripts/pr-status-comment.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHECK_STATUS: ${{ steps.attr_check.outputs.status }}
+          CHECK_OUTPUT: ${{ steps.attr_check.outputs.output }}
+          COMMENT_HEADER: '## Attribution Check'
+
+  # ---------------------------------------------------------------------------
+  # 2. Lint
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install pnpm
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (TypeScript/JavaScript)
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm lint
+
+  # ---------------------------------------------------------------------------
+  # 3. Test
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install pnpm
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check + build
+        if: inputs.language == 'ts'
+        run: pnpm build
+
+      - name: Run tests
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm test
+
+  # ---------------------------------------------------------------------------
+  # 4. Docker build (validates Dockerfile is buildable — no push on PRs)
+  # ---------------------------------------------------------------------------
+  build:
+    name: Docker Build
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate image tag
+        id: meta
+        run: |
+          SHA="${{ github.sha }}"
+          TAG="sha-${SHA:0:7}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ inputs.image_name }}:${TAG}"
+          echo "image_ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+          push: false
+          tags: ${{ steps.meta.outputs.image_ref }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # 5. Final status comment summarising all checks
+  # ---------------------------------------------------------------------------
+  pr-status:
+    name: Post PR Status
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    needs: [attribution, lint, test, build]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Determine overall status
+        id: overall
+        run: |
+          ATTR="${{ needs.attribution.result }}"
+          LINT="${{ needs.lint.result }}"
+          TEST="${{ needs.test.result }}"
+          BUILD="${{ needs.build.result }}"
+
+          ALL_PASS=true
+          for result in "$ATTR" "$LINT" "$TEST" "$BUILD"; do
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              ALL_PASS=false
+            fi
+          done
+
+          if $ALL_PASS; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "summary=All PR checks passed: attribution=$ATTR lint=$LINT test=$TEST build=$BUILD" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "summary=One or more PR checks failed: attribution=$ATTR lint=$LINT test=$TEST build=$BUILD" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post final PR status comment
+        run: .github/shared/scripts/pr-status-comment.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHECK_STATUS: ${{ steps.overall.outputs.status }}
+          CHECK_OUTPUT: ${{ steps.overall.outputs.summary }}
+          COMMENT_HEADER: '## CI Validation Report'

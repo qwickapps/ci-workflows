@@ -1,0 +1,105 @@
+name: Verify SSH Connectivity to Runner Hosts
+
+on:
+  # Trigger manually from GitHub UI or API — run after any SSH key rotation
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for running (e.g. post-rotation verification)"
+        required: false
+        default: "manual check"
+
+  # Also allow being called as a reusable workflow
+  workflow_call:
+    outputs:
+      all_passed:
+        description: "true if all SSH checks passed"
+        value: ${{ jobs.verify-ssh.outputs.all_passed }}
+
+jobs:
+  verify-ssh:
+    name: SSH connectivity check
+    runs-on: [self-hosted, macmini]
+    timeout-minutes: 5
+    outputs:
+      all_passed: ${{ steps.summary.outputs.all_passed }}
+
+    steps:
+      - name: Verify SSH to oci-main
+        id: check-oci-main
+        run: |
+          result=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@oci-main "hostname && echo SSH_OK" 2>&1)
+          echo "result=${result}"
+          echo "$result" | grep -q "SSH_OK" && echo "status=pass" || echo "status=fail"
+        continue-on-error: true
+
+      - name: Verify SSH to oci-gateway
+        id: check-oci-gateway
+        run: |
+          result=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@oci-gateway "hostname && echo SSH_OK" 2>&1)
+          echo "result=${result}"
+          echo "$result" | grep -q "SSH_OK" && echo "status=pass" || echo "status=fail"
+        continue-on-error: true
+
+      - name: Verify SSH to oci-dev (via oci-main jump)
+        id: check-oci-dev
+        run: |
+          result=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            -o "ProxyJump=ubuntu@oci-main" ubuntu@oci-dev \
+            "hostname && echo SSH_OK" 2>&1)
+          echo "result=${result}"
+          echo "$result" | grep -q "SSH_OK" && echo "status=pass" || echo "status=fail"
+        continue-on-error: true
+
+      - name: Check authorized_keys count on each host
+        run: |
+          echo "=== oci-main ==="
+          ssh -o StrictHostKeyChecking=no ubuntu@oci-main \
+            "wc -l ~/.ssh/authorized_keys && grep -o '[^ ]*$' ~/.ssh/authorized_keys" || true
+          echo "=== oci-gateway ==="
+          ssh -o StrictHostKeyChecking=no ubuntu@oci-gateway \
+            "wc -l ~/.ssh/authorized_keys && grep -o '[^ ]*$' ~/.ssh/authorized_keys" || true
+          echo "=== oci-dev ==="
+          ssh -o StrictHostKeyChecking=no -o "ProxyJump=ubuntu@oci-main" ubuntu@oci-dev \
+            "wc -l ~/.ssh/authorized_keys && grep -o '[^ ]*$' ~/.ssh/authorized_keys" || true
+        continue-on-error: true
+
+      - name: Summary
+        id: summary
+        if: always()
+        run: |
+          PASS=0
+          FAIL=0
+
+          check_result() {
+            local name="$1"
+            local outcome="$2"
+            if [[ "$outcome" == "success" ]]; then
+              echo "✅ ${name}: PASS" | tee -a "$GITHUB_STEP_SUMMARY"
+              PASS=$((PASS + 1))
+            else
+              echo "❌ ${name}: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          echo "## SSH Connectivity Verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triggered by: ${{ github.actor }} — ${{ inputs.reason || 'manual check' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Ran at: $(date -u)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          check_result "oci-main" "${{ steps.check-oci-main.outcome }}"
+          check_result "oci-gateway" "${{ steps.check-oci-gateway.outcome }}"
+          check_result "oci-dev" "${{ steps.check-oci-dev.outcome }}"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Total: ${PASS} passed, ${FAIL} failed" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ $FAIL -eq 0 ]]; then
+            echo "all_passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ All SSH checks passed."
+          else
+            echo "all_passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ ${FAIL} host(s) failed. Run scripts/sync-authorized-keys.sh to fix." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
