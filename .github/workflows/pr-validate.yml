@@ -215,6 +215,15 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Assert Dockerfile exists at specified path
+        if: ${{ inputs.has_dockerfile }}
+        run: |
+          if [ ! -f "${{ inputs.dockerfile_path }}" ]; then
+            echo "::error::Dockerfile not found at '${{ inputs.dockerfile_path }}'. Check the dockerfile_path input in your caller workflow."
+            exit 1
+          fi
+          echo "Dockerfile confirmed: ${{ inputs.dockerfile_path }}"
+
       - name: Install dependencies (TS)
         if: ${{ inputs.language == 'ts' }}
         run: pnpm install --frozen-lockfile
