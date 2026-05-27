@@ -188,6 +188,23 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Assert Dockerfile runtime version matches node_version input
+        if: ${{ inputs.has_dockerfile && inputs.language == 'ts' }}
+        run: |
+          DOCKERFILE="${{ inputs.dockerfile_path }}"
+          NODE_IN_FROM=$(grep -E '^FROM node:[0-9]' "$DOCKERFILE" | tail -1 | \
+            grep -oE 'node:[0-9]+' | cut -d: -f2 || true)
+          if [ -z "$NODE_IN_FROM" ]; then
+            echo "::notice::No versioned FROM node:XX found in $DOCKERFILE — skipping version parity check"
+            exit 0
+          fi
+          EXPECTED="${{ inputs.node_version }}"
+          if [ "$NODE_IN_FROM" != "$EXPECTED" ]; then
+            echo "::error::Version mismatch: Dockerfile uses node:${NODE_IN_FROM} but node_version input is ${EXPECTED}. Update dockerfile_path or node_version to match."
+            exit 1
+          fi
+          echo "Node version parity OK: FROM node:${NODE_IN_FROM} matches node_version=${EXPECTED}"
+
       - name: Install dependencies (TS)
         if: ${{ inputs.language == 'ts' }}
         run: pnpm install --frozen-lockfile
