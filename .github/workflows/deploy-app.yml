@@ -175,19 +175,14 @@ jobs:
           if [ -n "${{ inputs.image_ref }}" ]; then
             IMAGE="${{ inputs.image_ref }}"
           else
-            IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/img-${APP}-${ENV}:${TAG}"
+            IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/img-${APP}:${TAG}"
           fi
 
           case "$ENV" in
-            prod)
+            prod|uat)
               BUILD_APP="${APP}-build"
               LIVE_APP="${APP}-live"
               STABLE_APP="${APP}-stable"
-              ;;
-            uat)
-              BUILD_APP="${APP}-uat-build"
-              LIVE_APP="${APP}-uat"
-              STABLE_APP="${APP}-uat-stable"
               ;;
             *)
               # Dev mirrors prod's full blue-green build -> live -> stable
