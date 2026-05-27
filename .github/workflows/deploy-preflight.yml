@@ -18,13 +18,16 @@ jobs:
       - name: Checkout caller repo
         uses: actions/checkout@v4
 
-      - name: Checkout protocols scripts
-        run: git clone --depth 1 https://github.com/qwickapps/protocols .protocols
+      - name: Verify protocols runtime available
+        run: |
+          if [[ ! -f ~/.qwickapps/protocols/scripts/preflight-deploy-contract.sh ]]; then
+            echo "::error::~/.qwickapps/protocols/scripts/preflight-deploy-contract.sh not found. Ensure install-fleet CI ran successfully."
+            exit 1
+          fi
 
       - name: Install PyYAML
         run: python3 -m pip install --user PyYAML --quiet 2>/dev/null || true
 
       - name: Run deploy contract preflight
         run: |
-          chmod +x .protocols/scripts/preflight-deploy-contract.sh
-          .protocols/scripts/preflight-deploy-contract.sh
+          ~/.qwickapps/protocols/scripts/preflight-deploy-contract.sh
