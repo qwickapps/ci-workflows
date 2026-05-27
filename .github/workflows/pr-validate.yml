@@ -2,8 +2,8 @@ name: PR Validate
 
 # Reusable PR validation workflow for QwickApps repositories.
 #
-# Provides 6 sequential gates:
-#   1. validate-commits  — attribution check + branch target
+# Provides 7 sequential gates:
+#   1. validate-commits  — attribution check + branch target + actionlint workflow lint
 #   2a. lint-and-typecheck — tsc --noEmit (TS) or go vet + golangci-lint (Go)
 #   2b. test              — pnpm test (TS) or go test ./... (Go)
 #   3. build              — optional build command + Docker image build
@@ -65,6 +65,7 @@ on:
 # GATE 1: validate-commits
 #   • Branch target: PRs from feature branches must not target 'main' directly
 #   • Attribution:   No AI co-authorship trailers permitted (via attribution-check.sh)
+#   • Actionlint:    Validate all workflow files in .github/workflows
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
   validate-commits:
@@ -113,6 +114,15 @@ jobs:
         run: |
           chmod +x .ci-workflows/scripts/attribution-check.sh
           .ci-workflows/scripts/attribution-check.sh
+
+      - name: Lint workflow files (actionlint)
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          if [ ! -d ".github/workflows" ]; then
+            echo "::notice::No .github/workflows directory found — skipping actionlint"
+            exit 0
+          fi
+          actionlint .github/workflows/*.yml
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATE 2a: lint-and-typecheck  (needs: validate-commits)
