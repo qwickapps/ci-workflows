@@ -86,6 +86,11 @@ on:
         required: true
 
       # -- Misc ------------------------------------------------------------------
+      promote_to_stable:
+        description: 'Whether traffic-light deploy should promote build -> live -> stable. Set false for live-only deploys where stable is managed separately on macmini.'
+        type: boolean
+        default: true
+
       run_migrations:
         description: 'Whether to run DB migrations during traffic-light deploy'
         type: string
@@ -802,6 +807,11 @@ jobs:
             fi
           fi
 
+          PROMOTE_STABLE_ARGS=()
+          if [ "${{ inputs.promote_to_stable }}" = "false" ]; then
+            PROMOTE_STABLE_ARGS+=(--promote-to-stable false)
+          fi
+
           .github/scripts/deploy-traffic-light.sh \
             --product           "${{ inputs.app_name }}" \
             --environment       "${{ inputs.environment }}" \
@@ -816,7 +826,8 @@ jobs:
             --run-migrations      "${{ inputs.run_migrations }}" \
             --run-e2e             "${{ inputs.run_e2e }}" \
             --critical-subsystems "$EFFECTIVE_CRITICAL" \
-            --warning-subsystems  "$EFFECTIVE_WARNING"
+            --warning-subsystems  "$EFFECTIVE_WARNING" \
+            "${PROMOTE_STABLE_ARGS[@]}"
 
       - name: Point gateway at live slot
         run: |
