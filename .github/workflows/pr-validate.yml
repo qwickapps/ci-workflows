@@ -241,6 +241,33 @@ jobs:
           fi
           echo "Node version parity OK: FROM node:${NODE_IN_FROM} matches node_version=${EXPECTED}"
 
+      - name: Assert Go Dockerfile declares language=go (G4)
+        if: ${{ inputs.has_dockerfile }}
+        run: |
+          DOCKERFILE="${{ inputs.dockerfile_path }}"
+          FIRST_FROM=$(grep -m1 -E '^FROM [a-zA-Z0-9._/-]+' "$DOCKERFILE" | awk '{print $2}' || true)
+          if echo "$FIRST_FROM" | grep -qE '^golang:'; then
+            if [ "${{ inputs.language }}" != "go" ]; then
+              echo "::error::Dockerfile starts with FROM golang: but language input is '${{ inputs.language }}'. Set language: go in your pr-validate.yml caller to skip pnpm setup for this Go service."
+              exit 1
+            fi
+          fi
+          echo "Service type check passed (first FROM: ${FIRST_FROM:-unknown})"
+
+      - name: Assert Next.js project has build_command set (G6)
+        if: ${{ inputs.language == 'ts' }}
+        run: |
+          if [ ! -f "package.json" ]; then
+            exit 0
+          fi
+          if grep -q '"next"' package.json 2>/dev/null; then
+            if [ -z "${{ inputs.build_command }}" ]; then
+              echo "::error::Next.js project detected (package.json contains 'next') but build_command is empty. Set build_command: 'pnpm build' in your pr-validate.yml caller to validate the production build."
+              exit 1
+            fi
+          fi
+          echo "Next.js build gate check passed"
+
       - name: Install dependencies (TS)
         if: ${{ inputs.language == 'ts' }}
         run: pnpm install --frozen-lockfile
