@@ -13,8 +13,8 @@ on:
         description: |
           Full GHCR image reference to deploy as live.
           Examples:
-            ghcr.io/qwickapps/img-billing-dev@sha256:<digest>
-            ghcr.io/qwickapps/img-documents-prod:1.0.0.42
+            ghcr.io/qwickapps/img-billing@sha256:<digest>
+            ghcr.io/qwickapps/img-documents:1.0.0.42
         required: true
         type: string
       image_name:
@@ -156,7 +156,7 @@ jobs:
           esac
 
           if [ -z "$IMAGE_NAME" ]; then
-            IMAGE_NAME="img-${APP}-${ENV}"
+            IMAGE_NAME="img-${APP}"
           fi
           if ! echo "$IMAGE_REF" | grep -Eq "^ghcr.io/qwickapps/${IMAGE_NAME}([:@])"; then
             echo "ERROR: image_ref does not match app/environment."

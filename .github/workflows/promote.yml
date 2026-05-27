@@ -21,7 +21,7 @@ on:
         type: string
         required: true
       image_ref:
-        description: 'Full GHCR image reference to deploy (e.g. ghcr.io/qwickapps/img-mcp-dev:1.0.0.42)'
+        description: 'Full GHCR image reference to deploy (e.g. ghcr.io/qwickapps/img-mcp:1.0.0.42)'
         type: string
         required: true
       slot:

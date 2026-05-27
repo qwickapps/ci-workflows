@@ -163,7 +163,7 @@ jobs:
           esac
 
           if [ -z "$IMAGE_NAME" ]; then
-            IMAGE_NAME="img-${APP}-${ENV}"
+            IMAGE_NAME="img-${APP}"
           fi
           if ! echo "$IMAGE_REF" | grep -Eq "^ghcr.io/qwickapps/${IMAGE_NAME}([:@])"; then
             echo "ERROR: image_ref does not match app/environment."
