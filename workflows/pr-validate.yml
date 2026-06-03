@@ -98,7 +98,7 @@ jobs:
 
       - name: Install pnpm
         if: inputs.language == 'ts' || inputs.language == 'js'
-        run: npm install -g pnpm
+        run: npm install -g pnpm@^10
 
       - name: Install dependencies
         if: inputs.language == 'ts' || inputs.language == 'js'
@@ -125,7 +125,7 @@ jobs:
 
       - name: Install pnpm
         if: inputs.language == 'ts' || inputs.language == 'js'
-        run: npm install -g pnpm
+        run: npm install -g pnpm@^10
 
       - name: Install dependencies
         if: inputs.language == 'ts' || inputs.language == 'js'
