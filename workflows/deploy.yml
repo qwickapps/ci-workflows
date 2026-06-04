@@ -385,8 +385,9 @@ jobs:
 
       - name: Upload evidence artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: deploy-evidence-${{ github.run_id }}
           path: ${{ steps.emit.outputs.path }}
-          retention-days: 90
+          retention-days: 3
           if-no-files-found: error

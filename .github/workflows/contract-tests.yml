@@ -38,7 +38,7 @@ permissions:
 jobs:
   contract:
     name: deploy.yml contract tests
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
