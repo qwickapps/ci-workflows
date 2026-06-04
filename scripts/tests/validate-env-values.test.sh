@@ -92,7 +92,7 @@ assert_fail "TS authkey not starting tskey- rejected" \
   "TS_EPHEMERAL_AUTHKEY=not-a-tailscale-key-value"
 assert_fail "TS_API_KEY not starting tskey-api- rejected" \
   "TS_API_KEY=tskey-auth-wrong-prefix-1234567890"
-assert_fail "_URL not starting http rejected" \
+assert_fail "_URL with no scheme rejected" \
   "SECRETS_SERVICE_URL=secrets.qwickforge.com"
 assert_fail "short _SERVICE_KEY rejected" \
   "SECRETS_SERVICE_KEY=short"
@@ -102,6 +102,10 @@ assert_fail "short _API_KEY rejected" \
 echo "== validate-env-values: well-formed typed keys pass =="
 assert_pass "TS_API_KEY with tskey-api- prefix passes" \
   "TS_API_KEY=tskey-api-1234567890abcdef"
+assert_pass "DATABASE_URL with postgres:// scheme passes" \
+  "DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require"
+assert_pass "_URL with redis:// scheme passes" \
+  "REDIS_URL=redis://localhost:6379"
 assert_pass "comment + blank lines only passes (no values)" \
   "# only a comment"
 assert_pass "value containing = passes" \

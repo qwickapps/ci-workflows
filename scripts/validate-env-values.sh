@@ -168,11 +168,12 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
   fi
 
-  # 3b. URLs must start with http:// or https://.
+  # 3b. URLs must contain a scheme (scheme://). Allows http, https, postgres,
+  # postgresql, redis, mysql, etc. — rejects bare hostnames with no scheme.
   if [[ "$key_uc" == *_URL ]]; then
     case "$value_trimmed" in
-      http://*|https://*) ;;
-      *) report "$key" "URL must start with http:// or https://" ; continue ;;
+      *://*) ;;
+      *) report "$key" "URL must contain a scheme (e.g. https://, postgres://)" ; continue ;;
     esac
   fi
 
