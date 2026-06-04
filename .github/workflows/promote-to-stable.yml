@@ -72,12 +72,12 @@ jobs:
       - name: Checkout caller repo
         uses: actions/checkout@v4
 
-      - name: Checkout protocols
-        uses: actions/checkout@v4
-        with:
-          repository: qwickapps/protocols
-          ref: main
-          path: .protocols
+      - name: Verify protocols runtime available
+        run: |
+          if [[ ! -f ~/.qwickapps/protocols/scripts/check-runtime-drift.sh ]]; then
+            echo "::error::~/.qwickapps/protocols/scripts/check-runtime-drift.sh not found. Ensure install-fleet CI ran successfully on this runner."
+            exit 1
+          fi
 
       - name: Resolve CapRover credentials for drift check
         run: |
@@ -127,8 +127,7 @@ jobs:
 
       - name: Run runtime drift check
         run: |
-          chmod +x .protocols/scripts/check-runtime-drift.sh
-          .protocols/scripts/check-runtime-drift.sh \
+          ~/.qwickapps/protocols/scripts/check-runtime-drift.sh \
             --app-name "$DRIFT_APP_NAME" \
             --host caprover \
             --caprover-url "$DRIFT_CAPROVER_URL" \
