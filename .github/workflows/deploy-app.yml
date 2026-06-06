@@ -127,6 +127,20 @@ on:
         type: string
         default: ''
 
+      # -- Gateway URL overrides (qwickapps/ci-workflows#XX) --------------------
+      # When the gateway backend is not reachable via the auto-derived CapRover
+      # hostname (e.g. services on a separate Tailscale network), callers can
+      # override the URL that provision-gateway writes to TARGET_APP / STABLE_APP.
+      gateway_live_url:
+        description: 'Override TARGET_APP written to the qwickway gateway. When set, replaces the auto-derived https://<live-app>.app.qwickforge.com URL. Use for Tailscale-connected backends (e.g. http://app-live.taile324e7.ts.net:8080).'
+        type: string
+        default: ''
+
+      gateway_stable_url:
+        description: 'When set, also writes STABLE_APP to the qwickway gateway (fallback backend). Leave empty for live-only deployments.'
+        type: string
+        default: ''
+
       # -- CMD override (qwickapps/mcp#84) ---------------------------------------
       cmd:
         description: 'Container CMD override (absolute binary path). Set when one image ships multiple binaries and the CapRover app picks one - written to serviceUpdateOverride. Empty leaves any existing override untouched. Pass the literal sentinel `__clear__` to clear an existing override (workflow inputs cannot disambiguate empty-string from unset).'
@@ -498,14 +512,25 @@ jobs:
 
       - name: Provision QwickWay route
         run: |
+          # Use caller-supplied gateway_live_url when provided (e.g. Tailscale
+          # backends that are not reachable via CapRover's .app.qwickforge.com
+          # hostname). Falls back to the auto-derived CapRover URL otherwise.
+          LIVE_URL="${{ inputs.gateway_live_url || needs.prepare.outputs.live_app_url }}"
+
+          CMD_ARGS=()
+          if [ -n "${{ inputs.gateway_stable_url }}" ]; then
+            CMD_ARGS+=(--stable-app-url "${{ inputs.gateway_stable_url }}")
+          fi
+
           .github/scripts/setup-qwickway-route.sh \
             --gateway-app-name "${{ needs.prepare.outputs.gateway_app_name }}" \
-            --target-app-url   "${{ needs.prepare.outputs.live_app_url }}" \
+            --target-app-url   "$LIVE_URL" \
             --route-caprover-url      "$ROUTE_CAPROVER_URL" \
             --route-caprover-password "$ROUTE_CAPROVER_PASSWORD" \
             --health-check-path "${{ inputs.health_path }}" \
             --github-token "$GHCR_PULL_TOKEN" \
-            --github-owner "${{ env.OWNER }}"
+            --github-owner "${{ env.OWNER }}" \
+            "${CMD_ARGS[@]}"
 
   # -- Phase 2: Deploy image to build slot & verify health ----------------------
   deploy-and-verify:
