@@ -198,10 +198,15 @@ jobs:
           fi
 
           case "$ENV" in
-            prod|uat)
+            prod)
               BUILD_APP="${APP}-build"
               LIVE_APP="${APP}-live"
               STABLE_APP="${APP}-stable"
+              ;;
+            uat)
+              BUILD_APP="${APP}-uat-build"
+              LIVE_APP="${APP}-uat"
+              STABLE_APP="${APP}-uat-stable"
               ;;
             *)
               # Dev mirrors prod's full blue-green build -> live -> stable
