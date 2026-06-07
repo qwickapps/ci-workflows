@@ -169,22 +169,20 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Image: ${IMAGE}"
 
-      - name: Prepare isolated docker config (headless macOS runner)
-        # This job sets DOCKER_CONFIG to an isolated dir (see job env). docker
-        # login must find an explicit config WITHOUT a credsStore/credHelper
-        # there, otherwise it falls back to the osxkeychain helper which fails
-        # headless: "User interaction is not allowed (-25308)". Seed an empty
-        # config so the token is written to that file in the ephemeral workspace.
+      - name: Authenticate to GHCR (direct config write — no docker login/keychain)
+        # `docker login` (docker/login-action) invokes the osxkeychain helper on
+        # this self-hosted macOS runner regardless of credsStore, and it fails
+        # headless: "User interaction is not allowed (-25308)". Write the registry
+        # auth straight into the isolated DOCKER_CONFIG so buildx pushes with it
+        # and `docker login` is never called.
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
-          echo '{"auths":{}}' > "$DOCKER_CONFIG/config.json"
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PUSH_TOKEN }}
+          AUTH="$(printf '%s:%s' '${{ github.actor }}' "$GHCR_TOKEN" | base64 | tr -d '\n')"
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {"auths":{"${{ env.REGISTRY }}":{"auth":"$AUTH"}}}
+          EOF
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
