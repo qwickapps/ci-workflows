@@ -1,49 +1,54 @@
 name: Deploy App (Reusable)
 
-# blue-green-exempt: canonical reusable workflow implementation for qwickapps/ci-workflows#7
-# Reusable workflow: full blue-green traffic-light deployment pipeline for a qwickapps product.
-# Handles: build -> provision-app -> provision-gateway -> deploy-and-verify -> traffic-light-swap -> cleanup.
+# Canonical 4-stage blue-green pipeline.
 #
-# Callers pass app-specific inputs; all secrets are inherited via `secrets: inherit`.
-# Canonical deploy contract: qwickapps/ci-workflows#7, ADR doc-id 56623128.
+# Stage mapping:
+# - build  -> oci-dev  / <app>-build  -> release-candidate
+# - uat    -> oci-main / <app>-uat    -> release
+# - live   -> oci-main / <app>-live   -> stable + route update
+# - stable -> macmini  / <app>-stable
 #
-# Required GitHub secrets (set per repo):
-#   OCI_DEV_CAPROVER_URL          - https://captain.dev.qwickforge.com
-#   OCI_DEV_CAPROVER_PASSWORD     - dev CapRover password
-#   OCI_MAIN_CAPROVER_URL         - https://captain.app.qwickforge.com
-#   OCI_MAIN_CAPROVER_PASSWORD    - prod CapRover password
-#   OCI_GATEWAY_CAPROVER_URL      - gateway CapRover URL
-#   OCI_GATEWAY_CAPROVER_PASSWORD - gateway CapRover password
-#   GHCR_PUSH_TOKEN               - GHCR push token
-#   GHCR_PULL_TOKEN               - GHCR pull token
+# All stages run on [self-hosted, macmini].
+#
+# Tag lineage (all on the same immutable digest):
+#   <sha-image> -> release-candidate -> release -> stable
+#
+# Image is built once for the stage build input when no image_ref is provided.
+# UAT/live/stable never rebuild; they retag forward only.
 
 on:
   workflow_call:
     inputs:
-      # -- Identity --------------------------------------------------------------
+      # -- Identity ------------------------------------------------------------
       app_name:
-        description: 'Product/app slug (e.g. faabzi, work-macha)'
+        description: 'Product/app slug (e.g. qwickapps-mcp)'
         type: string
         required: true
 
       environment:
-        description: 'Target environment: dev | uat | prod'
+        description: 'Target logical environment (used for env file lookup and compatibility with legacy callers)'
         type: string
         required: true
 
-      # -- Build -----------------------------------------------------------------
+      stage:
+        description: 'Deployment stage. One of build | uat | live | stable'
+        type: string
+        required: false
+        default: 'build'
+
+      # -- Build --------------------------------------------------------------
       dockerfile_path:
-        description: 'Path to Dockerfile from repo root (e.g. clients/faabzi/Dockerfile)'
+        description: 'Path to Dockerfile from repo root'
         type: string
         required: true
 
       package_json_path:
-        description: 'Path to package.json for version extraction (e.g. clients/faabzi/package.json). Not required when dockerfile_only is true.'
+        description: 'Path to package.json for version extraction (when not dockerfile_only)'
         type: string
         default: ''
 
       dockerfile_only:
-        description: 'Set to "true" for Dockerfile-only builds with no Node project. Skips corepack/pnpm setup, dependency install, and version extraction from package.json. Image tag uses 0.0.0.<run_number>.'
+        description: 'Set true for Dockerfile-only builds'
         type: string
         default: 'false'
 
@@ -53,97 +58,89 @@ on:
         default: 'schema,logging,auth,react-framework,auth-client,cms,server'
 
       image_ref:
-        description: 'Optional prebuilt image ref to deploy. When set, this workflow skips its build job and deploys the provided image. Used by the three-app caller to share one Docker build across multiple CapRover apps.'
+        description: 'Image to deploy for this stage. If omitted for build, workflow builds one image; for uat/live/stable it will default to the prior immutable tag.'
         type: string
         default: ''
 
       container_port:
-        description: 'Container port the app listens on. REQUIRED - pass explicitly from caller.'
+        description: 'Container port the app listens on'
         type: string
-        default: ''
+        required: true
 
-      # -- Health ----------------------------------------------------------------
+      # -- Health ------------------------------------------------------------
       health_path:
-        description: 'Health check endpoint, must start with /. REQUIRED - pass explicitly from caller.'
+        description: 'Health check endpoint (must start with /)'
         type: string
-        default: ''
+        required: true
 
-      # -- CapRover --------------------------------------------------------------
+      # -- CapRover ----------------------------------------------------------
       caprover_host:
-        description: 'CapRover hostname for URL fallback (e.g. captain.dev.qwickforge.com)'
+        description: 'CapRover host fallback (e.g. captain.dev.qwickforge.com)'
         type: string
         required: true
 
       caprover_url:
-        description: 'Optional explicit CapRover URL. Defaults to the OCI_*_CAPROVER_URL secret for the selected environment, then https://<caprover_host>.'
+        description: 'Optional explicit CapRover URL override'
         type: string
         default: ''
 
-      # -- Public URLs -----------------------------------------------------------
+      # -- Public URLs -------------------------------------------------------
       public_url:
-        description: 'Public-facing URL for this environment (e.g. https://dev.faabzi.com)'
+        description: 'Public-facing URL for smoke/e2e checks'
         type: string
         required: true
 
-      # -- Misc ------------------------------------------------------------------
-      promote_to_stable:
-        description: 'Whether traffic-light deploy should promote build -> live -> stable. Set false for live-only deploys where stable is managed separately on macmini.'
-        type: boolean
-        default: true
-
+      # -- Misc -------------------------------------------------------------
       run_migrations:
-        description: 'Whether to run DB migrations during traffic-light deploy'
+        description: 'Whether to run migration checks (used by uat in this flow)'
         type: string
         default: 'false'
 
       run_e2e:
-        description: 'Whether to run E2E smoke tests after build deploy'
+        description: 'Whether to run E2E after successful deploy'
         type: string
         default: 'false'
 
       smoke_test_path:
-        description: 'API path to hit for a basic smoke test after health check (e.g. /qapi/api/globals/site-settings). Leave empty to skip.'
+        description: 'Optional smoke test path'
         type: string
         default: ''
 
       smoke_test_command:
-        description: 'Optional shell command to run after build-slot health validation. Receives APP_URL, HEALTH_PATH, IMAGE_REF, APP_NAME, and ENVIRONMENT.'
+        description: 'Optional smoke-test command with APP_URL, HEALTH_PATH, IMAGE_REF, APP_NAME, ENV_LABEL'
         type: string
         default: ''
 
-      # -- Subsystem Health Classification ---------------------------------------
+      # -- Subsystem health -----------------------------------------------
       critical_subsystems:
-        description: 'Comma-separated subsystem names that MUST be healthy for deploy to proceed (e.g. postgres,payload-cms-service). If empty, all subsystems are treated as critical.'
+        description: 'Comma-separated critical subsystems'
         type: string
         default: 'postgres'
 
       warning_subsystems:
-        description: 'Comma-separated subsystem names that are checked but non-blocking (e.g. auth-supertokens). Unhealthy warnings are logged but do not fail the deploy.'
+        description: 'Comma-separated warning subsystems'
         type: string
         default: ''
 
       prod_critical_subsystems:
-        description: 'Comma-separated subsystem names that are warnings in dev/uat but MUST be healthy in prod/uat (e.g. auth-supertokens). These are merged into critical_subsystems when environment != dev.'
+        description: 'Subsystems promoted to critical in non-build stages'
         type: string
         default: ''
 
-      # -- Gateway URL overrides (qwickapps/ci-workflows#XX) --------------------
-      # When the gateway backend is not reachable via the auto-derived CapRover
-      # hostname (e.g. services on a separate Tailscale network), callers can
-      # override the URL that provision-gateway writes to TARGET_APP / STABLE_APP.
+      # -- Gateway URL overrides -------------------------------------------
       gateway_live_url:
-        description: 'Override TARGET_APP written to the qwickway gateway. When set, replaces the auto-derived https://<live-app>.app.qwickforge.com URL. Use for Tailscale-connected backends (e.g. http://app-live.taile324e7.ts.net:8080).'
+        description: 'Optional live backend URL override for qwickway route'
         type: string
         default: ''
 
       gateway_stable_url:
-        description: 'When set, also writes STABLE_APP to the qwickway gateway (fallback backend). Leave empty for live-only deployments.'
+        description: 'Optional stable backend URL used for ordered fallback route'
         type: string
         default: ''
 
-      # -- CMD override (qwickapps/mcp#84) ---------------------------------------
+      # -- CMD override ----------------------------------------------------
       cmd:
-        description: 'Container CMD override (absolute binary path). Set when one image ships multiple binaries and the CapRover app picks one - written to serviceUpdateOverride. Empty leaves any existing override untouched. Pass the literal sentinel `__clear__` to clear an existing override (workflow inputs cannot disambiguate empty-string from unset).'
+        description: 'Container CMD override sent to configure-caprover-app'
         type: string
         default: ''
 
@@ -152,121 +149,177 @@ env:
   OWNER: qwickapps
 
 jobs:
-  # -- Phase 0a: Deploy contract preflight --------------------------------------
-  preflight:
-    uses: qwickapps/ci-workflows/.github/workflows/deploy-preflight.yml@main
-    secrets: inherit
-
-  # -- Phase 0b: Compute metadata -----------------------------------------------
-  prepare:
-    needs: [preflight]
+  # -- Stage resolution ------------------------------------------------------
+  resolve-stage:
     runs-on: [self-hosted, macmini]
     outputs:
-      image_ref:        ${{ steps.meta.outputs.image_ref }}
-      tag:              ${{ steps.meta.outputs.tag }}
-      build_app:        ${{ steps.meta.outputs.build_app }}
-      live_app:         ${{ steps.meta.outputs.live_app }}
-      stable_app:       ${{ steps.meta.outputs.stable_app }}
-      app_url:          ${{ steps.urls.outputs.app_url }}
-      gateway_app_name: ${{ steps.urls.outputs.gateway_app_name }}
-      live_app_url:     ${{ steps.urls.outputs.live_app_url }}
+      stage: ${{ steps.meta.outputs.stage }}
+      app_name: ${{ steps.meta.outputs.app_name }}
+      env_label: ${{ steps.meta.outputs.env_label }}
+      image_name: ${{ steps.meta.outputs.image_name }}
+      source_image_ref: ${{ steps.meta.outputs.source_image_ref }}
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      prior_tag: ${{ steps.meta.outputs.prior_tag }}
+      next_tag: ${{ steps.meta.outputs.next_tag }}
+      target_app: ${{ steps.meta.outputs.target_app }}
+      target_app_url: ${{ steps.meta.outputs.target_app_url }}
+      gateway_app_name: ${{ steps.meta.outputs.gateway_app_name }}
+      stable_app_url: ${{ steps.meta.outputs.stable_app_url }}
+      caprover_host_name: ${{ steps.meta.outputs.caprover_host_name }}
+      caprover_required: ${{ steps.meta.outputs.caprover_required }}
+      run_migrations_for_stage: ${{ steps.meta.outputs.run_migrations_for_stage }}
+      build_required: ${{ steps.meta.outputs.build_required }}
+      canary: ${{ steps.meta.outputs.canary }}
     steps:
-      - name: Validate required inputs
-        run: |
-          [ -n "${{ inputs.container_port }}" ] || { echo "ERROR: container_port is required"; exit 1; }
-          [ -n "${{ inputs.health_path }}" ] || { echo "ERROR: health_path is required"; exit 1; }
-          case "${{ inputs.health_path }}" in /*) ;; *) echo "ERROR: health_path must start with /"; exit 1 ;; esac
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Generate image metadata
+      - name: Resolve canonical stage contract
         id: meta
         run: |
-          if [ "${{ inputs.dockerfile_only }}" = "true" ]; then
-            VERSION="0.0.0"
-          else
-            VERSION=$(node -p "require('./${{ inputs.package_json_path }}').version")
-          fi
-          TAG="${VERSION}.${{ github.run_number }}"
-          ENV="${{ inputs.environment }}"
-          APP="${{ inputs.app_name }}"
-          if [ -n "${{ inputs.image_ref }}" ]; then
-            IMAGE="${{ inputs.image_ref }}"
-          else
-            IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/img-${APP}:${TAG}"
-          fi
+          set -euo pipefail
 
-          case "$ENV" in
-            prod)
-              BUILD_APP="${APP}-build"
-              LIVE_APP="${APP}-live"
-              STABLE_APP="${APP}-stable"
-              ;;
-            uat)
-              BUILD_APP="${APP}-uat-build"
-              LIVE_APP="${APP}-uat"
-              STABLE_APP="${APP}-uat-stable"
+          STAGE_INPUT="${{ inputs.stage }}"
+          APP_NAME="${{ inputs.app_name }}"
+          INPUT_IMAGE="${{ inputs.image_ref }}"
+
+          case "$STAGE_INPUT" in
+            build|uat|live|stable)
               ;;
             *)
-              # Dev mirrors prod's full blue-green build -> live -> stable
-              # contract. Slot apps live on
-              # the dev CapRover instance, so the prod-style names cannot
-              # collide with prod.
-              BUILD_APP="${APP}-build"
-              LIVE_APP="${APP}-live"
-              STABLE_APP="${APP}-stable"
+              echo "ERROR: invalid stage '$STAGE_INPUT'"
+              exit 1
               ;;
           esac
 
-          echo "image_ref=${IMAGE}"         >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
-          echo "build_app=${BUILD_APP}"     >> "$GITHUB_OUTPUT"
-          echo "live_app=${LIVE_APP}"       >> "$GITHUB_OUTPUT"
-          echo "stable_app=${STABLE_APP}"   >> "$GITHUB_OUTPUT"
-
-      - name: Derive URLs
-        id: urls
-        run: |
-          ENV="${{ inputs.environment }}"
-          APP="${{ inputs.app_name }}"
-          BUILD_APP="${{ steps.meta.outputs.build_app }}"
-          LIVE_APP="${{ steps.meta.outputs.live_app }}"
-
-          case "$ENV" in
-            prod)
-              APP_URL="https://${BUILD_APP}.app.qwickforge.com"
-              GATEWAY_APP_NAME="${APP}"
-              LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
-              ;;
-            uat)
-              APP_URL="https://${BUILD_APP}.app.qwickforge.com"
-              GATEWAY_APP_NAME="${APP}-uat"
-              LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
-              ;;
+          if [ -z "$APP_NAME" ]; then
+            echo "ERROR: app_name is required"
+            exit 1
+          fi
+          if [ -z "${{ inputs.container_port }}" ]; then
+            echo "ERROR: container_port is required"
+            exit 1
+          fi
+          if [ -z "${{ inputs.health_path }}" ]; then
+            echo "ERROR: health_path is required"
+            exit 1
+          fi
+          case "${{ inputs.health_path }}" in
+            /*) ;;
             *)
-              # Dev is blue-green; verify against the build slot and route
-              # gateway traffic at the live slot.
-              APP_URL="https://${BUILD_APP}.dev.qwickforge.com"
-              GATEWAY_APP_NAME="${APP}-dev"
-              LIVE_APP_URL="https://${LIVE_APP}.dev.qwickforge.com"
+              echo "ERROR: health_path must start with /"
+              exit 1
               ;;
           esac
 
-          echo "app_url=${APP_URL}"                   >> "$GITHUB_OUTPUT"
-          echo "gateway_app_name=${GATEWAY_APP_NAME}" >> "$GITHUB_OUTPUT"
-          echo "live_app_url=${LIVE_APP_URL}"         >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_IMAGE" ]; then
+            IMAGE_BASE="$(printf '%s' "$INPUT_IMAGE" | sed 's/@.*$//' | sed -E 's/:[^:/]+$//')"
+          fi
+          if [ -z "${IMAGE_BASE:-}" ]; then
+            IMAGE_BASE="${{ env.REGISTRY }}/${{ env.OWNER }}/img-${APP_NAME}"
+          fi
 
-  # -- Phase 0c: Validate rendered env values (qwickapps/ci-workflows#36) --------
-  # BLOCKING gate. The caller's write-env-file job renders the deploy env to
-  # /tmp/app-env-<env>-<app>.env BEFORE this reusable workflow runs. We reject
-  # empty / placeholder / format-invalid values (e.g. TS_EPHEMERAL_AUTHKEY=`-`)
-  # here, before any build or CapRover provisioning happens, so a garbage secret
-  # cannot reach `tailscale up --authkey=-` and crash-loop the container.
-  # Both `build` and the provision jobs depend on this job, so neither the
-  # normal build path nor the prebuilt-image (image_ref) path can skip it.
+          STAGE="$STAGE_INPUT"
+          CANARY="false"
+          CAPROVER_REQUIRED="true"
+
+          case "$STAGE" in
+            build)
+              TARGET_APP="${APP_NAME}-build"
+              TARGET_APP_URL="https://${APP_NAME}-build.dev.qwickforge.com"
+              GATEWAY_APP_NAME="${APP_NAME}-dev"
+              ENV_LABEL="dev"
+              PRIOR_TAG=""
+              NEXT_TAG="${IMAGE_BASE}:release-candidate"
+              STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
+              RUN_MIGRATIONS_FOR_STAGE="false"
+              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              ;;
+            uat)
+              TARGET_APP="${APP_NAME}-uat"
+              TARGET_APP_URL="https://${APP_NAME}-uat.app.qwickforge.com"
+              GATEWAY_APP_NAME="${APP_NAME}-uat"
+              ENV_LABEL="uat"
+              PRIOR_TAG="${IMAGE_BASE}:release-candidate"
+              NEXT_TAG="${IMAGE_BASE}:release"
+              STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
+              RUN_MIGRATIONS_FOR_STAGE="${{ inputs.run_migrations }}"
+              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              ;;
+            live)
+              TARGET_APP="${APP_NAME}-live"
+              TARGET_APP_URL="https://${APP_NAME}-live.app.qwickforge.com"
+              GATEWAY_APP_NAME="${APP_NAME}"
+              ENV_LABEL="live"
+              PRIOR_TAG="${IMAGE_BASE}:release"
+              NEXT_TAG="${IMAGE_BASE}:stable"
+              STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
+              RUN_MIGRATIONS_FOR_STAGE="false"
+              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              ;;
+            stable)
+              TARGET_APP="${APP_NAME}-stable"
+              TARGET_APP_URL="${{ inputs.gateway_stable_url }}"
+              GATEWAY_APP_NAME="${APP_NAME}"
+              ENV_LABEL="stable"
+              PRIOR_TAG="${IMAGE_BASE}:stable"
+              NEXT_TAG=""
+              STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
+              RUN_MIGRATIONS_FOR_STAGE="false"
+              CAPROVER_REQUIRED="false"
+              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              ;;
+          esac
+
+          if [ -z "$TARGET_APP_URL" ]; then
+            TARGET_APP_URL="http://${APP_NAME}-${STAGE}.taile324e7.ts.net:8080"
+          fi
+
+          if [ "$STAGE" = "stable" ] && [ -z "$STABLE_APP_URL" ]; then
+            STABLE_APP_URL="http://${APP_NAME}-stable.taile324e7.ts.net:8080"
+          fi
+
+          if [ -z "$INPUT_IMAGE" ]; then
+            if [ "$STAGE" = "build" ]; then
+              IMAGE_TAG="sha-${GITHUB_SHA:0:12}"
+              if [ "${{ inputs.dockerfile_only }}" = "false" ] && [ -z "${{ inputs.package_json_path }}" ]; then
+                echo "ERROR: package_json_path required unless dockerfile_only=true"
+                exit 1
+              fi
+              IMAGE_REF="${IMAGE_BASE}:${IMAGE_TAG}"
+              BUILD_REQUIRED="true"
+            else
+              IMAGE_REF="${PRIOR_TAG}"
+              BUILD_REQUIRED="false"
+            fi
+          else
+            IMAGE_REF="$INPUT_IMAGE"
+            BUILD_REQUIRED="false"
+          fi
+
+          if [ -z "$IMAGE_REF" ]; then
+            echo "ERROR: resolved image_ref is empty"
+            exit 1
+          fi
+
+          echo "stage=${STAGE}"
+          echo "app_name=${APP_NAME}"
+          echo "env_label=${ENV_LABEL}"
+          echo "image_name=${IMAGE_BASE}"
+          echo "source_image_ref=${INPUT_IMAGE}"
+          echo "image_ref=${IMAGE_REF}"
+          echo "prior_tag=${PRIOR_TAG}"
+          echo "next_tag=${NEXT_TAG}"
+          echo "target_app=${TARGET_APP}"
+          echo "target_app_url=${TARGET_APP_URL}"
+          echo "gateway_app_name=${GATEWAY_APP_NAME}"
+          echo "stable_app_url=${STABLE_APP_URL}"
+          echo "caprover_host_name=${CAPROVER_HOST_NAME}"
+          echo "caprover_required=${CAPROVER_REQUIRED}"
+          echo "run_migrations_for_stage=${RUN_MIGRATIONS_FOR_STAGE}"
+          echo "build_required=${BUILD_REQUIRED}"
+          echo "canary=${CANARY}"
+
+  # -- Immutable env var gate -----------------------------------------------
   validate-env:
-    needs: [prepare]
+    needs: [resolve-stage]
     runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout ci-workflows scripts
@@ -282,34 +335,31 @@ jobs:
       - name: Make scripts executable
         run: chmod +x .ci-workflows/scripts/*.sh
 
-      - name: Validate rendered env values
+      - name: Validate rendered env values (required for all stages)
         run: |
-          ENV="${{ inputs.environment }}"
+          set -euo pipefail
+          ENV="${{ needs.resolve-stage.outputs.env_label }}"
           APP="${{ inputs.app_name }}"
           ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
+
           if [ ! -f "$ENV_FILE" ]; then
-            # Some callers render env via an alternate mechanism (e.g. SOPS in
-            # deploy-faabzi.yml) and do not produce this file; provision-app
-            # tolerates that, so we must not block them here. SOPS-path value
-            # validation is tracked as a follow-up on #36.
-            echo "::notice::No rendered env file at ${ENV_FILE}; caller uses an alternate env mechanism — skipping rendered-env value validation."
-            exit 0
+            echo "ERROR: missing required env file ${ENV_FILE}"
+            exit 1
           fi
+
           .ci-workflows/scripts/validate-env-values.sh "$ENV_FILE"
 
-  # -- Phase 1: Build & push Docker image ---------------------------------------
+  # -- Build once per image_ref ---------------------------------------------
   build:
-    needs: [prepare, validate-env]
-    if: inputs.image_ref == ''
+    needs: [resolve-stage]
+    if: ${{ needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.build_required == 'true' }}
     runs-on: [self-hosted, macmini]
-    # GHCR push uses GHCR_PUSH_TOKEN PAT (see 'Login to GHCR' step) - we don't
-    # need elevated GITHUB_TOKEN packages:write, which the qwickapps org policy
-    # disables at the workflow-defaults level.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
+        if: inputs.dockerfile_only != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -325,13 +375,12 @@ jobs:
         if: inputs.dockerfile_only != 'true'
         run: pnpm install --no-frozen-lockfile --store-dir .pnpm-store
 
-      # Standalone repos pass workspace_packages='' to skip the monorepo-only build step.
       - name: Build workspace packages
         if: inputs.workspace_packages != ''
         run: |
           CLIENT_DIR="$(dirname '${{ inputs.dockerfile_path }}')"
           .github/scripts/build-workspace-package.sh \
-            --product "${CLIENT_DIR}" \
+            --product "$CLIENT_DIR" \
             --packages "${{ inputs.workspace_packages }}"
 
       - name: Ensure Docker endpoint
@@ -343,15 +392,11 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          # macOS self-hosted runner: bypass docker login to avoid keychain issues.
-          # Write base64-encoded credentials directly into a temp config.json with
-          # no credsStore entry. Docker reads the auths map directly for auth.
           TMPDIR_DOCKER="$(mktemp -d)"
           AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$TMPDIR_DOCKER/config.json"
-          export DOCKER_CONFIG="$TMPDIR_DOCKER"
           echo "DOCKER_CONFIG=$TMPDIR_DOCKER" >> "$GITHUB_ENV"
-          echo "GHCR credentials written to $TMPDIR_DOCKER/config.json (no docker login, no keychain)"
+          echo "GHCR credentials wrote to $TMPDIR_DOCKER/config.json"
 
       - name: Clean up stale buildx builders
         run: |
@@ -363,7 +408,7 @@ jobs:
         with:
           driver-opts: network=host
 
-      - name: Build and push
+      - name: Build and push immutable image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -371,31 +416,44 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: |
-            ${{ needs.prepare.outputs.image_ref }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/img-${{ inputs.app_name }}-${{ inputs.environment }}:latest
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+            ${{ needs.resolve-stage.outputs.image_ref }}
 
-      - name: Rotate build cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-
-  # -- Phase 1.5 (parallel with build): Provision CapRover app ------------------
-  # NOTE: This job expects an env file at /tmp/app-env-<app_name>.env written by
-  # the *caller* workflow in a preceding step. For faabzi this is done via the
-  # SOPS decrypt step in deploy-faabzi.yml. If no env file is present the job
-  # skips env update and just ensures the app exists.
-  provision-app:
-    needs: [prepare, validate-env, build]
+  # -- Provenance gate (all stages require stage image; non-build requires prior)
+  verify-provenance:
+    needs: [resolve-stage, build, validate-env]
     if: |
       always() &&
-      needs.prepare.result == 'success' &&
-      needs.validate-env.result == 'success' &&
+      needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
+    steps:
+      - name: Check image references exist
+        run: |
+          set -euo pipefail
+          STAGE="${{ needs.resolve-stage.outputs.stage }}"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          PRIOR_TAG="${{ needs.resolve-stage.outputs.prior_tag }}"
+
+          docker buildx imagetools inspect "$IMAGE_REF" >/dev/null
+
+          if [ "$STAGE" != "build" ]; then
+            if [ -z "$PRIOR_TAG" ]; then
+              echo "ERROR: prior tag is required for stage '$STAGE'"
+              exit 1
+            fi
+            docker buildx imagetools inspect "$PRIOR_TAG" >/dev/null
+          fi
+
+  # -- CapRover deployment --------------------------------------------
+  deploy-caprover:
+    needs: [resolve-stage, validate-env, verify-provenance, build]
+    if: |
+      needs.resolve-stage.outputs.caprover_required == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      needs.verify-provenance.result == 'success'
+    runs-on: [self-hosted, macmini]
     concurrency:
-      group: caprover-provision-${{ inputs.app_name }}-${{ inputs.environment }}
+      group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
     steps:
       - name: Checkout code
@@ -403,540 +461,379 @@ jobs:
 
       - name: Resolve CapRover credentials
         run: |
-          ENV="${{ inputs.environment }}"
+          STAGE="${{ needs.resolve-stage.outputs.stage }}"
+
           if [ -n "${{ inputs.caprover_url }}" ]; then
             CP_URL="${{ inputs.caprover_url }}"
-            if [ "$ENV" = "dev" ]; then
-              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-            else
-              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
-            fi
-          elif [ "$ENV" = "dev" ]; then
-            CP_URL="${{ secrets.OCI_DEV_CAPROVER_URL }}"
-            CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
           else
-            CP_URL="${{ secrets.OCI_MAIN_CAPROVER_URL }}"
-            CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
           fi
 
           if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
-            CP_URL="https://${{ inputs.caprover_host }}"
+            CP_URL="https://${{ needs.resolve-stage.outputs.caprover_host_name }}"
           fi
 
-          if [ -z "$CP_URL" ] || [ -z "$CP_PASS" ]; then
-            echo "ERROR: CapRover credentials not found."
-            echo "  Set OCI_DEV_CAPROVER_URL + OCI_DEV_CAPROVER_PASSWORD (dev)"
-            echo "   or OCI_MAIN_CAPROVER_URL + OCI_MAIN_CAPROVER_PASSWORD (uat/prod)"
+          case "$STAGE" in
+            build)
+              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+              ;;
+            *)
+              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              ;;
+          esac
+
+          if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
+            echo "ERROR: CapRover credentials missing for stage ${STAGE}"
             exit 1
           fi
 
+          {
+            echo "CAPROVER_URL=$CP_URL"
+            echo "CAPROVER_PASSWORD=$CP_PASS"
+            echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}"
+          } >> "$GITHUB_ENV"
           echo "::add-mask::$CP_PASS"
-          echo "CAPROVER_URL=$CP_URL"       >> "$GITHUB_ENV"
-          echo "CAPROVER_PASSWORD=$CP_PASS" >> "$GITHUB_ENV"
 
       - name: Make scripts executable
         run: chmod +x .github/scripts/*.sh
 
-      - name: Configure build slot on CapRover
+      - name: Ensure stable slot is up for live promotion
+        if: needs.resolve-stage.outputs.stage == 'live'
         run: |
-          # Env file path includes the environment prefix so a uat run cannot
-          # overwrite a dev file, or vice versa, on a shared self-hosted runner.
-          # Caller workflow writes to /tmp/app-env-${ENV}-${APP}.env;
-          # legacy callers that wrote to /tmp/app-env-${APP}.env are
-          # checked as a fallback to ease the transition window.
-          ENV="${{ inputs.environment }}"
-          APP="${{ inputs.app_name }}"
-          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
-          if [ ! -f "$ENV_FILE" ]; then
-            LEGACY="/tmp/app-env-${APP}.env"
-            if [ -f "$LEGACY" ]; then
-              echo "INFO: using legacy env path $LEGACY (caller has not adopted env-prefixed path yet)"
-              ENV_FILE="$LEGACY"
-            else
-              echo "INFO: $ENV_FILE not found - app will keep its existing env vars"
-              # Minimal file so configure script does not fail
-              printf 'NODE_ENV=production\n' > "$ENV_FILE"
+          set -euo pipefail
+          STABLE_URL="${{ needs.resolve-stage.outputs.stable_app_url }}"
+          if [ -z "$STABLE_URL" ]; then
+            echo "ERROR: stable_app_url is required for live stage"
+            exit 1
+          fi
+          for attempt in $(seq 1 10); do
+            echo "Attempt $attempt checking stable slot"
+            if curl -kfsS --max-time 3 "${STABLE_URL}${{ inputs.health_path }}" >/dev/null 2>&1; then
+              echo "Stable slot is healthy at ${STABLE_URL}"
+              exit 0
             fi
+            sleep 5
+          done
+          echo "ERROR: stable slot not healthy at ${STABLE_URL}"
+          exit 1
+
+      - name: Configure target slot
+        run: |
+          set -euo pipefail
+          APP="${{ needs.resolve-stage.outputs.app_name }}"
+          ENV="${{ needs.resolve-stage.outputs.env_label }}"
+          TARGET_APP="${{ needs.resolve-stage.outputs.target_app }}"
+          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
+
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "ERROR: missing env file ${ENV_FILE}"
+            exit 1
           fi
 
-          # The workflow-input contract reserves the literal sentinel
-          # `__clear__` for "explicitly clear any existing CMD override".
-          # An empty `cmd:` input means "leave any existing override
-          # untouched" (default behavior on a fresh deploy with no
-          # CMD requirement). Without this sentinel a caller cannot
-          # request the clear path through the workflow boundary
-          # because empty strings cannot be distinguished from
-          # "input not set" at template-time.
           CMD_ARGS=()
           if [ "${{ inputs.cmd }}" = "__clear__" ]; then
-            CMD_ARGS=(--cmd "")
+            CMD_ARGS+=(--cmd "")
           elif [ -n "${{ inputs.cmd }}" ]; then
-            CMD_ARGS=(--cmd "${{ inputs.cmd }}")
+            CMD_ARGS+=(--cmd "${{ inputs.cmd }}")
           fi
 
           .github/scripts/configure-caprover-app.sh \
-            --app-name         "${{ needs.prepare.outputs.build_app }}" \
-            --caprover-url     "$CAPROVER_URL" \
+            --app-name "$TARGET_APP" \
+            --caprover-url "$CAPROVER_URL" \
             --caprover-password "$CAPROVER_PASSWORD" \
-            --container-port   "${{ inputs.container_port }}" \
-            --env-file         "$ENV_FILE" \
+            --container-port "${{ inputs.container_port }}" \
+            --env-file "$ENV_FILE" \
             "${CMD_ARGS[@]}"
 
-  # -- Phase 1.5 (parallel with build): Provision gateway route -----------------
-  provision-gateway:
-    needs: [prepare, validate-env, build]
-    if: |
-      always() &&
-      needs.prepare.result == 'success' &&
-      needs.validate-env.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
-    runs-on: [self-hosted, macmini]
-    continue-on-error: true
-    concurrency:
-      group: caprover-provision-gateway-${{ inputs.app_name }}-${{ inputs.environment }}
-      cancel-in-progress: false
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Resolve gateway credentials
+      - name: Ensure target app exists on CapRover
         run: |
-          GW_URL="${{ secrets.OCI_GATEWAY_CAPROVER_URL }}"
-          GW_PASS="${{ secrets.OCI_GATEWAY_CAPROVER_PASSWORD }}"
-          GHCR_PULL="${{ secrets.GHCR_PULL_TOKEN }}"
-
-          echo "::add-mask::$GW_PASS"
-          echo "::add-mask::$GHCR_PULL"
-
-          echo "ROUTE_CAPROVER_URL=$GW_URL"       >> "$GITHUB_ENV"
-          echo "ROUTE_CAPROVER_PASSWORD=$GW_PASS" >> "$GITHUB_ENV"
-          echo "GHCR_PULL_TOKEN=$GHCR_PULL"       >> "$GITHUB_ENV"
-
-      - name: Make scripts executable
-        run: chmod +x .github/scripts/*.sh
-
-      - name: Provision QwickWay route
-        run: |
-          # Use caller-supplied gateway_live_url when provided (e.g. Tailscale
-          # backends that are not reachable via CapRover's .app.qwickforge.com
-          # hostname). Falls back to the auto-derived CapRover URL otherwise.
-          LIVE_URL="${{ inputs.gateway_live_url || needs.prepare.outputs.live_app_url }}"
-
-          CMD_ARGS=()
-          if [ -n "${{ inputs.gateway_stable_url }}" ]; then
-            CMD_ARGS+=(--stable-app-url "${{ inputs.gateway_stable_url }}")
-          fi
-
-          .github/scripts/setup-qwickway-route.sh \
-            --gateway-app-name "${{ needs.prepare.outputs.gateway_app_name }}" \
-            --target-app-url   "$LIVE_URL" \
-            --route-caprover-url      "$ROUTE_CAPROVER_URL" \
-            --route-caprover-password "$ROUTE_CAPROVER_PASSWORD" \
-            --health-check-path "${{ inputs.health_path }}" \
-            --github-token "$GHCR_PULL_TOKEN" \
-            --github-owner "${{ env.OWNER }}" \
-            "${CMD_ARGS[@]}"
-
-  # -- Phase 2: Deploy image to build slot & verify health ----------------------
-  deploy-and-verify:
-    needs: [prepare, build, provision-app, provision-gateway]
-    if: |
-      always() &&
-      needs.prepare.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      needs.provision-app.result == 'success' &&
-      (needs.provision-gateway.result == 'success' || needs.provision-gateway.result == 'skipped')
-    runs-on: [self-hosted, macmini]
-    concurrency:
-      group: caprover-deploy-${{ inputs.app_name }}-${{ inputs.environment }}
-      cancel-in-progress: false
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Resolve CapRover credentials
-        run: |
-          ENV="${{ inputs.environment }}"
-          if [ -n "${{ inputs.caprover_url }}" ]; then
-            CP_URL="${{ inputs.caprover_url }}"
-            if [ "$ENV" = "dev" ]; then
-              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-            else
-              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
-            fi
-          elif [ "$ENV" = "dev" ]; then
-            CP_URL="${{ secrets.OCI_DEV_CAPROVER_URL }}"
-            CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-          else
-            CP_URL="${{ secrets.OCI_MAIN_CAPROVER_URL }}"
-            CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
-          fi
-
-          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
-            CP_URL="https://${{ inputs.caprover_host }}"
-          fi
-
-          echo "::add-mask::$CP_PASS"
-          echo "CAPROVER_URL=$CP_URL"       >> "$GITHUB_ENV"
-          echo "CAPROVER_PASSWORD=$CP_PASS" >> "$GITHUB_ENV"
-          echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}" >> "$GITHUB_ENV"
-
-      - name: Make scripts executable
-        run: chmod +x .github/scripts/*.sh
-
-      - name: Ensure app exists on CapRover
-        run: |
-          # Login to CapRover and capture token
+          set -euo pipefail
           TOKEN=$(curl -sf -X POST "${CAPROVER_URL}/api/v2/login" \
-            -H "Content-Type: application/json" \
+            -H 'Content-Type: application/json' \
             -d "{\"password\":\"${CAPROVER_PASSWORD}\"}" \
             | tr -d '\n' \
             | sed 's/.*"token":"\([^"]*\)".*/\1/')
-
           if [ -z "$TOKEN" ]; then
-            echo "ERROR: Failed to obtain CapRover token"
+            echo "ERROR: failed to authenticate CapRover"
             exit 1
           fi
 
-          BUILD_APP="${{ needs.prepare.outputs.build_app }}"
-
-          # Check if app already exists
+          APP_NAME="${{ needs.resolve-stage.outputs.target_app }}"
           EXISTS=$(curl -sf "${CAPROVER_URL}/api/v2/user/apps/appDefinitions" \
             -H "x-captain-auth: ${TOKEN}" \
-            -H "x-namespace: captain" \
+            -H 'x-namespace: captain' \
             | tr -d '\n' \
-            | grep -o "\"appName\":\"${BUILD_APP}\"" || true)
-
+            | grep -o "\"appName\":\"${APP_NAME}\"" || true)
           if [ -z "$EXISTS" ]; then
-            echo "App '${BUILD_APP}' not found on CapRover - creating it now..."
-            RESULT=$(curl -sf -X POST "${CAPROVER_URL}/api/v2/user/apps/appDefinitions/register" \
-              -H "Content-Type: application/json" \
+            echo "App '${APP_NAME}' not found - registering"
+            curl -sf -X POST "${CAPROVER_URL}/api/v2/user/apps/appDefinitions/register" \
+              -H 'Content-Type: application/json' \
               -H "x-captain-auth: ${TOKEN}" \
-              -H "x-namespace: captain" \
-              -d "{\"appName\":\"${BUILD_APP}\",\"hasPersistentData\":false}")
-            echo "Create result: $RESULT"
-          else
-            echo "App '${BUILD_APP}' already exists - skipping creation."
+              -H 'x-namespace: captain' \
+              -d "{\"appName\":\"${APP_NAME}\",\"hasPersistentData\":false}"
           fi
 
-      - name: Deploy from GHCR to build slot
+      - name: Deploy image to target slot
         run: |
           .github/scripts/deploy-from-ghcr.sh \
-            --app-name          "${{ needs.prepare.outputs.build_app }}" \
-            --image-ref         "${{ needs.prepare.outputs.image_ref }}" \
-            --caprover-url      "$CAPROVER_URL" \
+            --app-name "${{ needs.resolve-stage.outputs.target_app }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --caprover-url "$CAPROVER_URL" \
             --caprover-password "$CAPROVER_PASSWORD" \
-            --github-token      "$GHCR_PULL_TOKEN" \
-            --github-owner      "${{ env.OWNER }}"
+            --github-token "$GHCR_PULL_TOKEN" \
+            --github-owner "${{ env.OWNER }}"
 
-      - name: Validate build slot health
+      - name: Validate target slot health
         run: |
-          # Next.js + Payload CMS can take 3-4 min to start after a fresh image pull.
-          # The CapRover deploy API call itself often 504s after 2 min (async pull continues).
-          # 15 attempts x 20s = 300s gives enough runway for image pull + container start.
           .github/scripts/validate-deployment-health.sh \
-            --app-name          "${{ needs.prepare.outputs.build_app }}" \
-            --caprover-url      "$CAPROVER_URL" \
+            --app-name "${{ needs.resolve-stage.outputs.target_app }}" \
+            --caprover-url "$CAPROVER_URL" \
             --caprover-password "$CAPROVER_PASSWORD" \
-            --app-url           "${{ needs.prepare.outputs.app_url }}" \
-            --health-path       "${{ inputs.health_path }}" \
-            --max-attempts      15 \
-            --sleep             20
+            --app-url "${{ needs.resolve-stage.outputs.target_app_url }}" \
+            --health-path "${{ inputs.health_path }}" \
+            --max-attempts 15 \
+            --sleep 20
 
-      - name: Deep health check (subsystem validation)
+      - name: Deep subsystem health check
         run: |
-          # After the basic HTTP 200 check passes, run a deep health check that
-          # parses the JSON response and validates each subsystem.
-          # Critical subsystems block promotion; warning subsystems only log.
-          #
-          # Environment-aware classification:
-          #   prod_critical_subsystems are warnings in dev but critical in prod/uat.
-          #   In dev:      kept in WARNING list (non-blocking).
-          #   In uat/prod: merged into CRITICAL list (deploy fails if unhealthy).
-          ENV="${{ inputs.environment }}"
           EFFECTIVE_CRITICAL="${{ inputs.critical_subsystems }}"
           EFFECTIVE_WARNING="${{ inputs.warning_subsystems }}"
           PROD_CRITICAL="${{ inputs.prod_critical_subsystems }}"
+          ENV_CTX="${{ needs.resolve-stage.outputs.stage }}"
 
-          if [ -n "$PROD_CRITICAL" ] && [ "$ENV" != "dev" ]; then
-            # Promote prod_critical_subsystems into the critical list for uat/prod
+          if [ -n "$PROD_CRITICAL" ] && [ "$ENV_CTX" != "build" ]; then
             if [ -n "$EFFECTIVE_CRITICAL" ]; then
               EFFECTIVE_CRITICAL="${EFFECTIVE_CRITICAL},${PROD_CRITICAL}"
             else
-              EFFECTIVE_CRITICAL="${PROD_CRITICAL}"
+              EFFECTIVE_CRITICAL="$PROD_CRITICAL"
             fi
-            # Remove from warning list if present (avoid duplicate classification)
-            EFFECTIVE_WARNING=$(echo "$EFFECTIVE_WARNING" | tr ',' '\n' |               while IFS= read -r item; do
-                trimmed=$(echo "$item" | xargs)
-                if echo "$PROD_CRITICAL" | tr ',' '\n' | xargs -I{} sh -c 'test "$1" = "$2"' _ {} "$trimmed" 2>/dev/null; then
-                  : # skip - now critical
-                else
-                  [ -n "$trimmed" ] && echo "$trimmed"
-                fi
-              done | paste -sd ',')
-            echo "ENV=$ENV: promoting prod_critical_subsystems ($PROD_CRITICAL) to CRITICAL"
-          elif [ -n "$PROD_CRITICAL" ] && [ "$ENV" = "dev" ]; then
-            # In dev: treat prod_critical_subsystems as warnings (non-blocking)
-            if [ -n "$EFFECTIVE_WARNING" ]; then
-              EFFECTIVE_WARNING="${EFFECTIVE_WARNING},${PROD_CRITICAL}"
-            else
-              EFFECTIVE_WARNING="${PROD_CRITICAL}"
-            fi
-            echo "ENV=dev: treating prod_critical_subsystems ($PROD_CRITICAL) as WARNING (non-blocking)"
           fi
 
-          DEEP_ARGS=(
-            --url "${{ needs.prepare.outputs.app_url }}${{ inputs.health_path }}"
-            --timeout 15
-            --max-attempts 3
-            --sleep 10
-          )
+          ARGS=(--url "${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.health_path }}" --timeout 15 --max-attempts 3 --sleep 10)
           if [ -n "$EFFECTIVE_CRITICAL" ]; then
-            DEEP_ARGS+=(--critical-subsystems "$EFFECTIVE_CRITICAL")
+            ARGS+=(--critical-subsystems "$EFFECTIVE_CRITICAL")
           fi
           if [ -n "$EFFECTIVE_WARNING" ]; then
-            DEEP_ARGS+=(--warning-subsystems "$EFFECTIVE_WARNING")
+            ARGS+=(--warning-subsystems "$EFFECTIVE_WARNING")
           fi
           if [ -n "$GITHUB_STEP_SUMMARY" ]; then
-            DEEP_ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
+            ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
           fi
-          .github/scripts/deep-health-check.sh "${DEEP_ARGS[@]}"
+          .github/scripts/deep-health-check.sh "${ARGS[@]}"
 
-      - name: API smoke test
+      - name: Smoke test path
         if: inputs.smoke_test_path != ''
         run: |
-          # Basic API smoke test: verify the endpoint returns HTTP 200 after
-          # the structured health check passes. This catches cases where the
-          # health subsystems are green but a critical route is broken (e.g.
-          # missing Payload globals, misconfigured middleware).
-          SMOKE_URL="${{ needs.prepare.outputs.app_url }}${{ inputs.smoke_test_path }}"
-          echo "Smoke test: GET $SMOKE_URL"
-          MAX=3
-          for attempt in $(seq 1 $MAX); do
-            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 15 "$SMOKE_URL" || echo "000")
-            echo "  Attempt $attempt: HTTP $STATUS"
+          set -euo pipefail
+          SMOKE_URL="${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.smoke_test_path }}"
+          for attempt in $(seq 1 3); do
+            STATUS=$(curl -ksS -o /dev/null -w "%{http_code}" --max-time 15 "$SMOKE_URL" || echo 000)
+            echo "  Attempt $attempt: $STATUS"
             if [ "$STATUS" = "200" ]; then
-              echo "  [OK] Smoke test passed"
               exit 0
             fi
-            [ "$attempt" -lt "$MAX" ] && sleep 10
+            sleep 10
           done
-          echo "  [FAIL] Smoke test failed - $SMOKE_URL returned HTTP $STATUS after $MAX attempts"
+          echo "ERROR: smoke test failed for $SMOKE_URL"
           exit 1
 
       - name: Smoke test command
         if: inputs.smoke_test_command != ''
         env:
-          APP_URL: ${{ needs.prepare.outputs.app_url }}
+          APP_URL: ${{ needs.resolve-stage.outputs.target_app_url }}
           HEALTH_PATH: ${{ inputs.health_path }}
-          IMAGE_REF: ${{ needs.prepare.outputs.image_ref }}
+          IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
           APP_NAME: ${{ inputs.app_name }}
-          ENVIRONMENT: ${{ inputs.environment }}
-        run: ${{ inputs.smoke_test_command }}
+          ENV_LABEL: ${{ needs.resolve-stage.outputs.env_label }}
+        run: |
+          set -euo pipefail
+          ${{ inputs.smoke_test_command }}
 
-  # -- Phase 3: Traffic-light swap (build -> live, live -> stable) ----------------
-  traffic-light-deploy:
-    needs: [prepare, build, provision-app, provision-gateway, deploy-and-verify]
+      - name: Run migration check
+        if: needs.resolve-stage.outputs.run_migrations_for_stage == 'true'
+        run: |
+          set -euo pipefail
+          if [ -x .github/scripts/check-migrations.sh ]; then
+            .github/scripts/check-migrations.sh
+          elif [ -x .github/scripts/run-migrations.sh ]; then
+            .github/scripts/run-migrations.sh
+          else
+            echo "WARNING: migration check enabled but no migration script is available"
+          fi
+
+      - name: Optional E2E
+        if: inputs.run_e2e == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Optional E2E dependencies
+        if: inputs.run_e2e == 'true'
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+          pnpm install --no-frozen-lockfile --store-dir .pnpm-store
+          pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
+
+      - name: Route qwickway to ordered live/stable for live stage
+        if: needs.resolve-stage.outputs.stage == 'live'
+        run: |
+          set -euo pipefail
+          GW_URL="${{ secrets.OCI_GATEWAY_CAPROVER_URL }}"
+          GW_PASS="${{ secrets.OCI_GATEWAY_CAPROVER_PASSWORD }}"
+          GHCR_PULL="${{ secrets.GHCR_PULL_TOKEN }}"
+
+          if [ -z "$GW_URL" ] || [ -z "$GW_PASS" ] || [ -z "$GHCR_PULL" ]; then
+            echo "ERROR: OCI gateway credentials missing for live route update"
+            exit 1
+          fi
+
+          TARGET_URL="${{ needs.resolve-stage.outputs.target_app_url }}"
+          if [ -n "${{ inputs.gateway_live_url }}" ]; then
+            TARGET_URL="${{ inputs.gateway_live_url }}"
+          fi
+
+          STABLE_URL="${{ needs.resolve-stage.outputs.stable_app_url }}"
+          STABLE_ARGS=()
+          if [ -n "$STABLE_URL" ]; then
+            STABLE_ARGS+=(--stable-app-url "$STABLE_URL")
+          fi
+
+          .github/scripts/setup-qwickway-route.sh \
+            --gateway-app-name "${{ needs.resolve-stage.outputs.gateway_app_name }}" \
+            --target-app-url "$TARGET_URL" \
+            --route-caprover-url "$GW_URL" \
+            --route-caprover-password "$GW_PASS" \
+            --health-check-path "${{ inputs.health_path }}" \
+            --github-token "$GHCR_PULL" \
+            --github-owner "${{ env.OWNER }}" \
+            "${STABLE_ARGS[@]}"
+
+  # -- Tag lifecycle promotion ---------------------------------------------
+  retag:
+    needs: [resolve-stage, deploy-caprover, validate-env]
     if: |
-      always() &&
-      needs.prepare.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      needs.provision-app.result == 'success' &&
-      needs.deploy-and-verify.result == 'success'
+      needs.resolve-stage.outputs.stage != 'stable' &&
+      needs.deploy-caprover.result == 'success' &&
+      needs.resolve-stage.outputs.next_tag != ''
     runs-on: [self-hosted, macmini]
-    concurrency:
-      group: caprover-traffic-light-${{ inputs.app_name }}-${{ inputs.environment }}
-      cancel-in-progress: false
+    steps:
+      - name: Login to GHCR for retag operations
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Retag immutable image lineage
+        run: |
+          set -euo pipefail
+          SOURCE_IMAGE="${{ needs.resolve-stage.outputs.image_ref }}"
+          NEXT_TAG="${{ needs.resolve-stage.outputs.next_tag }}"
+          docker buildx imagetools create --tag "$NEXT_TAG" "$SOURCE_IMAGE"
+          echo "Retagged $SOURCE_IMAGE -> $NEXT_TAG"
+
+  # -- Build slot cleanup (post-pass only) ----------------------------------
+  scale-build-slot:
+    needs: [resolve-stage, retag]
+    if: ${{ needs.resolve-stage.outputs.stage == 'build' && needs.retag.result == 'success' }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Resolve CapRover credentials
         run: |
-          ENV="${{ inputs.environment }}"
-          if [ -n "${{ inputs.caprover_url }}" ]; then
-            CP_URL="${{ inputs.caprover_url }}"
-            if [ "$ENV" = "dev" ]; then
-              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-            else
-              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
-            fi
-          elif [ "$ENV" = "dev" ]; then
+          CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
+          CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+          if [ -z "$CP_URL" ] || [ -z "$CP_PASS" ]; then
             CP_URL="${{ secrets.OCI_DEV_CAPROVER_URL }}"
             CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-          else
-            CP_URL="${{ secrets.OCI_MAIN_CAPROVER_URL }}"
-            CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+          fi
+          if [ -z "$CP_URL" ] || [ -z "$CP_PASS" ]; then
+            echo "ERROR: CapRover credentials missing for dev scale operation"
+            exit 1
+          fi
+          echo "CAPROVER_URL=$CP_URL" >> "$GITHUB_ENV"
+          echo "CAPROVER_PASSWORD=$CP_PASS" >> "$GITHUB_ENV"
+
+      - name: Scale build slot to zero on build pass
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/*.sh
+          .github/scripts/caprover-slot-admin.sh scale \
+            --app-name "${{ needs.resolve-stage.outputs.target_app }}" \
+            --instance-count 0 \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD"
+
+  # -- Stable deploy on Coolify/macmini --------------------------------------
+  deploy-stable:
+    needs: [resolve-stage, verify-provenance]
+    if: |
+      needs.resolve-stage.outputs.stage == 'stable' &&
+      needs.verify-provenance.result == 'success'
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Ensure stable image exists
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${{ needs.resolve-stage.outputs.image_ref }}" >/dev/null
+
+      - name: Validate stable env file
+        run: |
+          APP="${{ needs.resolve-stage.outputs.app_name }}"
+          ENV="${{ needs.resolve-stage.outputs.env_label }}"
+          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "ERROR: missing required stable env file ${ENV_FILE}"
+            exit 1
           fi
 
-          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
-            CP_URL="https://${{ inputs.caprover_host }}"
-          fi
+      - name: Deploy image to macmini stable slot
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          set -euo pipefail
+          .github/scripts/deploy-to-coolify.sh \
+            --coolify-url "${COOLIFY_URL}" \
+            --coolify-token "${COOLIFY_TOKEN}" \
+            --application-name "${{ inputs.app_name }}-stable" \
+            --image-name "${{ needs.resolve-stage.outputs.image_name }}" \
+            --image-tag "stable" \
+            --env-file "/tmp/app-env-${{ needs.resolve-stage.outputs.env_label }}-${{ inputs.app_name }}.env"
 
-          GW_URL="${{ secrets.OCI_GATEWAY_CAPROVER_URL }}"
-          GW_PASS="${{ secrets.OCI_GATEWAY_CAPROVER_PASSWORD }}"
+      - name: Verify stable health
+        run: |
+          set -euo pipefail
+          URL="${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.health_path }}"
+          for attempt in $(seq 1 15); do
+            echo "Attempt $attempt checking stable health"
+            if curl -kfsS --max-time 10 "$URL" >/dev/null 2>&1; then
+              echo "Stable health check passed"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "ERROR: stable health check failed"
+          exit 1
 
-          echo "::add-mask::$CP_PASS"
-          echo "::add-mask::$GW_PASS"
-          echo "CAPROVER_URL=$CP_URL"             >> "$GITHUB_ENV"
-          echo "CAPROVER_PASSWORD=$CP_PASS"       >> "$GITHUB_ENV"
-          echo "ROUTE_CAPROVER_URL=$GW_URL"       >> "$GITHUB_ENV"
-          echo "ROUTE_CAPROVER_PASSWORD=$GW_PASS" >> "$GITHUB_ENV"
-          echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}" >> "$GITHUB_ENV"
-
-      - name: Make scripts executable
-        run: chmod +x .github/scripts/*.sh
-
-      # deploy-traffic-light.sh runs `pnpm playwright test` from the repo root
-      # when run_e2e=true. Standalone repos check out fresh in this job and
-      # have no node_modules, so install deps before running E2E.
-      - name: Setup Node.js
+      - name: Optional stable E2E
         if: inputs.run_e2e == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Setup pnpm
+      - name: Optional stable E2E dependencies
         if: inputs.run_e2e == 'true'
         run: |
+          set -euo pipefail
           corepack enable
           corepack install
-          pnpm --version
-
-      - name: Install dependencies for E2E
-        if: inputs.run_e2e == 'true'
-        run: pnpm install --no-frozen-lockfile --store-dir .pnpm-store
-
-      - name: Run traffic-light deployment
-        run: |
-          # Compute effective subsystem classification (same env-aware logic as deep health check step)
-          ENV="${{ inputs.environment }}"
-          EFFECTIVE_CRITICAL="${{ inputs.critical_subsystems }}"
-          EFFECTIVE_WARNING="${{ inputs.warning_subsystems }}"
-          PROD_CRITICAL="${{ inputs.prod_critical_subsystems }}"
-
-          if [ -n "$PROD_CRITICAL" ] && [ "$ENV" != "dev" ]; then
-            if [ -n "$EFFECTIVE_CRITICAL" ]; then
-              EFFECTIVE_CRITICAL="${EFFECTIVE_CRITICAL},${PROD_CRITICAL}"
-            else
-              EFFECTIVE_CRITICAL="${PROD_CRITICAL}"
-            fi
-            EFFECTIVE_WARNING=$(echo "$EFFECTIVE_WARNING" | tr ',' '\n' |               while IFS= read -r item; do
-                trimmed=$(echo "$item" | xargs)
-                if echo "$PROD_CRITICAL" | tr ',' '\n' | xargs -I{} sh -c 'test "$1" = "$2"' _ {} "$trimmed" 2>/dev/null; then
-                  :
-                else
-                  [ -n "$trimmed" ] && echo "$trimmed"
-                fi
-              done | paste -sd ',')
-          elif [ -n "$PROD_CRITICAL" ] && [ "$ENV" = "dev" ]; then
-            if [ -n "$EFFECTIVE_WARNING" ]; then
-              EFFECTIVE_WARNING="${EFFECTIVE_WARNING},${PROD_CRITICAL}"
-            else
-              EFFECTIVE_WARNING="${PROD_CRITICAL}"
-            fi
-          fi
-
-          PROMOTE_STABLE_ARGS=()
-          if [ "${{ inputs.promote_to_stable }}" = "false" ]; then
-            PROMOTE_STABLE_ARGS+=(--promote-to-stable false)
-          fi
-
-          .github/scripts/deploy-traffic-light.sh \
-            --product           "${{ inputs.app_name }}" \
-            --environment       "${{ inputs.environment }}" \
-            --image-ref         "${{ needs.prepare.outputs.image_ref }}" \
-            --caprover-url        "$CAPROVER_URL" \
-            --caprover-password   "$CAPROVER_PASSWORD" \
-            --route-caprover-url  "$ROUTE_CAPROVER_URL" \
-            --route-caprover-password "$ROUTE_CAPROVER_PASSWORD" \
-            --github-token        "$GHCR_PULL_TOKEN" \
-            --github-owner        "${{ env.OWNER }}" \
-            --health-path         "${{ inputs.health_path }}" \
-            --run-migrations      "${{ inputs.run_migrations }}" \
-            --run-e2e             "${{ inputs.run_e2e }}" \
-            --critical-subsystems "$EFFECTIVE_CRITICAL" \
-            --warning-subsystems  "$EFFECTIVE_WARNING" \
-            "${PROMOTE_STABLE_ARGS[@]}"
-
-      - name: Point gateway at live slot
-        run: |
-          .github/scripts/setup-qwickway-route.sh \
-            --gateway-app-name "${{ needs.prepare.outputs.gateway_app_name }}" \
-            --target-app-url   "${{ needs.prepare.outputs.live_app_url }}" \
-            --route-caprover-url      "$ROUTE_CAPROVER_URL" \
-            --route-caprover-password "$ROUTE_CAPROVER_PASSWORD" \
-            --health-check-path "${{ inputs.health_path }}" \
-            --github-token      "$GHCR_PULL_TOKEN" \
-            --github-owner      "${{ env.OWNER }}"
-
-      - name: Verify serving slot containerHttpPort
-        run: |
-          LIVE_APP="${{ needs.prepare.outputs.live_app }}"
-          EXPECTED_PORT="${{ inputs.container_port }}"
-
-          TOKEN=$(curl -s -k -X POST "${CAPROVER_URL}/api/v2/login" \
-            -H "Content-Type: application/json" \
-            -d "{\"password\":\"${CAPROVER_PASSWORD}\"}" \
-            | tr -d '\n' \
-            | jq -r '.data.token // .token // empty')
-
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "ERROR: Failed to obtain CapRover token"
-            exit 1
-          fi
-
-          APP_DEFINITIONS=$(curl -s -k -X GET "${CAPROVER_URL}/api/v2/user/apps/appDefinitions" \
-            -H "x-captain-auth: ${TOKEN}" \
-            -H "x-namespace: captain")
-
-          LIVE_SLOT_DEFINITION=$(echo "$APP_DEFINITIONS" | jq -r --arg app "$LIVE_APP" '.data.appDefinitions[] | select(.appName == $app)')
-          LIVE_PORT=$(echo "$LIVE_SLOT_DEFINITION" | jq -r '.containerHttpPort // empty')
-
-          if [ -z "$LIVE_SLOT_DEFINITION" ] || [ "$LIVE_SLOT_DEFINITION" = "null" ]; then
-            echo "ERROR: Failed to read live slot definition for $LIVE_APP"
-            exit 1
-          fi
-
-          if [ -z "$LIVE_PORT" ] || [ "$LIVE_PORT" = "null" ] || [ "$LIVE_PORT" != "$EXPECTED_PORT" ]; then
-            echo "ERROR: containerHttpPort mismatch for serving slot ${LIVE_APP}"
-            echo "  expected: ${EXPECTED_PORT}"
-            echo "  actual: ${LIVE_PORT:-<empty>}"
-            exit 1
-          fi
-
-          echo "Serving slot containerHttpPort matches contract: ${LIVE_APP}=${LIVE_PORT}"
-
-  # -- Phase 4: Clean up old dev builds -----------------------------------------
-  cleanup-dev:
-    needs: [prepare, traffic-light-deploy]
-    runs-on: [self-hosted, macmini]
-    if: always() && inputs.environment == 'dev' && needs.prepare.result == 'success'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Resolve credentials
-        run: |
-          CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-          GW_PASS="${{ secrets.OCI_GATEWAY_CAPROVER_PASSWORD }}"
-          echo "::add-mask::$CP_PASS"
-          echo "::add-mask::$GW_PASS"
-          echo "OCI_DEV_CAPROVER_URL=${{ secrets.OCI_DEV_CAPROVER_URL }}"       >> "$GITHUB_ENV"
-          echo "OCI_DEV_CAPROVER_PASSWORD=$CP_PASS"                             >> "$GITHUB_ENV"
-          echo "ROUTE_CAPROVER_URL=${{ secrets.OCI_GATEWAY_CAPROVER_URL }}"     >> "$GITHUB_ENV"
-          echo "ROUTE_CAPROVER_PASSWORD=$GW_PASS"                               >> "$GITHUB_ENV"
-
-      - name: Make scripts executable
-        run: chmod +x .github/scripts/*.sh
-
-      - name: Clean up old dev builds
-        run: |
-          .github/scripts/cleanup-dev-builds.sh \
-            --app-name-prefix   "${{ inputs.app_name }}" \
-            --caprover-url      "$OCI_DEV_CAPROVER_URL" \
-            --caprover-password "$OCI_DEV_CAPROVER_PASSWORD" \
-            --route-caprover-url      "$ROUTE_CAPROVER_URL" \
-            --route-caprover-password "$ROUTE_CAPROVER_PASSWORD" \
-            --gateway-app-name  "${{ inputs.app_name }}-dev" \
-            --dev-domain-suffix "dev.qwickforge.com"
+          pnpm install --no-frozen-lockfile --store-dir .pnpm-store
+          pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/

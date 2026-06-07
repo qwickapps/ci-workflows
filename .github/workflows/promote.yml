@@ -1,3 +1,5 @@
+# DEPRECATED: canonical SOP now routes 4-stage promotion through deploy-app.yml
+# (build/uat/live/stable with release-candidate/release/stable retags).
 # Reusable promote workflow: deploy an image to a slot with health-check and rollback.
 #
 # Consolidates the promote-to-stable / promote-to-live logic into a single
@@ -179,7 +181,6 @@ jobs:
       - name: Configure app image
         run: |
           APP="${{ inputs.app_name }}"
-          IMAGE="${{ inputs.image_ref }}"
 
           # configure-caprover-app.sh is sourced from the calling repo (vendors it
           # at .github/scripts/) or from the ci-workflows checkout.
@@ -254,8 +255,6 @@ jobs:
         run: |
           APP="${{ inputs.app_name }}"
           PREVIOUS_IMAGE="${{ steps.rollback.outputs.previous_image }}"
-          APP_URL="${{ steps.meta.outputs.app_url }}"
-          HEALTH_PATH="${{ inputs.health_path }}"
 
           echo "Health check failed — rolling back ${APP} to ${PREVIOUS_IMAGE}..."
 
