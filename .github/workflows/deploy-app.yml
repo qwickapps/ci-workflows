@@ -247,7 +247,7 @@ jobs:
               TARGET_APP="${APP_NAME}-live"
               TARGET_APP_URL="https://${APP_NAME}-live.app.qwickforge.com"
               GATEWAY_APP_NAME="${APP_NAME}"
-              ENV_LABEL="uat"
+              ENV_LABEL="live"
               PRIOR_TAG="${IMAGE_BASE}:release"
               NEXT_TAG="${IMAGE_BASE}:stable"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
