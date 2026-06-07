@@ -169,6 +169,20 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Image: ${IMAGE}"
 
+      - name: Disable docker credential store (headless macOS runner)
+        # The self-hosted macOS runner's docker config uses the osxkeychain
+        # helper, which fails in a headless session: "User interaction is not
+        # allowed (-25308)". Strip credsStore so docker login writes the token
+        # to config.json (ephemeral CI workspace) instead of the locked keychain.
+        run: |
+          mkdir -p ~/.docker
+          if [ -f ~/.docker/config.json ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore)' ~/.docker/config.json > "$tmp" && mv "$tmp" ~/.docker/config.json
+          else
+            echo '{}' > ~/.docker/config.json
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
