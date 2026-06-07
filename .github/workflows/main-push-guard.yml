@@ -102,6 +102,23 @@ jobs:
     name: Test
     runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
+      - name: Prepare runner (per-job hygiene)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The self-hosted macOS runners re-degrade between jobs (pnpm store,
+          # docker keychain, stale git auth, temp dir). Neutralize the recurring
+          # failure modes deterministically BEFORE checkout so runs are reliable.
+          mkdir -p "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          git config --global --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.docker/config.json" ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore) | del(.credHelpers)' "$HOME/.docker/config.json" > "$tmp" 2>/dev/null \
+              && mv "$tmp" "$HOME/.docker/config.json" || rm -f "$tmp"
+          fi
+          command -v pnpm >/dev/null 2>&1 && pnpm store prune >/dev/null 2>&1 || true
+          echo "runner hygiene complete"
+
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -151,6 +168,22 @@ jobs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
       image_tag: ${{ steps.meta.outputs.tag }}
     steps:
+      - name: Prepare runner (per-job hygiene)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Same per-job hygiene as the Test job — see note there. Runs before
+          # checkout so the build job is reliable on the re-degrading runners.
+          mkdir -p "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          git config --global --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.docker/config.json" ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore) | del(.credHelpers)' "$HOME/.docker/config.json" > "$tmp" 2>/dev/null \
+              && mv "$tmp" "$HOME/.docker/config.json" || rm -f "$tmp"
+          fi
+          command -v pnpm >/dev/null 2>&1 && pnpm store prune >/dev/null 2>&1 || true
+          echo "runner hygiene complete"
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
