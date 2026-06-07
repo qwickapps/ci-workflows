@@ -105,6 +105,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          # .ci-workflows is CI tooling, not app code. Skip persisting the auth
+          # header into the submodule — that step fails on the macOS self-hosted
+          # runner ("Unable to replace auth placeholder in .git/config"). The
+          # submodule is still fetched; build/test are read-only and don't push.
+          persist-credentials: false
 
       - name: Setup Node.js
         if: inputs.language == 'ts' || inputs.language == 'js'
@@ -148,6 +153,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
+          # See note above: skip submodule credential-persist (fails on macOS
+          # self-hosted runner; submodule is still fetched, build is read-only).
+          persist-credentials: false
 
       - name: Generate image metadata
         id: meta
