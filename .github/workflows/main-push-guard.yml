@@ -119,7 +119,9 @@ jobs:
 
       - name: Install pnpm
         if: inputs.language == 'ts' || inputs.language == 'js'
-        run: npm install -g pnpm
+        # --force overwrites stale pnpm/pnpx symlinks left in the reused node
+        # toolcache on the self-hosted runner (npm errors EEXIST otherwise).
+        run: npm install -g pnpm --force
 
       - name: Install dependencies
         if: inputs.language == 'ts' || inputs.language == 'js'
