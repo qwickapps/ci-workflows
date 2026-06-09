@@ -1,0 +1,60 @@
+name: "Org-Wide Branch Hygiene"
+
+on:
+  schedule:
+    # Run daily at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (report only, no deletions)"
+        required: false
+        type: boolean
+        default: false
+      stale_days:
+        description: "Days without commits before a branch is flagged as old (default: 21)"
+        required: false
+        type: string
+        default: "21"
+
+# Minimal permissions: read org repos + write repo contents for branch deletion
+permissions:
+  contents: write
+
+jobs:
+  sweep:
+    name: "Sweep all qwickapps repos"
+    runs-on: [self-hosted, macmini]
+    timeout-minutes: 30
+
+    steps:
+      - name: "Hygiene before checkout"
+        run: |
+          git config --global --add safe.directory '*' 2>/dev/null || true
+          git clean -ffd 2>/dev/null || true
+
+      - name: "Checkout ci-workflows (for scripts)"
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ORG_HYGIENE_TOKEN }}
+
+      - name: "Run org-wide branch hygiene sweep"
+        id: sweep
+        env:
+          GH_TOKEN: ${{ secrets.ORG_HYGIENE_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          STALE_DAYS: ${{ inputs.stale_days || '21' }}
+          ORG: qwickapps
+        run: python3 scripts/org-branch-hygiene.py --org "$ORG" --stale-days "$STALE_DAYS" $( [ "$DRY_RUN" = "true" ] && echo "--dry-run" ) --output /tmp/hygiene-report.json
+
+      - name: "Write job summary"
+        if: always()
+        run: python3 scripts/org-branch-hygiene-summary.py /tmp/hygiene-report.json "$GITHUB_STEP_SUMMARY"
+
+      - name: "Upload report artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hygiene-report-${{ github.run_id }}
+          path: /tmp/hygiene-report.json
+          retention-days: 30
