@@ -1,0 +1,43 @@
+name: Shell Lint
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: '.'
+
+jobs:
+  shell-lint:
+    name: Shell Lint
+    runs-on: [self-hosted, macmini]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Install shellcheck
+        run: which shellcheck || brew install shellcheck
+
+      - name: Check changed shell scripts
+        run: |
+          set -euo pipefail
+
+          cd "${{ inputs.working-directory }}"
+          changed=$(git diff --name-only HEAD~1 HEAD -- '*.sh')
+          if [[ -z "$changed" ]]; then
+            echo "No .sh files changed — skip"
+            exit 0
+          fi
+
+          failed=0
+          while IFS= read -r f; do
+            echo "=== $f ==="
+            if [[ ! -f "$f" ]]; then
+              echo "SKIP (missing or deleted): $f"
+              continue
+            fi
+            bash -n "$f" || { echo "SYNTAX ERROR: $f"; failed=1; }
+            shellcheck "$f" || { echo "SHELLCHECK FAIL: $f"; failed=1; }
+          done <<< "$changed"
+          exit $failed
