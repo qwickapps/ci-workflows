@@ -1,0 +1,243 @@
+name: Definition of Done Gate
+
+# Reusable workflow — enforces the qwickapps Definition of Done (DoD).
+# Docs: qwickapps/protocols/docs/definition-of-done.md
+#
+# DISABLED by default — enable per-repo via `uses_dod: true` input.
+#
+# A PR is DoD-compliant only when ALL of:
+#   1. PR body contains an AC checklist with at least one checked item (- [x])
+#   2. PR diff contains at least one test file
+#   3. (UI only) PR has at least one CI artifact attachment comment (screenshot evidence)
+#
+# Call this from a consuming repo's PR workflow:
+#
+#   jobs:
+#     dod:
+#       uses: qwickapps/ci-workflows/.github/workflows/definition-of-done.yml@main
+#       with:
+#         uses_dod: true
+#         has_ui: true
+#         pr_number: ${{ github.event.pull_request.number }}
+#         repo: ${{ github.repository }}
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      uses_dod:
+        description: 'Set to true to enable DoD gate. False = informational only (does not fail).'
+        type: boolean
+        required: false
+        default: false
+      has_ui:
+        description: 'True if the PR touches UI (React/HTML/CSS). Adds screenshot evidence check.'
+        type: boolean
+        required: false
+        default: false
+      pr_number:
+        description: 'PR number (github.event.pull_request.number)'
+        type: string
+        required: true
+      repo:
+        description: 'Repo in owner/name format (github.repository)'
+        type: string
+        required: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # DoD Gate — checks AC checklist, test files, and (if UI) artifact evidence
+  # ---------------------------------------------------------------------------
+  definition-of-done:
+    name: Definition of Done
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check 1 — AC checklist
+        id: ac_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          PR_BODY="$(gh pr view "${{ inputs.pr_number }}" \
+            --repo "${{ inputs.repo }}" \
+            --json body --jq '.body // ""')"
+
+          # Must have at least one checked item: - [x] or - [X]
+          if echo "$PR_BODY" | grep -qE '^[[:space:]]*-[[:space:]]\[[xX]\]'; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "detail=AC checklist found with at least one checked item." >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "detail=PR body has no checked AC items. Add a checklist (- [x] ...) under an Acceptance Criteria section and check off all items." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check 2 — test files in diff
+        id: test_check
+        run: |
+          set -euo pipefail
+
+          # Resolve the base SHA for the PR. workflow_call doesn't populate
+          # github.event.pull_request.base.sha, so we fall back to origin/main.
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse origin/main)"
+          fi
+
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA" HEAD 2>/dev/null || git diff --name-only HEAD~1 HEAD)"
+
+          # Test file patterns (bash 3.2 safe — no grep -P, no case folding)
+          TEST_FILES=""
+          while IFS= read -r f; do
+            case "$f" in
+              *.test.ts|*.test.tsx|*.spec.ts|*.spec.tsx)      TEST_FILES="$TEST_FILES $f" ;;
+              *.test.js|*.spec.js)                            TEST_FILES="$TEST_FILES $f" ;;
+              *_test.go)                                      TEST_FILES="$TEST_FILES $f" ;;
+              *test_*.py|*_test.py)   TEST_FILES="$TEST_FILES $f" ;;
+              scripts/tests/test-*.sh)                        TEST_FILES="$TEST_FILES $f" ;;
+              tests/test_*.sh|tests/*.test.sh)                TEST_FILES="$TEST_FILES $f" ;;
+            esac
+          done <<EOF
+          $CHANGED_FILES
+          EOF
+
+          TEST_FILES="$(echo "$TEST_FILES" | tr ' ' '\n' | grep -v '^$' | sort -u)"
+
+          if [ -n "$TEST_FILES" ]; then
+            COUNT="$(echo "$TEST_FILES" | wc -l | tr -d ' ')"
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "detail=Found ${COUNT} test file(s) in diff." >> "$GITHUB_OUTPUT"
+            echo "files<<TEOF" >> "$GITHUB_OUTPUT"
+            echo "$TEST_FILES" >> "$GITHUB_OUTPUT"
+            echo "TEOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "detail=No test files found in PR diff. Add unit or E2E tests (*.test.ts, *.spec.ts, *_test.go, test_*.py, scripts/tests/test-*.sh)." >> "$GITHUB_OUTPUT"
+            echo "files=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check 3 — screenshot evidence (UI only)
+        id: screenshot_check
+        if: inputs.has_ui == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Look for artifact attachment comment — CI systems post these as:
+          #   "Uploaded artifact: screenshots" or markdown image links
+          # We check PR comments for any image attachment or artifact reference.
+          COMMENTS="$(gh pr view "${{ inputs.pr_number }}" \
+            --repo "${{ inputs.repo }}" \
+            --json comments --jq '.comments[].body // ""')"
+
+          # Detect: markdown image syntax, artifact upload lines, or explicit
+          # "screenshot" / "artifact" keywords with attachment context.
+          if echo "$COMMENTS" | grep -qiE '!\[.*\]\(https?://|artifact.*screenshot|screenshot.*artifact|uploaded.*artifact|actions/runs/[0-9]+/artifacts'; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "detail=Screenshot/artifact evidence found in PR comments." >> "$GITHUB_OUTPUT"
+          elif echo "$COMMENTS" | grep -qiE '!\['; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "detail=Image attachment found in PR comments." >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "detail=No screenshot or artifact attachment found in PR comments. Attach desktop and mobile screenshots (or link a CI artifact) before requesting review." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Evaluate overall DoD result
+        id: evaluate
+        run: |
+          set -euo pipefail
+
+          AC="${{ steps.ac_check.outputs.status }}"
+          TESTS="${{ steps.test_check.outputs.status }}"
+          SCREENSHOTS="pass"   # default pass when has_ui=false (check skipped)
+          if [ "${{ inputs.has_ui }}" = "true" ]; then
+            SCREENSHOTS="${{ steps.screenshot_check.outputs.status }}"
+          fi
+
+          ALL_PASS=true
+          FAILURES=""
+
+          if [ "$AC" != "pass" ]; then
+            ALL_PASS=false
+            FAILURES="${FAILURES}
+          - AC: ${{ steps.ac_check.outputs.detail }}"
+          fi
+          if [ "$TESTS" != "pass" ]; then
+            ALL_PASS=false
+            FAILURES="${FAILURES}
+          - Tests: ${{ steps.test_check.outputs.detail }}"
+          fi
+          if [ "$SCREENSHOTS" != "pass" ]; then
+            ALL_PASS=false
+            FAILURES="${FAILURES}
+          - Screenshots: ${{ steps.screenshot_check.outputs.detail }}"
+          fi
+
+          if $ALL_PASS; then
+            echo "overall=pass" >> "$GITHUB_OUTPUT"
+            echo "summary=All DoD gates passed." >> "$GITHUB_OUTPUT"
+          else
+            echo "overall=fail" >> "$GITHUB_OUTPUT"
+            SUMMARY="DoD gates failed:${FAILURES}"
+            echo "summary<<SUMEOF" >> "$GITHUB_OUTPUT"
+            echo "$SUMMARY" >> "$GITHUB_OUTPUT"
+            echo "SUMEOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post DoD status comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          OVERALL="${{ steps.evaluate.outputs.overall }}"
+          SUMMARY="${{ steps.evaluate.outputs.summary }}"
+          AC_STATUS="${{ steps.ac_check.outputs.status }}"
+          TEST_STATUS="${{ steps.test_check.outputs.status }}"
+          HAS_UI="${{ inputs.has_ui }}"
+          USES_DOD="${{ inputs.uses_dod }}"
+
+          if [ "$HAS_UI" = "true" ]; then
+            SCREENSHOT_STATUS="${{ steps.screenshot_check.outputs.status }}"
+            SCREENSHOT_LINE="| Screenshot evidence | $( [ "$SCREENSHOT_STATUS" = "pass" ] && echo "pass" || echo "FAIL" ) | ${{ steps.screenshot_check.outputs.detail }} |"
+          else
+            SCREENSHOT_LINE="| Screenshot evidence | skip | has_ui=false |"
+          fi
+
+          ENABLED_NOTE=""
+          if [ "$USES_DOD" = "false" ]; then
+            ENABLED_NOTE="
+
+          > **Note:** DoD gate is running in informational mode (\`uses_dod: false\`). This will not block merge. Set \`uses_dod: true\` to enforce."
+          fi
+
+          BODY="## Definition of Done Gate
+
+          | Gate | Status | Detail |
+          |---|---|---|
+          | AC checklist | $( [ "$AC_STATUS" = "pass" ] && echo "pass" || echo "FAIL" ) | ${{ steps.ac_check.outputs.detail }} |
+          | Test files | $( [ "$TEST_STATUS" = "pass" ] && echo "pass" || echo "FAIL" ) | ${{ steps.test_check.outputs.detail }} |
+          ${SCREENSHOT_LINE}
+
+          **Overall: ${OVERALL}**${ENABLED_NOTE}
+
+          _Docs: [Definition of Done](https://github.com/qwickapps/protocols/blob/main/docs/definition-of-done.md)_"
+
+          gh pr comment "${{ inputs.pr_number }}" \
+            --repo "${{ inputs.repo }}" \
+            --body "$BODY"
+
+      - name: Fail if DoD not met (when enforced)
+        if: inputs.uses_dod == true && steps.evaluate.outputs.overall == 'fail'
+        run: |
+          echo "Definition of Done gate FAILED."
+          echo "${{ steps.evaluate.outputs.summary }}"
+          exit 1
