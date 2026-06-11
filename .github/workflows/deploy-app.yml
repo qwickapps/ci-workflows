@@ -459,6 +459,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
       - name: Resolve CapRover credentials
         run: |
           STAGE="${{ needs.resolve-stage.outputs.stage }}"
@@ -472,6 +482,12 @@ jobs:
           if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
             CP_URL="https://${{ needs.resolve-stage.outputs.caprover_host_name }}"
           fi
+
+          # Ensure scheme is present — caprover_host inputs are bare hostnames
+          case "$CP_URL" in
+            http://*|https://*) ;;
+            *) CP_URL="https://$CP_URL" ;;
+          esac
 
           case "$STAGE" in
             build)
@@ -495,7 +511,9 @@ jobs:
           echo "::add-mask::$CP_PASS"
 
       - name: Make scripts executable
-        run: chmod +x .github/scripts/*.sh
+        run: |
+          chmod +x .github/scripts/*.sh
+          chmod +x .ci-workflows/scripts/*.sh
 
       - name: Ensure stable slot is up for live promotion
         if: needs.resolve-stage.outputs.stage == 'live'
@@ -517,7 +535,7 @@ jobs:
           echo "ERROR: stable slot not healthy at ${STABLE_URL}"
           exit 1
 
-      - name: Configure target slot
+      - name: Configure target slot (atomic env + config)
         run: |
           set -euo pipefail
           APP="${{ needs.resolve-stage.outputs.app_name }}"
@@ -537,41 +555,16 @@ jobs:
             CMD_ARGS+=(--cmd "${{ inputs.cmd }}")
           fi
 
-          .github/scripts/configure-caprover-app.sh \
+          # Use canonical configure script from ci-workflows (not the caller's copy).
+          # This guarantees the anti-wipe fix (single atomic update) applies to every
+          # app that uses this reusable workflow, not just MCP.
+          .ci-workflows/scripts/configure-caprover-app.sh \
             --app-name "$TARGET_APP" \
             --caprover-url "$CAPROVER_URL" \
             --caprover-password "$CAPROVER_PASSWORD" \
             --container-port "${{ inputs.container_port }}" \
             --env-file "$ENV_FILE" \
             "${CMD_ARGS[@]}"
-
-      - name: Ensure target app exists on CapRover
-        run: |
-          set -euo pipefail
-          TOKEN=$(curl -sf -X POST "${CAPROVER_URL}/api/v2/login" \
-            -H 'Content-Type: application/json' \
-            -d "{\"password\":\"${CAPROVER_PASSWORD}\"}" \
-            | tr -d '\n' \
-            | sed 's/.*"token":"\([^"]*\)".*/\1/')
-          if [ -z "$TOKEN" ]; then
-            echo "ERROR: failed to authenticate CapRover"
-            exit 1
-          fi
-
-          APP_NAME="${{ needs.resolve-stage.outputs.target_app }}"
-          EXISTS=$(curl -sf "${CAPROVER_URL}/api/v2/user/apps/appDefinitions" \
-            -H "x-captain-auth: ${TOKEN}" \
-            -H 'x-namespace: captain' \
-            | tr -d '\n' \
-            | grep -o "\"appName\":\"${APP_NAME}\"" || true)
-          if [ -z "$EXISTS" ]; then
-            echo "App '${APP_NAME}' not found - registering"
-            curl -sf -X POST "${CAPROVER_URL}/api/v2/user/apps/appDefinitions/register" \
-              -H 'Content-Type: application/json' \
-              -H "x-captain-auth: ${TOKEN}" \
-              -H 'x-namespace: captain' \
-              -d "{\"appName\":\"${APP_NAME}\",\"hasPersistentData\":false}"
-          fi
 
       - name: Deploy image to target slot
         run: |
