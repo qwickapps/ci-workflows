@@ -1,0 +1,55 @@
+name: Provision CouchDB Instance (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      slot:
+        description: 'live or stable'
+        required: true
+        type: string
+      couch_host:
+        description: 'CouchDB host to configure (post-install)'
+        required: true
+        type: string
+      couch_port:
+        description: 'CouchDB port'
+        required: false
+        type: string
+        default: '5984'
+    secrets:
+      COUCH_ADMIN_USER:
+        required: true
+      COUCH_ADMIN_PASSWORD:
+        required: true
+      TS_AUTHKEY:
+        required: false
+
+jobs:
+  configure:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout brain-store
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/brain-store
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure CouchDB (${{ inputs.slot }})
+        env:
+          COUCH_HOST: ${{ inputs.couch_host }}
+          COUCH_PORT: ${{ inputs.couch_port }}
+          COUCH_ADMIN_USER: ${{ secrets.COUCH_ADMIN_USER }}
+          COUCH_ADMIN_PASSWORD: ${{ secrets.COUCH_ADMIN_PASSWORD }}
+        run: bash scripts/configure-couch.sh
+
+      - name: Verify CouchDB reachable
+        run: |
+          HTTP=$(curl -sf -u "$COUCH_ADMIN_USER:$COUCH_ADMIN_PASSWORD" \
+            "http://$COUCH_HOST:$COUCH_PORT/brain" -o /dev/null -w "%{http_code}" || echo "000")
+          echo "CouchDB /brain responded HTTP $HTTP"
+          [[ "$HTTP" == "200" ]] || exit 1
+        env:
+          COUCH_HOST: ${{ inputs.couch_host }}
+          COUCH_PORT: ${{ inputs.couch_port }}
+          COUCH_ADMIN_USER: ${{ secrets.COUCH_ADMIN_USER }}
+          COUCH_ADMIN_PASSWORD: ${{ secrets.COUCH_ADMIN_PASSWORD }}
