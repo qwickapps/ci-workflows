@@ -60,6 +60,23 @@ on:
         required: false
         type: string
         default: "1.22"
+      # ── Definition of Done gate ──────────────────────────────────────────────
+      # DISABLED by default — enable per-repo by setting uses_dod: true.
+      # When enabled, the DoD gate checks:
+      #   1. PR body has a checked AC checklist (- [x] ...)
+      #   2. PR diff contains at least one test file
+      #   3. (if has_ui=true) PR has screenshot/artifact evidence in comments
+      # Docs: qwickapps/protocols/docs/definition-of-done.md
+      uses_dod:
+        description: "Enable the Definition of Done gate (DISABLED by default — enable per-repo)"
+        required: false
+        type: boolean
+        default: false
+      has_ui:
+        description: "True if this PR touches UI. Enables screenshot evidence check in DoD gate."
+        required: false
+        type: boolean
+        default: false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATE 1: validate-commits
@@ -342,6 +359,23 @@ jobs:
         run: docker logout ghcr.io || true
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GATE 4b: definition-of-done  (DISABLED by default — enable via uses_dod: true)
+#   Checks AC checklist, test files, and (if has_ui) screenshot evidence.
+#   This gate runs in parallel with push-image to avoid adding latency.
+# ─────────────────────────────────────────────────────────────────────────────
+  definition-of-done:
+    name: "Gate 4b · Definition of Done"
+    needs: [build]
+    if: inputs.uses_dod == true
+    uses: qwickapps/ci-workflows/.github/workflows/definition-of-done.yml@main
+    with:
+      uses_dod: ${{ inputs.uses_dod }}
+      has_ui: ${{ inputs.has_ui }}
+      pr_number: ${{ github.event.pull_request.number }}
+      repo: ${{ github.repository }}
+    secrets: inherit
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GATE 5: report-status  (always() — runs regardless of prior gate outcomes)
 #   • Deletes stale validation comment, then posts fresh one via pr-status-comment.sh
 #   • Adds "validated" label on full pass; removes it on any failure
@@ -350,7 +384,7 @@ jobs:
     name: "Gate 5 · Report Status"
     runs-on: [self-hosted, macmini]
     if: always()
-    needs: [validate-commits, lint-and-typecheck, test, build, push-image]
+    needs: [validate-commits, lint-and-typecheck, test, build, push-image, definition-of-done]
     steps:
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
@@ -367,6 +401,8 @@ jobs:
           TEST_RESULT:     ${{ needs.test.result }}
           BUILD_RESULT:    ${{ needs.build.result }}
           PUSH_RESULT:     ${{ needs.push-image.result }}
+          DOD_RESULT:      ${{ needs.definition-of-done.result }}
+          USES_DOD:        ${{ inputs.uses_dod }}
           HAS_DOCKERFILE:  ${{ inputs.has_dockerfile }}
           IMAGE_TAG:       ${{ needs.push-image.outputs.image_tag }}
         run: |
@@ -390,6 +426,10 @@ jobs:
              { [ "$PUSH_RESULT" = "failure" ] || [ "$PUSH_RESULT" = "cancelled" ]; }; then
             OVERALL="failure"
           fi
+          if [ "$USES_DOD" = "true" ] && \
+             { [ "$DOD_RESULT" = "failure" ] || [ "$DOD_RESULT" = "cancelled" ]; }; then
+            OVERALL="failure"
+          fi
           echo "overall=$OVERALL" >> "$GITHUB_OUTPUT"
 
           # Build the results table for CHECK_OUTPUT
@@ -400,13 +440,19 @@ jobs:
             PUSH_LINE="Push Image    ⏭️  skipped (no Dockerfile)"
           fi
 
+          DOD_LINE="Def of Done       ⏭️  skipped (uses_dod=false)"
+          if [ "$USES_DOD" = "true" ]; then
+            DOD_LINE="Def of Done       $(icon "$DOD_RESULT")  ${DOD_RESULT}"
+          fi
+
           CHECK_OUTPUT="Gate              Status    Details
           -----------------------------------------------------
           Validate Commits  $(icon "$VALIDATE_RESULT")  ${VALIDATE_RESULT}  (attribution + branch target)
           Lint & Typecheck  $(icon "$LINT_RESULT")  ${LINT_RESULT}  (language: ${{ inputs.language }})
           Tests             $(icon "$TEST_RESULT")  ${TEST_RESULT}  (language: ${{ inputs.language }})
           Build             $(icon "$BUILD_RESULT")  ${BUILD_RESULT}  (${{ inputs.build_command != '' && inputs.build_command || 'no build command' }})
-          ${PUSH_LINE}"
+          ${PUSH_LINE}
+          ${DOD_LINE}"
 
           {
             echo "CHECK_OUTPUT<<EOCHECK"
