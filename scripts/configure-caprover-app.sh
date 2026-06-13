@@ -382,6 +382,35 @@ elif [ "$APP_ALREADY_EXISTS" = "false" ] && [ -n "$DOMAINS" ]; then
   done
 fi
 
+# Post-update: force TS_HOSTNAME for build slots to prevent orphan values from
+# surviving across blue-green restore cycles.  swap-instances.sh only
+# force-overrides live/stable, not build — so a restore that restores stale
+# envVars onto the build slot would carry the orphan TS_HOSTNAME forward.
+if [[ "$APP_NAME" == *-build ]]; then
+  echo ""
+  echo "Build slot detected: forcing TS_HOSTNAME to app name..."
+  FORCE_DEFS=$(curl "${CURL_ARGS[@]}" -X GET "$CAPROVER_URL/api/v2/user/apps/appDefinitions" \
+    -H "x-captain-auth: $TOKEN")
+  FORCE_DEF=$(echo "$FORCE_DEFS" | jq --arg name "$APP_NAME" '.data.appDefinitions[] | select(.appName == $name)')
+  if [ -n "$FORCE_DEF" ] && [ "$FORCE_DEF" != "null" ]; then
+    FORCE_MERGED=$(echo "$FORCE_DEF" | jq --arg name "$APP_NAME" \
+      '.envVars = (((.envVars // []) | map(select(.key != "TS_HOSTNAME"))) + [{key: "TS_HOSTNAME", value: $name}])')
+    FORCE_RESPONSE=$(caprover_api_call "Force TS_HOSTNAME for build slot" \
+      curl "${CURL_ARGS[@]}" -X POST "$CAPROVER_URL/api/v2/user/apps/appDefinitions/update" \
+      -H "Content-Type: application/json" \
+      -H "x-captain-auth: $TOKEN" \
+      -d "$FORCE_MERGED")
+    FORCE_STATUS=$(echo "$FORCE_RESPONSE" | jq -r '.status')
+    if [ "$FORCE_STATUS" = "100" ] || [ "$FORCE_STATUS" = "1000" ]; then
+      echo "  TS_HOSTNAME=$APP_NAME"
+    else
+      echo "  Warning: TS_HOSTNAME force failed: $(echo "$FORCE_RESPONSE" | jq -r '.description')"
+    fi
+  else
+    echo "  Warning: could not fetch app definition for TS_HOSTNAME force"
+  fi
+fi
+
 echo ""
 echo "========================================="
 echo "Configuration complete: $APP_NAME"
