@@ -220,6 +220,9 @@ jobs:
           echo "CAPROVER_PASSWORD=${CAPROVER_PASSWORD}" >> "$GITHUB_ENV"
           echo "LIVE_APP_URL=${LIVE_APP_URL}"           >> "$GITHUB_ENV"
           echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}" >> "$GITHUB_ENV"
+          # Tailnet node URL for health checks — CapRover public domain
+          # returns 404 before the domain is bound to the slot.
+          echo "TAILNET_HEALTH_URL=http://${LIVE_APP}.taile324e7.ts.net:8080" >> "$GITHUB_ENV"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -239,7 +242,7 @@ jobs:
 
       - name: Validate live slot health
         run: |
-          HEALTH_URL="${LIVE_APP_URL}${HEALTH_PATH}"
+          HEALTH_URL="${TAILNET_HEALTH_URL}${HEALTH_PATH}"
           echo "Waiting for ${HEALTH_URL} to become healthy..."
           MAX_ATTEMPTS=15
           SLEEP_SEC=20
