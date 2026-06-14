@@ -569,7 +569,7 @@ jobs:
             --caprover-password "$CAPROVER_PASSWORD" \
             --container-port "${{ inputs.container_port }}" \
             --env-file "$ENV_FILE" \
-            "${CMD_ARGS[@]}"
+            "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}"
 
       - name: Deploy image to target slot
         run: |
