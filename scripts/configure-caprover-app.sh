@@ -7,12 +7,18 @@ set -euo pipefail
 # Configures a CapRover app: instance count, container port, SSL, env vars.
 #
 # KEY INVARIANT (anti-wipe guarantee):
-#   On every invocation, the full envVars array from --env-file is applied
-#   atomically in a SINGLE CapRover update (Steps 1 + 3 merged into one).
-#   CapRover's two-update pattern (config then SSL) silently wiped envVars
-#   when Step 3's re-fetch returned stale/null envVars — the second update
-#   then sent envVars:null and erased the Step 1 result.  This version
-#   consolidates both updates so envVars are never fetched after being set.
+#   On every invocation, env vars are MERGED into the existing CapRover state
+#   in a SINGLE atomic update (config + SSL + envVars together).
+#
+#   Merge semantics: existing CapRover vars are preserved; canonical vars
+#   (from --env-file) override matching keys; vars present in CapRover but
+#   absent from the env file are NOT removed.  This prevents pipeline deploys
+#   from wiping vars set outside the canonical pipeline (hot-patches,
+#   per-host overrides, vars managed by other workflows).
+#
+#   The original two-update pattern (config, then SSL re-fetch + update) silently
+#   wiped envVars when Step 3's re-fetch returned stale/null envVars.  This
+#   version consolidates both updates so envVars are never clobbered.
 #
 # Usage:
 #   configure-caprover-app.sh \
@@ -183,9 +189,8 @@ else
 fi
 
 # Re-fetch after SSL step so the merged definition carries the accurate
-# hasDefaultSubDomainSsl value.  Critically, we will OVERWRITE the
-# re-fetched envVars with our canonical set below — the re-fetch is only
-# for SSL meta-fields, not for env preservation.
+# hasDefaultSubDomainSsl value.  The re-fetched envVars serve as the base
+# for the merge below — canonical vars are applied on top, not in place of.
 echo ""
 echo "Re-fetching app definition (post-SSL)..."
 ALL_DEFS_POST_SSL=$(curl "${CURL_ARGS[@]}" -X GET "$CAPROVER_URL/api/v2/user/apps/appDefinitions" \
@@ -238,15 +243,11 @@ if [ "$CMD_SET" = "true" ]; then
   fi
 fi
 
-# Apply env vars — ATOMIC REPLACE of canonical set.
-# We do NOT merge with existing CapRover envVars because:
-#   1. The env file IS the complete authoritative set for this app.
-#   2. Merging (keep existing + override new) allowed stale hot-patched
-#      values to survive across deploys, hiding secrets-drift bugs.
-#   3. Any var not in the canonical env file has no business being on
-#      the running container.
-# Exception: vars prefixed with LOCAL_ are preserved (used for per-host
-# overrides that are intentionally not in the canonical pipeline).
+# Apply env vars — merge canonical set into existing CapRover state.
+# Existing vars NOT in the env file are preserved (not wiped).
+# Canonical vars override existing values for matching keys.
+# This prevents deploys from wiping vars set outside the pipeline
+# (e.g. per-host overrides, vars managed by other workflows like mcp-lead).
 if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   echo ""
   echo "Applying environment variables from $ENV_FILE..."
@@ -268,22 +269,19 @@ if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   if [ "$CANONICAL_COUNT" -eq 0 ]; then
     echo "  Warning: env file parsed to zero vars — skipping env application"
   else
-    # Preserve LOCAL_* vars from existing CapRover state (per-host overrides).
+    # Merge: start with existing CapRover vars, strip keys canonical will override,
+    # append canonical. Canonical wins on conflicts; existing-only vars survive.
     EXISTING_ENV=$(echo "$CURRENT_DEF_POST_SSL" | jq '.envVars // []')
-    LOCAL_VARS=$(echo "$EXISTING_ENV" | jq '[.[] | select(.key | startswith("LOCAL_"))]')
-    LOCAL_COUNT=$(echo "$LOCAL_VARS" | jq 'length')
-
+    EXISTING_COUNT=$(echo "$EXISTING_ENV" | jq 'length')
     CANONICAL_KEYS=$(echo "$CANONICAL_VARS" | jq '[.[].key]')
-    # Remove LOCAL_ vars that are also in canonical (canonical wins)
-    LOCAL_VARS=$(echo "$LOCAL_VARS" | jq --argjson ck "$CANONICAL_KEYS" \
-      '[.[] | select(.key as $k | $ck | any(. == $k) | not)]')
-
-    FINAL_ENV=$(echo "$CANONICAL_VARS" | jq --argjson local_vars "$LOCAL_VARS" \
-      '. + $local_vars | sort_by(.key)')
+    FINAL_ENV=$(echo "$EXISTING_ENV" | jq \
+      --argjson ck "$CANONICAL_KEYS" \
+      --argjson cv "$CANONICAL_VARS" \
+      '([.[] | select(.key as $k | ($ck | any(. == $k)) | not)] + $cv) | sort_by(.key)')
     FINAL_COUNT=$(echo "$FINAL_ENV" | jq 'length')
 
     MERGED=$(echo "$MERGED" | jq --argjson env "$FINAL_ENV" '.envVars = $env')
-    echo "  Applied $CANONICAL_COUNT canonical vars + $LOCAL_COUNT LOCAL_ vars = $FINAL_COUNT total"
+    echo "  Merged $CANONICAL_COUNT canonical vars with $EXISTING_COUNT existing = $FINAL_COUNT total"
   fi
 else
   echo ""
