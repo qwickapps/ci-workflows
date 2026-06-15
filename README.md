@@ -300,8 +300,6 @@ jobs:
       image_ref: ""
       container_port: "3000"
       health_path: /_health
-      caprover_host: ${{ needs.resolve-env.outputs.caprover_host }}
-      caprover_url: ""
       public_url: ${{ needs.resolve-env.outputs.public_url }}
       smoke_test_path: ""
       smoke_test_command: ""
@@ -319,7 +317,6 @@ Required inputs:
 | `package_json_path` | `package.json` path used to derive the image version tag. |
 | `container_port` | Container port exposed through CapRover. |
 | `health_path` | Health endpoint. Must start with `/`. |
-| `caprover_host` | Hostname fallback when `caprover_url` and OCI URL secrets are absent. |
 | `public_url` | Public URL for the target environment. |
 
 Common optional inputs:
@@ -328,7 +325,6 @@ Common optional inputs:
 |---|---:|---|
 | `workspace_packages` | `schema,logging,auth,react-framework,auth-client,cms,server` | Comma-separated workspace packages to build before Docker. Use `""` for standalone repos. |
 | `image_ref` | `""` | Prebuilt image ref. When set, the workflow skips its build job. |
-| `caprover_url` | `""` | Explicit CapRover URL; otherwise the workflow uses the OCI CapRover URL secret for the environment. |
 | `run_migrations` | `false` | Whether the traffic-light deploy runs migrations. |
 | `run_e2e` | `false` | Whether the traffic-light deploy runs E2E tests. |
 | `smoke_test_path` | `""` | HTTP path to check after build-slot health validation. |
@@ -347,6 +343,13 @@ Required inherited secrets:
 | `OCI_GATEWAY_CAPROVER_URL`, `OCI_GATEWAY_CAPROVER_PASSWORD` | QwickWay route updates. |
 | `GHCR_PUSH_TOKEN` | Building and pushing images when `image_ref` is not supplied. |
 | `GHCR_PULL_TOKEN` | Deploying images from GHCR. |
+
+Deprecated compatibility inputs:
+
+| Input | Behavior |
+|---|---|
+| `caprover_host` | Ignored. The workflow emits a warning and resolves the host from `stage`. |
+| `caprover_url` | Ignored. The workflow emits a warning and resolves the URL from `stage`. |
 
 ### Manual Promotion
 

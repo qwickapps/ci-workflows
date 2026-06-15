@@ -75,12 +75,12 @@ on:
 
       # -- CapRover ----------------------------------------------------------
       caprover_host:
-        description: 'CapRover host fallback (e.g. captain.dev.qwickforge.com)'
+        description: 'DEPRECATED: ignored. CapRover host is resolved from the deployment stage.'
         type: string
-        required: true
+        default: ''
 
       caprover_url:
-        description: 'Optional explicit CapRover URL override'
+        description: 'DEPRECATED: ignored. CapRover URL is resolved from the deployment stage.'
         type: string
         default: ''
 
@@ -173,6 +173,11 @@ jobs:
     steps:
       - name: Resolve canonical stage contract
         id: meta
+        env:
+          CAPROVER_HOST_INPUT: ${{ inputs.caprover_host }}
+          CAPROVER_URL_INPUT: ${{ inputs.caprover_url }}
+          OCI_DEV_CAPROVER_URL: ${{ secrets.OCI_DEV_CAPROVER_URL }}
+          OCI_MAIN_CAPROVER_URL: ${{ secrets.OCI_MAIN_CAPROVER_URL }}
         run: |
           set -euo pipefail
 
@@ -219,6 +224,7 @@ jobs:
           STAGE="$STAGE_INPUT"
           CANARY="false"
           CAPROVER_REQUIRED="true"
+          CAPROVER_HOST_NAME=""
 
           case "$STAGE" in
             build)
@@ -230,7 +236,7 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:release-candidate"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              CAPROVER_HOST_NAME="$OCI_DEV_CAPROVER_URL"
               ;;
             uat)
               TARGET_APP="${APP_NAME}-uat"
@@ -241,7 +247,7 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:release"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="${{ inputs.run_migrations }}"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              CAPROVER_HOST_NAME="$OCI_MAIN_CAPROVER_URL"
               ;;
             live)
               TARGET_APP="${APP_NAME}-live"
@@ -252,7 +258,7 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:stable"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              CAPROVER_HOST_NAME="$OCI_MAIN_CAPROVER_URL"
               ;;
             stable)
               TARGET_APP="${APP_NAME}-stable"
@@ -264,9 +270,20 @@ jobs:
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
               CAPROVER_REQUIRED="false"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
               ;;
           esac
+
+          if [ -n "$CAPROVER_HOST_INPUT" ]; then
+            echo "::warning::caprover_host is deprecated and ignored; deploy-app resolves the CapRover host from stage."
+          fi
+          if [ -n "$CAPROVER_URL_INPUT" ]; then
+            echo "::warning::caprover_url is deprecated and ignored; deploy-app resolves the CapRover URL from stage."
+          fi
+
+          if [ "$STAGE_INPUT" != "stable" ] && [ -z "$CAPROVER_HOST_NAME" ]; then
+            echo "ERROR: OCI_DEV_CAPROVER_URL or OCI_MAIN_CAPROVER_URL secret missing"
+            exit 1
+          fi
 
           if [ -z "$TARGET_APP_URL" ]; then
             TARGET_APP_URL="http://${APP_NAME}-${STAGE}.taile324e7.ts.net:8080"
@@ -299,23 +316,25 @@ jobs:
             exit 1
           fi
 
-          echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
-          echo "app_name=${APP_NAME}" >> "$GITHUB_OUTPUT"
-          echo "env_label=${ENV_LABEL}" >> "$GITHUB_OUTPUT"
-          echo "image_name=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
-          echo "source_image_ref=${INPUT_IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
-          echo "prior_tag=${PRIOR_TAG}" >> "$GITHUB_OUTPUT"
-          echo "next_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
-          echo "target_app=${TARGET_APP}" >> "$GITHUB_OUTPUT"
-          echo "target_app_url=${TARGET_APP_URL}" >> "$GITHUB_OUTPUT"
-          echo "gateway_app_name=${GATEWAY_APP_NAME}" >> "$GITHUB_OUTPUT"
-          echo "stable_app_url=${STABLE_APP_URL}" >> "$GITHUB_OUTPUT"
-          echo "caprover_host_name=${CAPROVER_HOST_NAME}" >> "$GITHUB_OUTPUT"
-          echo "caprover_required=${CAPROVER_REQUIRED}" >> "$GITHUB_OUTPUT"
-          echo "run_migrations_for_stage=${RUN_MIGRATIONS_FOR_STAGE}" >> "$GITHUB_OUTPUT"
-          echo "build_required=${BUILD_REQUIRED}" >> "$GITHUB_OUTPUT"
-          echo "canary=${CANARY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "stage=${STAGE}"
+            echo "app_name=${APP_NAME}"
+            echo "env_label=${ENV_LABEL}"
+            echo "image_name=${IMAGE_BASE}"
+            echo "source_image_ref=${INPUT_IMAGE}"
+            echo "image_ref=${IMAGE_REF}"
+            echo "prior_tag=${PRIOR_TAG}"
+            echo "next_tag=${NEXT_TAG}"
+            echo "target_app=${TARGET_APP}"
+            echo "target_app_url=${TARGET_APP_URL}"
+            echo "gateway_app_name=${GATEWAY_APP_NAME}"
+            echo "stable_app_url=${STABLE_APP_URL}"
+            echo "caprover_host_name=${CAPROVER_HOST_NAME}"
+            echo "caprover_required=${CAPROVER_REQUIRED}"
+            echo "run_migrations_for_stage=${RUN_MIGRATIONS_FOR_STAGE}"
+            echo "build_required=${BUILD_REQUIRED}"
+            echo "canary=${CANARY}"
+          } >> "$GITHUB_OUTPUT"
 
   # -- Immutable env var gate -----------------------------------------------
   validate-env:
@@ -477,18 +496,13 @@ jobs:
       - name: Resolve CapRover credentials
         run: |
           STAGE="${{ needs.resolve-stage.outputs.stage }}"
-
-          if [ -n "${{ inputs.caprover_url }}" ]; then
-            CP_URL="${{ inputs.caprover_url }}"
-          else
-            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
-          fi
+          CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
 
           if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
             CP_URL="https://${{ needs.resolve-stage.outputs.caprover_host_name }}"
           fi
 
-          # Ensure scheme is present — caprover_host inputs are bare hostnames
+          # Ensure scheme is present for legacy bare-host secrets.
           case "$CP_URL" in
             http://*|https://*) ;;
             *) CP_URL="https://$CP_URL" ;;
