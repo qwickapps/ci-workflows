@@ -322,6 +322,36 @@ jobs:
     needs: [resolve-stage]
     runs-on: [self-hosted, macmini]
     steps:
+      - name: Download rendered env file artifact (if present)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
+          path: .deploy-app-env
+          if-no-files-found: ignore
+
+      - name: Resolve env file path
+        id: env-file
+        run: |
+          set -euo pipefail
+          ENV="${{ inputs.environment }}"
+          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
+          APP="${{ inputs.app_name }}"
+
+          for candidate in \
+            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
+            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${ENV}-${APP}.env" \
+            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${APP}.env"; do
+            if [ -f "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
+          exit 1
+
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
         with:
@@ -338,14 +368,7 @@ jobs:
       - name: Validate rendered env values (required for all stages)
         run: |
           set -euo pipefail
-          ENV="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
-          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
-
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "ERROR: missing required env file ${ENV_FILE}"
-            exit 1
-          fi
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
 
           .ci-workflows/scripts/validate-env-values.sh "$ENV_FILE"
 
@@ -428,10 +451,8 @@ jobs:
     runs-on: [self-hosted, macmini]
     steps:
       - name: Login to GHCR
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Check image references exist
         run: |
           set -euo pipefail
@@ -520,6 +541,36 @@ jobs:
           chmod +x .github/scripts/*.sh
           chmod +x .ci-workflows/scripts/*.sh
 
+      - name: Download rendered env file artifact (if present)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
+          path: .deploy-app-env
+          if-no-files-found: ignore
+
+      - name: Resolve env file path
+        id: env-file
+        run: |
+          set -euo pipefail
+          ENV="${{ inputs.environment }}"
+          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
+          APP="${{ inputs.app_name }}"
+
+          for candidate in \
+            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
+            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${ENV}-${APP}.env" \
+            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${APP}.env"; do
+            if [ -f "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
+          exit 1
+
       - name: Ensure stable slot is up for live promotion
         if: needs.resolve-stage.outputs.stage == 'live'
         run: |
@@ -546,12 +597,7 @@ jobs:
           APP="${{ needs.resolve-stage.outputs.app_name }}"
           ENV="${{ needs.resolve-stage.outputs.env_label }}"
           TARGET_APP="${{ needs.resolve-stage.outputs.target_app }}"
-          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
-
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "ERROR: missing env file ${ENV_FILE}"
-            exit 1
-          fi
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
 
           CMD_ARGS=()
           if [ "${{ inputs.cmd }}" = "__clear__" ]; then
@@ -782,11 +828,39 @@ jobs:
           set -euo pipefail
           docker buildx imagetools inspect "${{ needs.resolve-stage.outputs.image_ref }}" >/dev/null
 
+      - name: Download rendered env file artifact (if present)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
+          path: .deploy-app-env
+          if-no-files-found: ignore
+
+      - name: Resolve env file path
+        id: env-file
+        run: |
+          set -euo pipefail
+          ENV="${{ inputs.environment }}"
+          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
+          APP="${{ inputs.app_name }}"
+
+          for candidate in \
+            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
+            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${ENV}-${APP}.env" \
+            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${APP}.env"; do
+            if [ -f "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
+          exit 1
+
       - name: Validate stable env file
         run: |
-          APP="${{ needs.resolve-stage.outputs.app_name }}"
-          ENV="${{ needs.resolve-stage.outputs.env_label }}"
-          ENV_FILE="/tmp/app-env-${ENV}-${APP}.env"
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
           if [ ! -f "$ENV_FILE" ]; then
             echo "ERROR: missing required stable env file ${ENV_FILE}"
             exit 1
@@ -804,7 +878,7 @@ jobs:
             --application-name "${{ inputs.app_name }}-stable" \
             --image-name "${{ needs.resolve-stage.outputs.image_name }}" \
             --image-tag "stable" \
-            --env-file "/tmp/app-env-${{ needs.resolve-stage.outputs.env_label }}-${{ inputs.app_name }}.env"
+            --env-file "${{ steps.env-file.outputs.path }}"
 
       - name: Verify stable health
         run: |
