@@ -325,7 +325,7 @@ jobs:
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
         with:
-          name: app-env-${{ needs.resolve-stage.outputs.env_label }}-${{ inputs.app_name }}
+          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
           path: .deploy-app-env
           if-no-files-found: ignore
 
@@ -333,23 +333,23 @@ jobs:
         id: env-file
         run: |
           set -euo pipefail
-          ENV="${{ needs.resolve-stage.outputs.env_label }}"
+          ENV="${{ inputs.environment }}"
+          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
           APP="${{ inputs.app_name }}"
-          ARTIFACT_FILE=".deploy-app-env/app-env-${ENV}-${APP}.env"
-          LEGACY_FILE="/tmp/app-env-${ENV}-${APP}.env"
 
-          if [ -f "$ARTIFACT_FILE" ]; then
-            echo "path=$ARTIFACT_FILE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          for candidate in \
+            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
+            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${ENV}-${APP}.env" \
+            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${APP}.env"; do
+            if [ -f "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
 
-          if [ -f "$LEGACY_FILE" ]; then
-            echo "path=$LEGACY_FILE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "::error::missing required env file ${ARTIFACT_FILE}"
-          echo "::error::missing required env file /tmp/app-env-${ENV}-${APP}.env"
+          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
           exit 1
 
       - name: Checkout ci-workflows scripts
@@ -544,7 +544,7 @@ jobs:
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
         with:
-          name: app-env-${{ needs.resolve-stage.outputs.env_label }}-${{ inputs.app_name }}
+          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
           path: .deploy-app-env
           if-no-files-found: ignore
 
@@ -552,23 +552,23 @@ jobs:
         id: env-file
         run: |
           set -euo pipefail
-          ENV="${{ needs.resolve-stage.outputs.env_label }}"
+          ENV="${{ inputs.environment }}"
+          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
           APP="${{ inputs.app_name }}"
-          ARTIFACT_FILE=".deploy-app-env/app-env-${ENV}-${APP}.env"
-          LEGACY_FILE="/tmp/app-env-${ENV}-${APP}.env"
 
-          if [ -f "$ARTIFACT_FILE" ]; then
-            echo "path=$ARTIFACT_FILE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          for candidate in \
+            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
+            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${ENV}-${APP}.env" \
+            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${APP}.env"; do
+            if [ -f "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
 
-          if [ -f "$LEGACY_FILE" ]; then
-            echo "path=$LEGACY_FILE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "::error::missing required env file ${ARTIFACT_FILE}"
-          echo "::error::missing required env file /tmp/app-env-${ENV}-${APP}.env"
+          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
           exit 1
 
       - name: Ensure stable slot is up for live promotion
@@ -831,7 +831,7 @@ jobs:
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
         with:
-          name: app-env-${{ needs.resolve-stage.outputs.env_label }}-${{ inputs.app_name }}
+          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
           path: .deploy-app-env
           if-no-files-found: ignore
 
@@ -839,23 +839,23 @@ jobs:
         id: env-file
         run: |
           set -euo pipefail
-          ENV="${{ needs.resolve-stage.outputs.env_label }}"
+          ENV="${{ inputs.environment }}"
+          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
           APP="${{ inputs.app_name }}"
-          ARTIFACT_FILE=".deploy-app-env/app-env-${ENV}-${APP}.env"
-          LEGACY_FILE="/tmp/app-env-${ENV}-${APP}.env"
 
-          if [ -f "$ARTIFACT_FILE" ]; then
-            echo "path=$ARTIFACT_FILE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          for candidate in \
+            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
+            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${ENV}-${APP}.env" \
+            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
+            "/tmp/app-env-${APP}.env"; do
+            if [ -f "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
 
-          if [ -f "$LEGACY_FILE" ]; then
-            echo "path=$LEGACY_FILE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "::error::missing required env file ${ARTIFACT_FILE}"
-          echo "::error::missing required env file /tmp/app-env-${ENV}-${APP}.env"
+          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
           exit 1
 
       - name: Validate stable env file
