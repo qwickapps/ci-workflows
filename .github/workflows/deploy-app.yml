@@ -438,6 +438,7 @@ jobs:
           file: ${{ inputs.dockerfile_path }}
           push: true
           platforms: linux/arm64
+          provenance: false
           tags: |
             ${{ needs.resolve-stage.outputs.image_ref }}
 
