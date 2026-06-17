@@ -440,6 +440,7 @@ jobs:
           platforms: linux/arm64
           tags: |
             ${{ needs.resolve-stage.outputs.image_ref }}
+          provenance: false
 
   # -- Provenance gate (all stages require stage image; non-build requires prior)
   verify-provenance:
