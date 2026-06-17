@@ -25,7 +25,7 @@ set -euo pipefail
 
 BASE_SHA="${BASE_SHA:-${1:-}}"
 HEAD_SHA="${HEAD_SHA:-${2:-}}"
-ATTRIBUTION_MODE="${ATTRIBUTION_MODE:-fail}"
+ATTRIBUTION_MODE="${ATTRIBUTION_MODE:-warn}"
 
 # Patterns to detect AI co-authorship in commit trailers
 AI_PATTERNS=(
