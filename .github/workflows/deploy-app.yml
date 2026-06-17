@@ -324,10 +324,10 @@ jobs:
     steps:
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
           path: .deploy-app-env
-          if-no-files-found: ignore
 
       - name: Resolve env file path
         id: env-file
@@ -452,7 +452,7 @@ jobs:
     steps:
       - name: Login to GHCR
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Check image references exist
         run: |
           set -euo pipefail
@@ -543,10 +543,10 @@ jobs:
 
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
           path: .deploy-app-env
-          if-no-files-found: ignore
 
       - name: Resolve env file path
         id: env-file
@@ -830,10 +830,10 @@ jobs:
 
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
           path: .deploy-app-env
-          if-no-files-found: ignore
 
       - name: Resolve env file path
         id: env-file
