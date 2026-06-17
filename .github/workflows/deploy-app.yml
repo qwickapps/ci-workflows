@@ -427,13 +427,11 @@ jobs:
           docker buildx rm --all-inactive --force 2>/dev/null || true
 
       - name: Login to GHCR for base image pull
-        if: ${{ env.DOCKER_CLI != '' }}
         run: |
           echo "$GHCR_TOKEN" | $DOCKER_CLI login ghcr.io -u raajkumars --password-stdin
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           DOCKER_CLI: ${{ env.DOCKER_CLI }}
-          DOCKER_HOST: ${{ env.DOCKER_HOST }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
