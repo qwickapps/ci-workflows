@@ -146,10 +146,9 @@ jobs:
         if: steps.classify.outputs.fleet_critical == 'true' && steps.parse.outputs.has_section == 'true' && steps.parse.outputs.unchecked_count != '0' && steps.parse.outputs.unchecked_count != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          ITEMS: ${{ steps.parse.outputs.unchecked_items }}
         run: |
           set -euo pipefail
-
-          ITEMS="${{ steps.parse.outputs.unchecked_items }}"
 
           ITEM_LIST=""
           while IFS= read -r entry; do
