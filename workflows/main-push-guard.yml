@@ -162,6 +162,18 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/.docker-persistent"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/.docker-persistent" >> "$GITHUB_ENV"
 
+      - name: Pre-flight: verify ghcr.io reachability
+        run: |
+          if curl --fail --max-time 10 --retry 2 --retry-delay 3 -sI https://ghcr.io 2>/dev/null; then
+            echo "ghcr.io reachable"
+          else
+            echo "❌ ghcr.io is unreachable from this runner"
+            echo "   Root cause: macmini Tailscale exit-node may be down"
+            echo "   Fix: SSH to macmini and run: tailscale up"
+            echo "   (or wait for the Tailscale keep-alive launchd agent to recover)"
+            exit 1
+          fi
+
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN }}
