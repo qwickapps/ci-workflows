@@ -460,8 +460,6 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
-    env:
-      DOCKER_CONFIG: /tmp/docker-cfg-${{ github.run_id }}
     steps:
       - name: Login to GHCR
         uses: docker/login-action@v3
