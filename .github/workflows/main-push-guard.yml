@@ -38,7 +38,7 @@ on:
         default: true
     secrets:
       GHCR_PUSH_TOKEN:
-        required: true
+        required: false
 
 env:
   REGISTRY: ghcr.io
@@ -209,7 +209,7 @@ jobs:
         # auth straight into the isolated DOCKER_CONFIG so buildx pushes with it
         # and `docker login` is never called.
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
           AUTH="$(printf '%s:%s' '${{ github.actor }}' "$GHCR_TOKEN" | base64 | tr -d '\n')"
