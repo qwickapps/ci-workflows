@@ -217,23 +217,17 @@ jobs:
           {"auths":{"${{ env.REGISTRY }}":{"auth":"$AUTH"}}}
           EOF
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          # Use the Docker daemon's built-in BuildKit (driver: docker) to avoid
-          # creating a BuildKit container. The docker-container driver fails with
-          # "unexpected EOF" on Colima-backed macOS self-hosted runners because
-          # the daemon can't reliably start new containers during CI runs.
-          driver: docker
-
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ inputs.dockerfile_path }}
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.image_ref }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+        # Build with plain docker (no buildx container needed — avoids "unexpected
+        # EOF" when Colima can't reliably start BuildKit containers). Push via
+        # docker push so the client passes $DOCKER_CONFIG auth to the daemon.
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ steps.meta.outputs.image_ref }}"
+          docker build \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t "$IMAGE_REF" \
+            -f "${{ inputs.dockerfile_path }}" \
+            .
+          docker push "$IMAGE_REF"
