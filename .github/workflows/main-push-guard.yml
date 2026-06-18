@@ -219,6 +219,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # Use the Docker daemon's built-in BuildKit (driver: docker) to avoid
+          # creating a BuildKit container. The docker-container driver fails with
+          # "unexpected EOF" on Colima-backed macOS self-hosted runners because
+          # the daemon can't reliably start new containers during CI runs.
+          driver: docker
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
