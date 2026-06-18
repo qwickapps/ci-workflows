@@ -495,9 +495,12 @@ jobs:
   deploy-caprover:
     needs: [resolve-stage, validate-env, verify-provenance, build]
     if: |
+      always() &&
+      needs.resolve-stage.result == 'success' &&
+      needs.validate-env.result == 'success' &&
+      needs.verify-provenance.result == 'success' &&
       needs.resolve-stage.outputs.caprover_required == 'true' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      needs.verify-provenance.result == 'success'
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
     concurrency:
       group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
