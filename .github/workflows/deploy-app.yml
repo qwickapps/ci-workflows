@@ -460,13 +460,15 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
+    env:
+      DOCKER_CONFIG: /tmp/docker-vp-${{ github.run_id }}
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PULL_TOKEN }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Check image references exist
         run: |
           set -euo pipefail
