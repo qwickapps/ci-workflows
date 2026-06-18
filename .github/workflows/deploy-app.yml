@@ -782,8 +782,10 @@ jobs:
   retag:
     needs: [resolve-stage, deploy-caprover, validate-env]
     if: |
-      needs.resolve-stage.outputs.stage != 'stable' &&
+      always() &&
+      needs.resolve-stage.result == 'success' &&
       needs.deploy-caprover.result == 'success' &&
+      needs.resolve-stage.outputs.stage != 'stable' &&
       needs.resolve-stage.outputs.next_tag != ''
     runs-on: [self-hosted, macmini]
     steps:
@@ -805,7 +807,7 @@ jobs:
   # -- Build slot cleanup (post-pass only) ----------------------------------
   scale-build-slot:
     needs: [resolve-stage, retag]
-    if: ${{ needs.resolve-stage.outputs.stage == 'build' && needs.retag.result == 'success' }}
+    if: always() && needs.resolve-stage.result == 'success' && needs.retag.result == 'success' && needs.resolve-stage.outputs.stage == 'build'
     runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout code
@@ -840,8 +842,10 @@ jobs:
   deploy-stable:
     needs: [resolve-stage, verify-provenance]
     if: |
-      needs.resolve-stage.outputs.stage == 'stable' &&
-      needs.verify-provenance.result == 'success'
+      always() &&
+      needs.resolve-stage.result == 'success' &&
+      needs.verify-provenance.result == 'success' &&
+      needs.resolve-stage.outputs.stage == 'stable'
     runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout code
