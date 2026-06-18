@@ -816,6 +816,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
       - name: Resolve CapRover credentials
         run: |
           CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
@@ -828,14 +838,18 @@ jobs:
             echo "ERROR: CapRover credentials missing for dev scale operation"
             exit 1
           fi
+          case "$CP_URL" in
+            http://*|https://*) ;;
+            *) CP_URL="https://$CP_URL" ;;
+          esac
           echo "CAPROVER_URL=$CP_URL" >> "$GITHUB_ENV"
           echo "CAPROVER_PASSWORD=$CP_PASS" >> "$GITHUB_ENV"
 
       - name: Scale build slot to zero on build pass
         run: |
           set -euo pipefail
-          chmod +x .github/scripts/*.sh
-          .github/scripts/caprover-slot-admin.sh scale \
+          chmod +x .ci-workflows/scripts/*.sh
+          .ci-workflows/scripts/caprover-slot-admin.sh scale \
             --app-name "${{ needs.resolve-stage.outputs.target_app }}" \
             --instance-count 0 \
             --caprover-url "$CAPROVER_URL" \
