@@ -468,6 +468,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
+          printf '{"credsStore":""}' > "$DOCKER_CONFIG/config.json"
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Check image references exist
         run: |
