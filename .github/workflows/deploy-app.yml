@@ -467,7 +467,11 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p "$DOCKER_CONFIG"
+          mkdir -p "$DOCKER_CONFIG/cli-plugins"
+          # Symlink buildx so docker buildx works under the overridden DOCKER_CONFIG
+          if [ -f "$HOME/.docker/cli-plugins/docker-buildx" ]; then
+            ln -sf "$HOME/.docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          fi
           AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$DOCKER_CONFIG/config.json"
       - name: Check image references exist
