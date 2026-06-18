@@ -539,8 +539,11 @@ jobs:
             *) CP_URL="https://$CP_URL" ;;
           esac
 
-          case "$STAGE" in
-            build)
+          # Derive password from the CapRover URL (not stage), so callers that
+          # override caprover_host get the correct credential regardless of stage.
+          # dev.qwickforge.com → OCI_DEV; everything else → OCI_MAIN.
+          case "$CP_URL" in
+            *dev.qwickforge.com*)
               CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
               ;;
             *)
@@ -549,7 +552,7 @@ jobs:
           esac
 
           if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
-            echo "ERROR: CapRover credentials missing for stage ${STAGE}"
+            echo "ERROR: CapRover credentials missing for stage ${STAGE} url ${CP_URL}"
             exit 1
           fi
 
