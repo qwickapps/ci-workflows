@@ -464,9 +464,11 @@ jobs:
       DOCKER_CONFIG: /tmp/docker-cfg-${{ github.run_id }}
     steps:
       - name: Login to GHCR
-        run: |
-          mkdir -p "$DOCKER_CONFIG"
-          echo "${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PULL_TOKEN }}
       - name: Check image references exist
         run: |
           set -euo pipefail
