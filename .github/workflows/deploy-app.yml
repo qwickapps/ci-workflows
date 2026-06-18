@@ -463,12 +463,13 @@ jobs:
     env:
       DOCKER_CONFIG: /tmp/docker-vp-${{ github.run_id }}
     steps:
-      - name: Login to GHCR
+      - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$DOCKER_CONFIG/config.json"
       - name: Check image references exist
         run: |
           set -euo pipefail
