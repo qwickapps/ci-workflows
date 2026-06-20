@@ -1,0 +1,187 @@
+name: External DB Gate
+
+on:
+  workflow_call:
+    inputs:
+      path_filters:
+        description: "Newline-separated file globs to scan for policy violations"
+        required: false
+        type: string
+        default: |
+          .env*
+          *.yml
+          *.yaml
+          *.ts
+          *.js
+          *.toml
+          package.json
+      approved_external_db_label:
+        description: "Set to true when PR has `approved-external-db` label"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan changed files for forbidden DB references
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Enforce external DB restrictions
+        env:
+          APPROVED_EXTERNAL_DB_LABEL: ${{ inputs.approved_external_db_label }}
+          PATH_FILTERS: ${{ inputs.path_filters }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "External DB gate is PR-only; skipping on ${GITHUB_EVENT_NAME}."
+            exit 0
+          fi
+
+          if [[ "${APPROVED_EXTERNAL_DB_LABEL}" == "true" ]]; then
+            echo "approved-external-db label detected. Skipping external DB gate."
+            exit 0
+          fi
+
+          git fetch origin "${{ github.base_ref }}" --depth=100
+          BASE_SHA="$(git merge-base "origin/${{ github.base_ref }}" "${{ github.sha }}")"
+          HEAD_SHA="${{ github.sha }}"
+
+          mapfile -t CHANGED_FILES < <(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
+          if [[ "${#CHANGED_FILES[@]}" -eq 0 ]]; then
+            echo "No changed files to scan; passing."
+            exit 0
+          fi
+
+          mapfile -t FILTERS < <(printf '%s\n' "${PATH_FILTERS}" | sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d')
+
+          should_scan_file() {
+            local file="$1"
+            local base="${file##*/}"
+            local pattern
+
+            for pattern in "${FILTERS[@]}"; do
+              pattern="$(echo "${pattern}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [[ -z "${pattern}" ]] && continue
+
+              case "${pattern}" in
+                .env*)
+                  [[ "${base}" == .env* ]] && return 0
+                  ;;
+                *.yml)
+                  [[ "${base}" == *.yml ]] && return 0
+                  ;;
+                *.yaml)
+                  [[ "${base}" == *.yaml ]] && return 0
+                  ;;
+                *.ts)
+                  [[ "${base}" == *.ts ]] && return 0
+                  ;;
+                *.js)
+                  [[ "${base}" == *.js ]] && return 0
+                  ;;
+                *.toml)
+                  [[ "${base}" == *.toml ]] && return 0
+                  ;;
+                package.json)
+                  [[ "${base}" == package.json ]] && return 0
+                  ;;
+              esac
+            done
+
+            return 1
+          }
+
+          add_violation() {
+            local file="$1"
+            local line="$2"
+            local pattern="$3"
+
+            echo "::error file=${file},line=${line}::External DB detected: ${pattern}. All databases must use qwickapps-db. Get EM approval before adding external DB dependencies."
+            VIOLATIONS+=("${pattern}|${file}:${line}")
+          }
+
+          VIOLATIONS=()
+
+          for file in "${CHANGED_FILES[@]}"; do
+            if [[ ! -f "${file}" ]]; then
+              continue
+            fi
+
+            if ! should_scan_file "${file}"; then
+              continue
+            fi
+
+            line_no=0
+            while IFS= read -r line || [ -n "${line}" ]; do
+              line_no=$((line_no + 1))
+
+              if echo "${line}" | grep -Eiq '[[:alnum:]_.-]+\.neon\.tech'; then
+                add_violation "${file}" "${line_no}" "*.neon.tech"
+              fi
+
+              if echo "${line}" | grep -Eiq '\bneondb_owner\b'; then
+                add_violation "${file}" "${line_no}" "neondb_owner"
+              fi
+
+              if echo "${line}" | grep -Eiq '\bnpg_[a-z0-9_]+\b'; then
+                add_violation "${file}" "${line_no}" "npg_* connection string"
+              fi
+
+              if echo "${line}" | grep -Eiq '\bNEON_[A-Z0-9_]+\b'; then
+                add_violation "${file}" "${line_no}" "NEON_* env vars"
+              fi
+
+              if echo "${line}" | grep -Eiq '@neondatabase/serverless'; then
+                add_violation "${file}" "${line_no}" "@neondatabase/serverless package"
+              fi
+
+              if echo "${line}" | grep -Eiq '[[:alnum:]_.-]+\.supabase\.(co|com)'; then
+                add_violation "${file}" "${line_no}" "*.supabase.co or *.supabase.com"
+              fi
+
+              if echo "${line}" | grep -Eiq '[[:alnum:]_.-]+\.psdb\.cloud'; then
+                add_violation "${file}" "${line_no}" "*.psdb.cloud"
+              fi
+
+              if echo "${line}" | grep -Eiq '[[:alnum:]_.-]+\.railway\.app'; then
+                add_violation "${file}" "${line_no}" "*.railway.app"
+              fi
+
+              if echo "${line}" | grep -Eiq '[[:alnum:]_.-]+\.render\.com'; then
+                add_violation "${file}" "${line_no}" "*.render.com"
+              fi
+
+              if echo "${line}" | grep -Eiq 'postgres(ql)?://'; then
+                if ! echo "${line}" | grep -Eiq 'qwickapps-db'; then
+                  add_violation "${file}" "${line_no}" "postgres/postgres.local/pg host"
+                fi
+              fi
+
+              if echo "${line}" | grep -Eiq '\b(HOST|PGHOST|DB_HOST|DATABASE_HOST|PGHOSTADDR)[[:space:]]*='; then
+                host="$(echo "${line}" | sed -E "s/^[[:space:]]*[a-zA-Z0-9_]*(HOST|PGHOST|DB_HOST|DATABASE_HOST|PGHOSTADDR)[[:space:]]*=[[:space:]]*['\\\"]?([^['\\\" #]+).*/\\2/I")"
+                if [[ "${host}" == *postgres* || "${host}" == *postgres.local* || "${host}" == *'.pg.'* || "${host}" == pg-* || "${host}" == *'.pg' ]]; then
+                  if ! echo "${host}" | grep -Eiq 'qwickapps-db'; then
+                    add_violation "${file}" "${line_no}" "postgres/postgres.local/pg host"
+                  fi
+                fi
+              fi
+            done < "${file}"
+          done
+
+          if [[ "${#VIOLATIONS[@]}" -gt 0 ]]; then
+            echo ""
+            echo "External DB detected in ${#VIOLATIONS[@]} location(s)."
+            echo "All databases must use qwickapps-db. Get EM approval before adding external DB dependencies."
+            exit 1
+          fi
+
+          echo "No forbidden external DB references found in changed files."
