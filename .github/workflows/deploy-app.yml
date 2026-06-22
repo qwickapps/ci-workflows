@@ -360,6 +360,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            manifests
           sparse-checkout-cone-mode: false
 
       - name: Make scripts executable
@@ -371,6 +372,24 @@ jobs:
           ENV_FILE="${{ steps.env-file.outputs.path }}"
 
           .ci-workflows/scripts/validate-env-values.sh "$ENV_FILE"
+
+      - name: Preflight service contract validation
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+
+          if [ ! -f ".ci-workflows/manifests/service-contracts.yml" ]; then
+            echo "⚠️  Service contract manifest not found — skipping preflight validation"
+            exit 0
+          fi
+
+          .ci-workflows/scripts/preflight-service-contract.sh \
+            --app-name "${{ inputs.app_name }}" \
+            --env-label "${{ needs.resolve-stage.outputs.env_label }}" \
+            --env-file "$ENV_FILE" \
+            --contract-file ".ci-workflows/manifests/service-contracts.yml" \
+            --dry-run true
 
   # -- Build once per image_ref ---------------------------------------------
   build:

@@ -1,0 +1,226 @@
+# Service Contract Manifest — Required secrets and env vars per service
+#
+# This manifest defines the required secrets and environment variables for each
+# service/app, organized by environment and stage. The CI workflow uses this to
+# validate that all required vars are present before deployment.
+#
+# Format:
+#   services:
+#     <app-name>:
+#       <env-label>:  # 'dev', 'uat', 'live', or 'stable'
+#         required_secrets:     # Vars that MUST be present (from CI secrets or env file)
+#           - KEY_NAME
+#         required_env:         # Vars that MUST be present in CapRover before deploy
+#           - VAR_NAME
+#         preserve_patterns:    # Vars to preserve from existing CapRover state if not in env file
+#           - 'TS_*'            # Preserve all Tailscale vars unless explicitly set
+#           - 'RCLONE_*'        # Preserve rclone config
+#
+# Validation flow (new preflight step):
+# 1. Load service contract for app + env
+# 2. Check CI secrets for required_secrets
+# 3. Check env file for required_env
+# 4. Check CapRover for required_env (existing state before deploy)
+# 5. Plan preservation of matching patterns
+# 6. Report findings (fail if any missing, warn if preservation might be needed)
+
+services:
+  qwickapps-mcp:
+    dev:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - TS_AUTHKEY
+        - TS_EPHEMERAL_AUTHKEY
+      preserve_patterns:
+        - 'TS_*'
+      notes: "MCP requires Tailscale network identity; TS_AUTHKEY must survive redeploys"
+
+    uat:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - TS_AUTHKEY
+        - PORT
+      preserve_patterns:
+        - 'TS_*'
+
+    live:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - TS_AUTHKEY
+        - TS_HOSTNAME
+        - PORT
+      preserve_patterns:
+        - 'TS_*'
+      critical: true
+
+  qwickapps-backup:
+    dev:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - RCLONE_CONFIG_BASE64
+        - RCLONE_CONFIG_PASS
+        - BACKUP_STORAGE_PATH
+      preserve_patterns:
+        - 'RCLONE_*'
+        - 'BACKUP_*'
+
+    uat:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - RCLONE_CONFIG_BASE64
+        - RCLONE_CONFIG_PASS
+        - BACKUP_STORAGE_PATH
+      preserve_patterns:
+        - 'RCLONE_*'
+
+    live:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - RCLONE_CONFIG_BASE64
+        - RCLONE_CONFIG_PASS
+        - BACKUP_STORAGE_PATH
+        - OCI_BACKUP_ENDPOINT
+      preserve_patterns:
+        - 'RCLONE_*'
+        - 'BACKUP_*'
+      critical: true
+
+  qwickapps-memories:
+    dev:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - DATABASE_URL
+      preserve_patterns:
+        - 'DATABASE_*'
+
+    uat:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - DATABASE_URL
+        - TS_AUTHKEY
+      preserve_patterns:
+        - 'DATABASE_*'
+        - 'TS_*'
+
+    live:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - DATABASE_URL
+        - TS_AUTHKEY
+        - TS_HOSTNAME
+      preserve_patterns:
+        - 'DATABASE_*'
+        - 'TS_*'
+      critical: true
+
+  qwickapps-slack-mcp:
+    dev:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - SLACK_BOT_TOKEN
+        - SLACK_SIGNING_SECRET
+
+    uat:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - SLACK_BOT_TOKEN
+        - SLACK_SIGNING_SECRET
+        - TS_AUTHKEY
+      preserve_patterns:
+        - 'SLACK_*'
+        - 'TS_*'
+
+    live:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - SLACK_BOT_TOKEN
+        - SLACK_SIGNING_SECRET
+        - TS_AUTHKEY
+        - TS_HOSTNAME
+      preserve_patterns:
+        - 'SLACK_*'
+        - 'TS_*'
+      critical: true
+
+  # Gateway routing app — requires special care for Tailscale vars
+  provision-gateway:
+    uat:
+      required_secrets:
+        - OCI_GATEWAY_CAPROVER_PASSWORD
+      required_env:
+        - TS_AUTHKEY
+        - TS_HOSTNAME
+        - GATEWAY_ROUTES_JSON
+      preserve_patterns:
+        - 'TS_*'
+        - 'GATEWAY_*'
+      notes: "Gateway MUST preserve TS_* unless explicit rotation requested"
+
+    live:
+      required_secrets:
+        - OCI_GATEWAY_CAPROVER_PASSWORD
+      required_env:
+        - TS_AUTHKEY
+        - TS_HOSTNAME
+        - GATEWAY_ROUTES_JSON
+      preserve_patterns:
+        - 'TS_*'
+        - 'GATEWAY_*'
+      critical: true
+
+  # Example: App with database migrations
+  my-app:
+    dev:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - DATABASE_URL
+        - DATABASE_POOL_SIZE
+      preserve_patterns:
+        - 'DATABASE_*'
+
+    uat:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - DATABASE_URL
+        - DATABASE_POOL_SIZE
+        - LOG_LEVEL
+      preserve_patterns:
+        - 'DATABASE_*'
+
+    live:
+      required_secrets:
+        - GHCR_PULL_TOKEN
+      required_env:
+        - DATABASE_URL
+        - DATABASE_POOL_SIZE
+        - LOG_LEVEL
+        - TS_AUTHKEY
+      preserve_patterns:
+        - 'DATABASE_*'
+        - 'TS_*'
+      critical: true
+
+# Global validation rules (apply to all services unless overridden)
+global:
+  # Services marked as critical must not have any missing required vars
+  critical_failure_on_missing: true
+
+  # Log all preservation patterns and what they matched
+  preserve_tracking: true
+
+  # Warn if CapRover has vars that won't be in env file (will be preserved)
+  warn_orphan_env: true
