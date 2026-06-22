@@ -617,6 +617,19 @@ jobs:
           echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
           exit 1
 
+      - name: Pre-deploy safety gate - verify backup slot healthy
+        if: needs.resolve-stage.outputs.stage == 'live'
+        run: |
+          set -euo pipefail
+          chmod +x .ci-workflows/scripts/check-backup-slot-health.sh
+          .ci-workflows/scripts/check-backup-slot-health.sh \
+            --app-name "${{ inputs.app_name }}" \
+            --stage "${{ needs.resolve-stage.outputs.stage }}" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --max-attempts 5 \
+            --timeout 10
+
       - name: Ensure stable slot is up for live promotion
         if: needs.resolve-stage.outputs.stage == 'live'
         run: |
@@ -683,6 +696,33 @@ jobs:
             --health-path "${{ inputs.health_path }}" \
             --max-attempts 15 \
             --sleep 20
+
+      - name: Post-cutover soak test - 2-minute stability check
+        if: needs.resolve-stage.outputs.stage == 'live'
+        run: |
+          set -euo pipefail
+          chmod +x .ci-workflows/scripts/soak-test.sh
+          HEALTH_URL="${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.health_path }}"
+          .ci-workflows/scripts/soak-test.sh \
+            --url "$HEALTH_URL" \
+            --duration 120 \
+            --interval 5 \
+            --max-failures 0 \
+            --timeout 10 \
+            || (
+              echo "Soak test failed - triggering auto-rollback"
+              chmod +x .ci-workflows/scripts/auto-rollback.sh
+              .ci-workflows/scripts/auto-rollback.sh \
+                --app-name "${{ inputs.app_name }}" \
+                --from-slot "${{ needs.resolve-stage.outputs.target_app }}" \
+                --to-slot "${{ inputs.app_name }}-stable" \
+                --reason "Health check failed during post-deploy soak test" \
+                --caprover-url "$CAPROVER_URL" \
+                --caprover-password "$CAPROVER_PASSWORD" \
+                --github-token "${{ secrets.GITHUB_TOKEN }}" \
+                --create-issue
+              exit 1
+            )
 
       - name: Deep subsystem health check
         run: |
