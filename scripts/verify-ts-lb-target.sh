@@ -89,6 +89,25 @@ select_live_target() {
   '
 }
 
+# parse_created_epoch ISO8601_UTC_TIMESTAMP
+#
+# Prints the Unix epoch for a Tailscale `created`/timestamp string (always
+# UTC, "Z"-suffixed) on stdout, or nothing (empty) if unparseable. Factored
+# out (and defined before main so it can be `source`d for unit tests) —
+# infra#101 found this parsing silently wrong on macOS/BSD `date`: `-j -f`
+# parses the input as LOCAL time even though it ends in literal "Z" (BSD
+# `date` does not treat "Z" as a UTC marker the way GNU `date -d` does), so
+# every parsed epoch was inflated by the host's UTC offset on this org's
+# America/New_York runners. That silently defeated the freshness check
+# (a deliberately-future --deploy-start-epoch, which must always fail,
+# instead passed). `-u` forces BSD `date` to interpret input and output as
+# UTC. GNU `date -d` (tried first, for Linux runners) already handles the
+# "Z" suffix correctly and needs no change.
+parse_created_epoch() {
+  local iso_ts="$1"
+  date -d "$iso_ts" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso_ts" +%s 2>/dev/null || true
+}
+
 main() {
 
 TS_API_KEY=""
@@ -163,7 +182,8 @@ echo "[verify-ts-lb-target] Found exactly one live device: hostname=${LIVE_HOSTN
 
 # Freshness check: the live device must have been created at/after this
 # deploy started (minus grace), i.e. it is the node THIS deploy produced.
-CREATED_EPOCH=$(date -d "$LIVE_CREATED" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LIVE_CREATED" +%s 2>/dev/null || echo "")
+# See parse_created_epoch() above for the UTC-parsing bug this depends on.
+CREATED_EPOCH=$(parse_created_epoch "$LIVE_CREATED")
 if [[ -z "$CREATED_EPOCH" ]]; then
   echo "[verify-ts-lb-target] FAIL: could not parse created timestamp '${LIVE_CREATED}' for device ${LIVE_ID}" >&2
   exit 1

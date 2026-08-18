@@ -91,6 +91,21 @@ FIXTURE_MIXED_CASE='{
 RESULT_CASE=$(select_live_target "$FIXTURE_MIXED_CASE" "macmini-devserver")
 assert_eq "case-insensitive hostname match -> OK" "OK MacMini-DevServer 444 2025-12-20T04:38:07Z" "$RESULT_CASE"
 
+# ── Fixture 7: parse_created_epoch() must be UTC regardless of host TZ ─────
+# (infra#101 live bug: on macOS/BSD `date`, the `-j -f` fallback silently
+# parsed "Z"-suffixed timestamps as LOCAL time, inflating the epoch by the
+# host's UTC offset on the org's America/New_York runners. This defeated the
+# freshness check -- a deliberately-future --deploy-start-epoch, which must
+# always fail, instead passed. Force TZ to a non-UTC zone here so this test
+# fails the same way the live bug did if the `-u` fix regresses.)
+KNOWN_UTC_TS="2026-08-18T14:00:00Z"
+KNOWN_UTC_EPOCH="1787061600"   # date -u -d "2026-08-18T14:00:00Z" +%s
+PARSED_EPOCH_NY=$(TZ="America/New_York" parse_created_epoch "$KNOWN_UTC_TS")
+assert_eq "parse_created_epoch is UTC under TZ=America/New_York" "$KNOWN_UTC_EPOCH" "$PARSED_EPOCH_NY"
+
+PARSED_EPOCH_TOKYO=$(TZ="Asia/Tokyo" parse_created_epoch "$KNOWN_UTC_TS")
+assert_eq "parse_created_epoch is UTC under TZ=Asia/Tokyo" "$KNOWN_UTC_EPOCH" "$PARSED_EPOCH_TOKYO"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
