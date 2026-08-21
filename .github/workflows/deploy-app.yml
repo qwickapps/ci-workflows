@@ -170,11 +170,18 @@ jobs:
       run_migrations_for_stage: ${{ steps.meta.outputs.run_migrations_for_stage }}
       build_required: ${{ steps.meta.outputs.build_required }}
       canary: ${{ steps.meta.outputs.canary }}
+      deploy_start_epoch: ${{ steps.meta.outputs.deploy_start_epoch }}
     steps:
       - name: Resolve canonical stage contract
         id: meta
         run: |
           set -euo pipefail
+
+          # Captured first, before any TS registration/deploy work happens in
+          # this run, so the infra#101 verify-ts-lb-target.sh freshness check
+          # (post-promotion) can prove a live device was registered BY this
+          # deploy and not a stale leftover from a previous one.
+          echo "deploy_start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
           STAGE_INPUT="${{ inputs.stage }}"
           APP_NAME="${{ inputs.app_name }}"
@@ -781,6 +788,25 @@ jobs:
             --github-owner "${{ env.OWNER }}" \
             "${STABLE_ARGS[@]}"
 
+      - name: Verify LB target resolves to the node just deployed (infra#101 guard)
+        if: needs.resolve-stage.outputs.stage == 'live'
+        run: |
+          set -euo pipefail
+          RAW_URL="${{ needs.resolve-stage.outputs.stable_app_url }}"
+          # Only meaningful when the target is a bare Tailscale MagicDNS hostname
+          # (http(s)://<hostname>.<tailnet>.ts.net[:port]) — CapRover public-domain
+          # targets (app.qwickforge.com etc.) are out of scope for this guard.
+          if [[ "$RAW_URL" != *.ts.net* ]]; then
+            echo "Target '$RAW_URL' is not a Tailscale hostname; guard not applicable, skipping."
+            exit 0
+          fi
+          CANONICAL_HOSTNAME=$(echo "$RAW_URL" | sed -E 's#^[a-z]+://##; s#\..*$##')
+          chmod +x .ci-workflows/scripts/verify-ts-lb-target.sh
+          .ci-workflows/scripts/verify-ts-lb-target.sh \
+            --ts-api-key "${{ secrets.TS_API_KEY }}" \
+            --canonical-hostname "$CANONICAL_HOSTNAME" \
+            --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
+
   # -- Tag lifecycle promotion ---------------------------------------------
   retag:
     needs: [resolve-stage, deploy-caprover, validate-env]
@@ -871,6 +897,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
       - name: Ensure stable image exists
         run: |
           set -euo pipefail
@@ -942,6 +978,24 @@ jobs:
           done
           echo "ERROR: stable health check failed"
           exit 1
+
+      - name: Verify LB target resolves to the node just deployed (infra#101 guard)
+        run: |
+          set -euo pipefail
+          RAW_URL="${{ needs.resolve-stage.outputs.target_app_url }}"
+          # Only meaningful when the target is a bare Tailscale MagicDNS hostname
+          # (http(s)://<hostname>.<tailnet>.ts.net[:port]) — CapRover public-domain
+          # targets (app.qwickforge.com etc.) are out of scope for this guard.
+          if [[ "$RAW_URL" != *.ts.net* ]]; then
+            echo "Target '$RAW_URL' is not a Tailscale hostname; guard not applicable, skipping."
+            exit 0
+          fi
+          CANONICAL_HOSTNAME=$(echo "$RAW_URL" | sed -E 's#^[a-z]+://##; s#\..*$##')
+          chmod +x .ci-workflows/scripts/verify-ts-lb-target.sh
+          .ci-workflows/scripts/verify-ts-lb-target.sh \
+            --ts-api-key "${{ secrets.TS_API_KEY }}" \
+            --canonical-hostname "$CANONICAL_HOSTNAME" \
+            --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
 
       - name: Optional stable E2E
         if: inputs.run_e2e == 'true'
