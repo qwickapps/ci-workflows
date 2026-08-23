@@ -39,6 +39,24 @@ on:
     secrets:
       GHCR_PUSH_TOKEN:
         required: false
+    # ci-workflows#122: the build-push job below already declares these as
+    # job-level `outputs`, but GitHub Actions never exposes a reusable
+    # workflow's job outputs to the caller unless the reusable workflow
+    # re-declares them here. Without this block, every consumer's
+    # `needs.<job-that-calls-this>.outputs.image_ref` silently resolved to
+    # an empty string — no error, no warning. Traced live in
+    # qwickapps/mcp#333: mcp's deploy.yml read that empty output, fell back
+    # to a default image path that rebuilt under the wrong GHCR repo name,
+    # and silently retagged `:release-candidate` there instead of the real
+    # image — leaving the real tag stuck on a two-month-old commit despite
+    # every push reporting success.
+    outputs:
+      image_ref:
+        description: 'Fully-qualified image ref that was built and pushed (registry/owner/image:sha-tag)'
+        value: ${{ jobs.build-push.outputs.image_ref }}
+      image_tag:
+        description: 'Just the sha-<short> tag portion of image_ref'
+        value: ${{ jobs.build-push.outputs.image_tag }}
 
 env:
   REGISTRY: ghcr.io

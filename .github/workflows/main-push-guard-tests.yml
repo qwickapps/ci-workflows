@@ -1,0 +1,49 @@
+name: Main Push Guard Tests
+
+# Regression gate for qwickapps/ci-workflows#122: main-push-guard.yml's
+# `on.workflow_call` block never re-exposed the build-push job's
+# `image_ref`/`image_tag` outputs, so every consumer's
+# `needs.<job>.outputs.image_ref` silently resolved to an empty string
+# with no error. Traced live in qwickapps/mcp#333 — the resulting
+# fallback path silently retagged a moving deploy tag on the wrong GHCR
+# image repo for over two months. Nothing caught it because nothing
+# tested this file's shape. This gate exists so a future edit that
+# drops or breaks the `outputs` block fails loudly on the PR instead of
+# silently reappearing.
+#
+# Tests:
+#   bash scripts/tests/main-push-guard-outputs.test.sh
+#     - on.workflow_call.outputs.image_ref/image_tag exist and are
+#       wired to jobs.build-push.outputs.image_ref/image_tag
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/main-push-guard.yml'
+      - '.github/workflows/main-push-guard-tests.yml'
+      - 'scripts/tests/main-push-guard-outputs.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/main-push-guard.yml'
+      - 'scripts/tests/main-push-guard-outputs.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: main-push-guard.yml output contract tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Run main-push-guard.yml output contract test
+        run: bash scripts/tests/main-push-guard-outputs.test.sh
