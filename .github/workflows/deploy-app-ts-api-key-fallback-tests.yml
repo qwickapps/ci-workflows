@@ -1,0 +1,44 @@
+name: Deploy App TS_API_KEY Fallback Tests
+
+# Regression gate for the infra#101 LB guard's TS_API_KEY resolution in
+# deploy-app.yml. Both verify-ts-lb-target.sh call sites (deploy-caprover,
+# deploy-stable) used to pass the raw GH Actions secret with no fallback —
+# when that secret goes stale (secrets-service corrected without GH
+# propagation catching up, or propagation itself lagging on a self-hosted
+# runner after rotation), stage=live silently lost its LB-freshness guard.
+# Ported mcp's own proven TS_API_KEY/TS_AUTHKEY secrets-service fallback
+# pattern into this shared reusable workflow so every consumer gets it
+# once. This gate exists so a future edit that drops or breaks either
+# call site's fallback fails the PR instead of silently reappearing.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-ts-api-key-fallback.test.sh
+#     - both call sites use the resolved (fallback-aware) key
+#     - no call site still passes the raw secret directly
+#     - '-' placeholder handling and secrets-service wiring present at both
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-ts-api-key-fallback-tests.yml'
+      - 'scripts/tests/deploy-app-ts-api-key-fallback.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-ts-api-key-fallback.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml TS_API_KEY fallback tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run TS_API_KEY fallback contract test
+        run: bash scripts/tests/deploy-app-ts-api-key-fallback.test.sh
