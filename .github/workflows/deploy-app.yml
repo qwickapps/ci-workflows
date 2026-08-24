@@ -790,6 +790,9 @@ jobs:
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
         if: needs.resolve-stage.outputs.stage == 'live'
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
         run: |
           set -euo pipefail
           RAW_URL="${{ needs.resolve-stage.outputs.stable_app_url }}"
@@ -801,9 +804,35 @@ jobs:
             exit 0
           fi
           CANONICAL_HOSTNAME=$(echo "$RAW_URL" | sed -E 's#^[a-z]+://##; s#\..*$##')
+
+          # TS_API_KEY fallback: fetch from the secrets service if the GH Actions
+          # secret is missing or the '-' placeholder. Same pattern as mcp's own
+          # deploy.yml TS_API_KEY/TS_AUTHKEY fallback (that pattern is proven —
+          # it exists because GH secret propagation on rotation can lag behind
+          # what the secrets service already has). Living here rather than in
+          # every caller because every consumer of this reusable workflow gets
+          # the same TS_API_KEY-goes-stale exposure; a per-repo fix would need
+          # repeating N times.
+          TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
+          if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              echo "::warning::TS_API_KEY is missing/placeholder; fetching from secrets service"
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/tailscale/TS_API_KEY" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_API_KEY=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_API_KEY" ] && [ "$_SEC_API_KEY" != "-" ]; then
+                  TS_API_KEY_RESOLVED="$_SEC_API_KEY"
+                  echo "::warning::Using TS_API_KEY from secrets service"
+                fi
+              fi
+            fi
+          fi
+
           chmod +x .ci-workflows/scripts/verify-ts-lb-target.sh
           .ci-workflows/scripts/verify-ts-lb-target.sh \
-            --ts-api-key "${{ secrets.TS_API_KEY }}" \
+            --ts-api-key "$TS_API_KEY_RESOLVED" \
             --canonical-hostname "$CANONICAL_HOSTNAME" \
             --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
 
@@ -980,6 +1009,9 @@ jobs:
           exit 1
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
         run: |
           set -euo pipefail
           RAW_URL="${{ needs.resolve-stage.outputs.target_app_url }}"
@@ -991,9 +1023,35 @@ jobs:
             exit 0
           fi
           CANONICAL_HOSTNAME=$(echo "$RAW_URL" | sed -E 's#^[a-z]+://##; s#\..*$##')
+
+          # TS_API_KEY fallback: fetch from the secrets service if the GH Actions
+          # secret is missing or the '-' placeholder. Same pattern as mcp's own
+          # deploy.yml TS_API_KEY/TS_AUTHKEY fallback (that pattern is proven —
+          # it exists because GH secret propagation on rotation can lag behind
+          # what the secrets service already has). Living here rather than in
+          # every caller because every consumer of this reusable workflow gets
+          # the same TS_API_KEY-goes-stale exposure; a per-repo fix would need
+          # repeating N times.
+          TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
+          if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              echo "::warning::TS_API_KEY is missing/placeholder; fetching from secrets service"
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/tailscale/TS_API_KEY" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_API_KEY=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_API_KEY" ] && [ "$_SEC_API_KEY" != "-" ]; then
+                  TS_API_KEY_RESOLVED="$_SEC_API_KEY"
+                  echo "::warning::Using TS_API_KEY from secrets service"
+                fi
+              fi
+            fi
+          fi
+
           chmod +x .ci-workflows/scripts/verify-ts-lb-target.sh
           .ci-workflows/scripts/verify-ts-lb-target.sh \
-            --ts-api-key "${{ secrets.TS_API_KEY }}" \
+            --ts-api-key "$TS_API_KEY_RESOLVED" \
             --canonical-hostname "$CANONICAL_HOSTNAME" \
             --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
 
