@@ -1,0 +1,45 @@
+name: Resolve TS Env Vars Tests
+
+# Regression gate for scripts/lib/resolve-ts-env-vars.sh — the
+# EXISTING_*/EFFECTIVE_*/append-conditional Tailscale env-var preserve-on-
+# partial-write logic shared by setup-qwickway-route.sh. Two separate
+# incidents (ci-workflows#22, then #131/#132) were caused by the exact same
+# class of bug: a TS_* var added later without the same protection as its
+# siblings. This gate exists so a future var added to the resolution logic
+# without the same treatment fails a test instead of shipping silently
+# (ci-workflows#133).
+#
+# Tests:
+#   bash scripts/tests/resolve-ts-env-vars.test.sh
+#     - all five current TS_* vars: explicit flag wins, falls back to the
+#       existing app-definition value, omitted when neither is present
+#     - mixed override/preserve within one call, and unrelated env_vars
+#       entries are left untouched
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lib/resolve-ts-env-vars.sh'
+      - 'scripts/setup-qwickway-route.sh'
+      - 'scripts/tests/resolve-ts-env-vars.test.sh'
+      - '.github/workflows/resolve-ts-env-vars-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/lib/resolve-ts-env-vars.sh'
+      - 'scripts/setup-qwickway-route.sh'
+      - 'scripts/tests/resolve-ts-env-vars.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: resolve-ts-env-vars.sh resolution tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run resolve-ts-env-vars contract test
+        run: bash scripts/tests/resolve-ts-env-vars.test.sh
