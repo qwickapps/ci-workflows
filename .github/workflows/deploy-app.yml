@@ -384,6 +384,18 @@ jobs:
     needs: [resolve-stage]
     if: ${{ needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.build_required == 'true' }}
     runs-on: [self-hosted, macmini]
+    # ci-workflows#137: this job's two GHCR-login steps fall back to
+    # secrets.GITHUB_TOKEN when GHCR_PUSH_TOKEN/GHCR_PULL_TOKEN are unset or
+    # stale. Without an explicit permissions block, GITHUB_TOKEN gets the
+    # org/repo default, which does not include package access on this org --
+    # the fallback was silent dead code, and this exact gap (#136 not being
+    # sufficient on its own) blocked qwickapps/forge#251/#253/#250 from
+    # deploying for 8+ hours. contents: read matches actions/checkout's
+    # existing implicit default (additive, not restrictive); packages: write
+    # covers both the pull-only login and the later push.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -467,6 +479,11 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
+    # ci-workflows#137: same GITHUB_TOKEN-fallback gap as the build job, but
+    # this job never checks out the repo (no actions/checkout step) and only
+    # pulls/inspects images -- packages: read is enough, no contents: read.
+    permissions:
+      packages: read
     env:
       DOCKER_CONFIG: /tmp/docker-vp-${{ github.run_id }}
     steps:
@@ -846,6 +863,11 @@ jobs:
       needs.resolve-stage.outputs.stage != 'stable' &&
       needs.resolve-stage.outputs.next_tag != ''
     runs-on: [self-hosted, macmini]
+    # ci-workflows#137: same GITHUB_TOKEN-fallback gap as the build job. This
+    # job never checks out the repo, and `imagetools create` writes a new
+    # manifest tag, so it needs packages: write (read alone isn't enough).
+    permissions:
+      packages: write
     steps:
       - name: Authenticate to GHCR for retag (direct config write — no docker login/keychain)
         env:
