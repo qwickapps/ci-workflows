@@ -1,0 +1,46 @@
+name: Deploy App GHCR Permissions Tests
+
+# Regression gate for ci-workflows#137: deploy-app.yml's GHCR-login steps
+# fall back to secrets.GITHUB_TOKEN when the dedicated GHCR_PULL_TOKEN /
+# GHCR_PUSH_TOKEN secrets are unset or stale, but the file had no
+# `permissions:` block at all, so GITHUB_TOKEN got the org/repo default
+# (no package access) -- the fallback was silent dead code, and this exact
+# gap blocked qwickapps/forge#251/#253/#250 from deploying for 8+ hours.
+# This gate exists so a future edit that drops or mis-scopes one of the
+# three GHCR-consuming jobs' permissions blocks fails the PR instead of
+# silently reappearing.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-ghcr-permissions.test.sh
+#     - build/verify-provenance/retag each have the correct, minimal
+#       permissions block for what their steps actually need
+#     - no workflow-level permissions block (which would broaden every
+#       other job, not just the three that need it)
+#     - no OTHER job was accidentally given a permissions block that would
+#       silently strip its actual defaults
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-ghcr-permissions-tests.yml'
+      - 'scripts/tests/deploy-app-ghcr-permissions.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-ghcr-permissions.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml GHCR permissions tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run GHCR permissions contract test
+        run: bash scripts/tests/deploy-app-ghcr-permissions.test.sh
