@@ -439,7 +439,7 @@ jobs:
           _cli="${DOCKER_CLI:-docker}"
           echo "$GHCR_TOKEN" | "$_cli" login ghcr.io -u "${{ github.actor }}" --password-stdin
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
           DOCKER_CLI: ${{ env.DOCKER_CLI }}
           DOCKER_CONFIG: ${{ runner.temp }}/.docker-persistent
 
