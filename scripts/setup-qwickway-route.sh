@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/resolve-ts-env-vars.sh
+source "$SCRIPT_DIR/lib/resolve-ts-env-vars.sh"
+
 # Setup QwickWay Route Script
 # Provisions a QwickWay gateway app on a CapRover instance (route.qwickforge.com).
 # QwickWay is a reverse proxy that routes traffic from one CapRover server to apps
@@ -292,55 +296,22 @@ echo ""
 echo "Configuring env vars and container port..."
 
 # Read existing Tailscale vars from the current app definition so they survive
-# deploys that do not pass --ts-* flags. Without this, a full envVars replace
-# would wipe TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS, and
-# TS_API_KEY every time the gateway is provisioned, knocking the app off the
-# Tailscale network (TS_API_KEY specifically breaks the gateway's Tailscale
-# cleanup logic, since that logic no-ops without it).
-# (Fixes qwickapps/ci-workflows#22 and qwickapps/ci-workflows#131.)
-#
-# Resolution order for each TS var:
-#   1. Explicit --ts-* flag passed to this script  (caller override)
-#   2. Existing value in the CapRover app definition  (preserve)
-#   3. Empty string  (not set)
-#
-# Use --arg / --argjson for all dynamic values to avoid jq quoting issues on
-# macOS runners where single-quoted jq programs cannot embed double-quoted strings.
-EXISTING_TS_AUTHKEY=$(echo "$CURRENT_DEF" | jq -r '.envVars[] | select(.key == "TS_AUTHKEY") | .value // ""' 2>/dev/null || echo "")
-EXISTING_TS_EPH_AUTHKEY=$(echo "$CURRENT_DEF" | jq -r '.envVars[] | select(.key == "TS_EPHEMERAL_AUTHKEY") | .value // ""' 2>/dev/null || echo "")
-EXISTING_TS_HOSTNAME=$(echo "$CURRENT_DEF" | jq -r '.envVars[] | select(.key == "TS_HOSTNAME") | .value // ""' 2>/dev/null || echo "")
-EXISTING_TS_TAGS=$(echo "$CURRENT_DEF" | jq -r '.envVars[] | select(.key == "TS_TAGS") | .value // ""' 2>/dev/null || echo "")
-EXISTING_TS_API_KEY=$(echo "$CURRENT_DEF" | jq -r '.envVars[] | select(.key == "TS_API_KEY") | .value // ""' 2>/dev/null || echo "")
-
-# Resolve effective TS values: explicit flag wins, otherwise fall back to existing.
-EFFECTIVE_TS_AUTHKEY="${TS_AUTHKEY:-$EXISTING_TS_AUTHKEY}"
-EFFECTIVE_TS_EPH_AUTHKEY="${EXISTING_TS_EPH_AUTHKEY}"  # no CLI flag for this one; always preserve
-EFFECTIVE_TS_HOSTNAME="${TS_HOSTNAME:-$EXISTING_TS_HOSTNAME}"
-EFFECTIVE_TS_TAGS="${TS_TAGS:-$EXISTING_TS_TAGS}"
-EFFECTIVE_TS_API_KEY="${TS_API_KEY:-$EXISTING_TS_API_KEY}"
-
+# deploys that do not pass --ts-* flags, and resolve the effective value for
+# each (explicit --ts-* flag wins, otherwise fall back to the existing value,
+# otherwise empty/not-set). Without this, a full envVars replace would wipe
+# TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS, and TS_API_KEY every
+# time the gateway is provisioned, knocking the app off the Tailscale network
+# (TS_API_KEY specifically breaks the gateway's Tailscale cleanup logic, since
+# that logic no-ops without it).
+# (Fixes qwickapps/ci-workflows#22 and qwickapps/ci-workflows#131; resolution
+# logic extracted to scripts/lib/resolve-ts-env-vars.sh and covered by
+# scripts/tests/resolve-ts-env-vars.test.sh — qwickapps/ci-workflows#133.)
 ENV_VARS=$(jq -n \
   --arg targetApp "$TARGET_APP_URL" \
   --arg healthPath "$HEALTH_CHECK_PATH" \
   '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
 
-# Append Tailscale env vars. Use effective values (flag override or preserved existing).
-if [ -n "$EFFECTIVE_TS_AUTHKEY" ]; then
-  ENV_VARS=$(echo "$ENV_VARS" | jq --arg v "$EFFECTIVE_TS_AUTHKEY" '. + [{key: "TS_AUTHKEY", value: $v}]')
-fi
-if [ -n "$EFFECTIVE_TS_EPH_AUTHKEY" ]; then
-  ENV_VARS=$(echo "$ENV_VARS" | jq --arg v "$EFFECTIVE_TS_EPH_AUTHKEY" '. + [{key: "TS_EPHEMERAL_AUTHKEY", value: $v}]')
-fi
-if [ -n "$EFFECTIVE_TS_HOSTNAME" ]; then
-  ENV_VARS=$(echo "$ENV_VARS" | jq --arg v "$EFFECTIVE_TS_HOSTNAME" '. + [{key: "TS_HOSTNAME", value: $v}]')
-  echo "  TS_HOSTNAME=$EFFECTIVE_TS_HOSTNAME"
-fi
-if [ -n "$EFFECTIVE_TS_TAGS" ]; then
-  ENV_VARS=$(echo "$ENV_VARS" | jq --arg v "$EFFECTIVE_TS_TAGS" '. + [{key: "TS_TAGS", value: $v}]')
-fi
-if [ -n "$EFFECTIVE_TS_API_KEY" ]; then
-  ENV_VARS=$(echo "$ENV_VARS" | jq --arg v "$EFFECTIVE_TS_API_KEY" '. + [{key: "TS_API_KEY", value: $v}]')
-fi
+ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY")
 
 MERGED=$(echo "$CURRENT_DEF" | jq \
   --argjson envVars "$ENV_VARS" \
