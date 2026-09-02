@@ -152,23 +152,59 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
-      - name: Install pnpm
+      - name: Detect package manager
+        id: pkgmgr
         if: inputs.language == 'ts' || inputs.language == 'js'
+        # ci-workflows#139: this workflow used to hardcode pnpm for every ts/js
+        # caller (npm install -g pnpm; pnpm install --frozen-lockfile). Repos
+        # across the org are genuinely mixed (protocols/mcp/ide carry both
+        # lockfiles, forge is pnpm-only, projects/agents are npm-only with no
+        # pnpm-lock.yaml anywhere), so a single hardcoded assumption fails
+        # closed for every npm-only repo's build-once/Test job with
+        # ERR_PNPM_NO_LOCKFILE. Detect from the checked-out lockfile instead of
+        # assuming; fail loudly (not silently default to either) if neither is
+        # present, since that means the repo isn't set up for this guard at all.
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "manager=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then
+            echo "manager=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No pnpm-lock.yaml or package-lock.json found at repo root — cannot determine the package manager for a ts/js caller (ci-workflows#139)."
+            exit 1
+          fi
+
+      - name: Install pnpm
+        if: (inputs.language == 'ts' || inputs.language == 'js') && steps.pkgmgr.outputs.manager == 'pnpm'
         # --force overwrites stale pnpm/pnpx symlinks left in the reused node
         # toolcache on the self-hosted runner (npm errors EEXIST otherwise).
         run: npm install -g pnpm --force
 
-      - name: Install dependencies
-        if: inputs.language == 'ts' || inputs.language == 'js'
+      - name: Install dependencies (pnpm)
+        if: (inputs.language == 'ts' || inputs.language == 'js') && steps.pkgmgr.outputs.manager == 'pnpm'
         run: pnpm install --frozen-lockfile
+
+      - name: Install dependencies (npm)
+        if: (inputs.language == 'ts' || inputs.language == 'js') && steps.pkgmgr.outputs.manager == 'npm'
+        run: npm ci
 
       - name: Type check + build
         if: inputs.language == 'ts'
-        run: pnpm build
+        run: |
+          if [ "${{ steps.pkgmgr.outputs.manager }}" = "pnpm" ]; then
+            pnpm build
+          else
+            npm run build
+          fi
 
       - name: Run tests
         if: inputs.language == 'ts' || inputs.language == 'js'
-        run: pnpm test
+        run: |
+          if [ "${{ steps.pkgmgr.outputs.manager }}" = "pnpm" ]; then
+            pnpm test
+          else
+            npm test
+          fi
 
   # ---------------------------------------------------------------------------
   # 2. Build and push Docker image (tagged with commit SHA)
