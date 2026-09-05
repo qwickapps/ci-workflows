@@ -67,7 +67,7 @@ caprover_login() {
   local response token
   response=$(curl "${curl_args[@]}" -X POST --url "${caprover_url}/api/v2/login" \
     -H "Content-Type: application/json" \
-    -d "{\"password\":\"${caprover_pass}\"}")
+    -d "$(jq -n --arg p "$caprover_pass" '{password:$p}')")
 
   if ! echo "$response" | jq -e . >/dev/null 2>&1; then
     echo "Error: CapRover login returned non-JSON response" >&2
@@ -174,24 +174,38 @@ caprover_sync_ghcr_registry() {
 
   if [ -z "$ids" ]; then
     echo "  Inserting ghcr.io registry entry..."
-    curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/insert" \
+    local ins_resp ins_status
+    ins_resp=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/insert" \
       -H "Content-Type: application/json" \
       -H "x-captain-auth: ${token}" \
       -d "$(jq -n --arg t "$ghcr_token" \
-        '{registryUser:"x-access-token",registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')" >/dev/null
-    echo "  ghcr.io registry inserted"
+        '{registryUser:"x-access-token",registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')")
+    ins_status=$(echo "$ins_resp" | jq -r '.status // "null"')
+    if [ "$ins_status" = "100" ] || [ "$ins_status" = "1000" ]; then
+      echo "  ghcr.io registry inserted"
+    else
+      echo "  Error inserting ghcr.io registry (status ${ins_status}): $(echo "$ins_resp" | jq -r '.description // ""')" >&2
+      return 1
+    fi
     return 0
   fi
 
   echo "$ids" | while IFS= read -r reg_id; do
     [ -z "$reg_id" ] && continue
     echo "  Updating ghcr.io registry entry ${reg_id}..."
-    curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/update" \
+    local upd_resp upd_status
+    upd_resp=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/update" \
       -H "Content-Type: application/json" \
       -H "x-captain-auth: ${token}" \
       -d "$(jq -n --arg id "$reg_id" --arg t "$ghcr_token" \
-        '{id:$id,registryUser:"x-access-token",registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')" >/dev/null
-    echo "  ghcr.io registry ${reg_id} updated"
+        '{id:$id,registryUser:"x-access-token",registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')")
+    upd_status=$(echo "$upd_resp" | jq -r '.status // "null"')
+    if [ "$upd_status" = "100" ] || [ "$upd_status" = "1000" ]; then
+      echo "  ghcr.io registry ${reg_id} updated"
+    else
+      echo "  Error updating ghcr.io registry ${reg_id} (status ${upd_status}): $(echo "$upd_resp" | jq -r '.description // ""')" >&2
+      return 1
+    fi
   done
 }
 
@@ -300,6 +314,7 @@ caprover_remove_app() {
   if [ "$del_status" = "100" ] || [ "$del_status" = "1000" ]; then
     echo "  App '${app_name}' removed"
   else
-    echo "  Warning: remove app '${app_name}' returned (status ${del_status}): ${del_desc}" >&2
+    echo "  Error: remove app '${app_name}' returned (status ${del_status}): ${del_desc}" >&2
+    return 1
   fi
 }
