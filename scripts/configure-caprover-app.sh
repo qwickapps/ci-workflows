@@ -106,36 +106,16 @@ echo "  Authenticated"
 CURL_ARGS=()
 caprover_populate_curl_args "$CAPROVER_URL" CURL_ARGS
 
-# Ensure app exists (idempotent register)
+# Ensure app exists (idempotent register). hasPersistentData is fixed at
+# creation and cannot be changed later -- an app registered non-persistent
+# then rejects any later attempt to attach volumes (brain#30). Default to
+# "false" (this script's prior hardcoded behavior) only when the caller
+# didn't specify --has-persistent-data at all.
 echo ""
 echo "Ensuring app exists..."
-CREATE_RESPONSE=$(curl "${CURL_ARGS[@]}" -X POST "$CAPROVER_URL/api/v2/user/apps/appDefinitions/register" \
-  -H "Content-Type: application/json" \
-  -H "x-captain-auth: $TOKEN" \
-  -d "{\"appName\":\"$APP_NAME\",\"hasPersistentData\":false}")
-
-if ! echo "$CREATE_RESPONSE" | jq -e . >/dev/null 2>&1; then
-  echo "  Error: Invalid JSON from register endpoint"
-  echo "$CREATE_RESPONSE"
-  exit 1
-fi
-
-CREATE_STATUS=$(echo "$CREATE_RESPONSE" | jq -r '.status')
+ENSURE_RESULT=$(caprover_ensure_app "$CAPROVER_URL" "$TOKEN" "$APP_NAME" "${HAS_PERSISTENT_DATA:-false}")
 APP_ALREADY_EXISTS=false
-if [ "$CREATE_STATUS" = "100" ]; then
-  echo "  App created"
-elif [ "$CREATE_STATUS" = "1901" ]; then
-  echo "  App already exists"
-  APP_ALREADY_EXISTS=true
-else
-  DESC=$(echo "$CREATE_RESPONSE" | jq -r '.description')
-  if echo "$DESC" | grep -q "already exists"; then
-    echo "  App already exists"
-    APP_ALREADY_EXISTS=true
-  else
-    echo "  Warning: Unexpected register response: $DESC"
-  fi
-fi
+[ "$ENSURE_RESULT" = "existing" ] && APP_ALREADY_EXISTS=true
 
 # Fetch current app definition (read-then-write preserves existing fields)
 echo ""

@@ -134,32 +134,6 @@ caprover_get_app_definitions() {
     -H "x-captain-auth: ${token}"
 }
 
-# Idempotent app registration. $4 = "true"|"false" for hasPersistentData.
-caprover_ensure_app() {
-  local caprover_url="$1" token="$2" app_name="$3" has_persistent_data="${4:-false}"
-  local curl_args=()
-  caprover_populate_curl_args "$caprover_url" curl_args
-
-  local response status desc
-  response=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/apps/appDefinitions/register" \
-    -H "Content-Type: application/json" \
-    -H "x-captain-auth: ${token}" \
-    -d "{\"appName\":\"${app_name}\",\"hasPersistentData\":${has_persistent_data}}")
-  status=$(echo "$response" | jq -r '.status // "null"')
-  case "$status" in
-    100)  echo "  App '${app_name}' registered" ;;
-    1901) echo "  App '${app_name}' already exists" ;;
-    *)
-      desc=$(echo "$response" | jq -r '.description // ""')
-      if echo "$desc" | grep -qi "already exists"; then
-        echo "  App '${app_name}' already exists"
-      else
-        echo "  Error registering '${app_name}' (status ${status}): ${desc}" >&2
-        return 1
-      fi ;;
-  esac
-}
-
 # Upsert GHCR registry credentials on the target CapRover instance.
 # $3 = GitHub personal access token with packages:read.
 caprover_sync_ghcr_registry() {
@@ -317,4 +291,81 @@ caprover_remove_app() {
     echo "  Error: remove app '${app_name}' returned (status ${del_status}): ${del_desc}" >&2
     return 1
   fi
+}
+
+# caprover_ensure_app CAPROVER_URL TOKEN APP_NAME [HAS_PERSISTENT_DATA]
+#
+# Idempotently registers APP_NAME if it does not already exist. HAS_PERSISTENT_DATA
+# ("true"/"false", default "false") is set AT CREATION TIME -- CapRover fixes this
+# flag when the app is first registered and CANNOT change it afterward: a later
+# appDefinitions/update that tries to attach volumes to an app registered with
+# hasPersistentData=false is rejected with "Cannot set volumes for a non-persistent
+# container" (brain#30). Every caller that will attach volumes to a NEW app must
+# pass has_persistent_data=true here, not just to the later config/update step.
+#
+# If the app already exists, verifies its actual hasPersistentData matches what
+# was requested and fails loudly (rather than deferring to a confusing volume-
+# attach error later) if a caller asks for persistent=true against an app that
+# was already created non-persistent -- that mismatch cannot be fixed by any
+# update call; the app must be deleted and recreated (its Docker volumes are
+# NOT deleted by caprover_remove_app and can be re-mounted on the new app).
+#
+# Prints exactly one word to stdout on success: "created" or "existing" (all
+# diagnostic text goes to stderr), so callers doing one-time-only setup (e.g.
+# adding a custom domain only for a brand-new app) can branch on it.
+caprover_ensure_app() {
+  local caprover_url="$1"
+  local token="$2"
+  local app_name="$3"
+  local has_persistent_data="${4:-false}"
+  local curl_args=()
+
+  caprover_populate_curl_args "$caprover_url" curl_args
+
+  local response
+  response=$(curl "${curl_args[@]}" -X POST "${caprover_url}/api/v2/user/apps/appDefinitions/register" \
+    -H "Content-Type: application/json" \
+    -H "x-captain-auth: ${token}" \
+    -d "{\"appName\":\"${app_name}\",\"hasPersistentData\":${has_persistent_data}}")
+
+  if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    echo "Error: Invalid JSON from register endpoint" >&2
+    echo "$response" >&2
+    return 1
+  fi
+
+  local status
+  status=$(echo "$response" | jq -r '.status')
+  if [[ "$status" == "100" ]]; then
+    echo "  App created (hasPersistentData=${has_persistent_data})" >&2
+    printf '%s\n' "created"
+    return 0
+  fi
+
+  local desc already_exists=false
+  desc=$(echo "$response" | jq -r '.description // ""')
+  [[ "$status" == "1901" ]] && already_exists=true
+  echo "$desc" | grep -qi "already exists" && already_exists=true
+
+  if [[ "$already_exists" != "true" ]]; then
+    echo "  Warning: unexpected register response: $desc" >&2
+    printf '%s\n' "existing"
+    return 0
+  fi
+
+  echo "  App already exists" >&2
+
+  if [[ "$has_persistent_data" == "true" ]]; then
+    local defs actual
+    defs=$(caprover_get_app_definitions "$caprover_url" "$token")
+    actual=$(echo "$defs" | jq -r --arg name "$app_name" \
+      '.data.appDefinitions[]? | select(.appName == $name) | .hasPersistentData')
+    if [[ "$actual" != "true" ]]; then
+      echo "Error: $app_name already exists with hasPersistentData=${actual:-false}, but this deploy requires persistent volumes. CapRover fixes this flag at creation and cannot change it afterward -- the app must be deleted (its Docker volumes are preserved by caprover_remove_app) and recreated with hasPersistentData=true before volumes can be attached." >&2
+      return 1
+    fi
+  fi
+
+  printf '%s\n' "existing"
+  return 0
 }
