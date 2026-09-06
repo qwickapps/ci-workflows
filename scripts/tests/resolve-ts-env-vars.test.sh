@@ -16,8 +16,12 @@
 # defines: explicit flag wins, falls back to the existing app-definition
 # value, omitted entirely when neither is present (qwickapps/ci-workflows#133).
 #
-# TS_EPHEMERAL_AUTHKEY has no CLI flag at all (always preserve-only, by
-# design), so it only has two of the three cases.
+# TS_EPHEMERAL_AUTHKEY gained a CLI flag in brain#34 (setup-qwickway-route.sh's
+# --ts-ephemeral-authkey) so a caller can opt an app INTO an ephemeral
+# Tailscale identity, not just preserve whatever it already had -- needed for
+# qwickway LB apps, whose container restarts on every provisioning run and
+# which otherwise accumulate duplicate non-ephemeral devices under the same
+# hostname run over run. It now has all three cases like its siblings.
 
 set -euo pipefail
 
@@ -77,13 +81,17 @@ result=$(resolve_ts_env_vars "$EMPTY_DEF" "$BASE_ENV_VARS" "" "" "" "" 2>/dev/nu
 assert "omitted entirely when neither flag nor existing value is present" \
   lacks_key "$result" TS_AUTHKEY
 
-echo "== TS_EPHEMERAL_AUTHKEY (no CLI flag; always preserve-only) =="
+echo "== TS_EPHEMERAL_AUTHKEY (brain#34) =="
+result=$(resolve_ts_env_vars "$(current_def_with TS_EPHEMERAL_AUTHKEY existing-eph)" "$BASE_ENV_VARS" "" "" "" "" "explicit-eph" 2>/dev/null)
+assert "explicit flag wins over existing" \
+  test "$(value_for_key "$result" TS_EPHEMERAL_AUTHKEY)" = "explicit-eph"
+
 result=$(resolve_ts_env_vars "$(current_def_with TS_EPHEMERAL_AUTHKEY existing-eph)" "$BASE_ENV_VARS" "" "" "" "" 2>/dev/null)
-assert "preserves the existing value (no flag exists to override it)" \
+assert "falls back to existing app-definition value when no flag given" \
   test "$(value_for_key "$result" TS_EPHEMERAL_AUTHKEY)" = "existing-eph"
 
 result=$(resolve_ts_env_vars "$EMPTY_DEF" "$BASE_ENV_VARS" "" "" "" "" 2>/dev/null)
-assert "omitted entirely when no existing value is present" \
+assert "omitted entirely when neither flag nor existing value is present" \
   lacks_key "$result" TS_EPHEMERAL_AUTHKEY
 
 echo "== TS_HOSTNAME =="
@@ -143,6 +151,12 @@ assert "mixed: overridden vars use the flag, untouched vars still preserve exist
   -a "$(value_for_key "$result" TS_HOSTNAME)" = "e-host" \
   -a "$(value_for_key "$result" TS_API_KEY)" = "override-key" \
   -a "$(value_for_key "$result" TS_EPHEMERAL_AUTHKEY)" = "e-eph"
+
+result=$(resolve_ts_env_vars "$FULL_DEF" "$BASE_ENV_VARS" "override-authkey" "" "" "override-key" "override-eph" 2>/dev/null)
+assert "mixed: TS_EPHEMERAL_AUTHKEY's own override also wins alongside the others" \
+  test "$(value_for_key "$result" TS_EPHEMERAL_AUTHKEY)" = "override-eph" \
+  -a "$(value_for_key "$result" TS_AUTHKEY)" = "override-authkey" \
+  -a "$(value_for_key "$result" TS_HOSTNAME)" = "e-host"
 
 result=$(resolve_ts_env_vars "$EMPTY_DEF" '[{"key":"TARGET_APP","value":"https://example.com"}]' "flag" "" "" "" 2>/dev/null)
 assert "does not mutate an unrelated pre-existing env_vars entry" \
