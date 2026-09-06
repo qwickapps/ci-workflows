@@ -31,7 +31,17 @@ source "$SCRIPT_DIR/lib/resolve-ts-env-vars.sh"
 #     [--ts-authkey <key>] \
 #     [--ts-hostname <hostname>] \
 #     [--ts-tags <tags>] \
-#     [--ts-api-key <api-key>]
+#     [--ts-api-key <api-key>] \
+#     [--ts-ephemeral-authkey <key>]
+#
+# --ts-ephemeral-authkey (brain#34): pass an EPHEMERAL, reusable Tailscale
+# authkey to give this app a self-cleaning Tailscale identity. Use this
+# instead of (or alongside) --ts-authkey for any gateway/LB app whose
+# container restarts on every provisioning run (this script's own
+# appDefinitions/update call restarts the container unconditionally) --
+# without it, each restart mints a new, non-ephemeral device under the same
+# hostname that Tailscale never garbage-collects, and duplicate-hostname
+# devices accumulate run over run.
 #
 # Tailscale vars (TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS) already
 # present in the CapRover app definition are preserved unless explicitly overridden
@@ -99,6 +109,7 @@ TS_AUTHKEY=""
 TS_HOSTNAME=""
 TS_TAGS=""
 TS_API_KEY=""
+TS_EPHEMERAL_AUTHKEY=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -148,6 +159,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ts-api-key)
       TS_API_KEY="$2"
+      shift 2
+      ;;
+    --ts-ephemeral-authkey)
+      TS_EPHEMERAL_AUTHKEY="$2"
       shift 2
       ;;
     *)
@@ -311,7 +326,7 @@ ENV_VARS=$(jq -n \
   --arg healthPath "$HEALTH_CHECK_PATH" \
   '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
 
-ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY")
+ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY" "$TS_EPHEMERAL_AUTHKEY")
 
 MERGED=$(echo "$CURRENT_DEF" | jq \
   --argjson envVars "$ENV_VARS" \
