@@ -296,7 +296,15 @@ jobs:
               # case-sensitively. Without this, a mixed-case caprover_host
               # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
               # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
+              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
+              # used as the CapRover connection target on the
+              # no-caprover_url-override path, not just a comparison copy --
+              # acknowledged per #163's review note; believed benign since
+              # DNS/HTTP host matching is itself case-insensitive, but a more
+              # surgical (comparison-only) fix was deliberately not pursued
+              # here to avoid re-touching an already-merged, already-tested
+              # assignment for a cosmetic-only concern.
               CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             uat)
@@ -315,7 +323,15 @@ jobs:
               # case-sensitively. Without this, a mixed-case caprover_host
               # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
               # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
+              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
+              # used as the CapRover connection target on the
+              # no-caprover_url-override path, not just a comparison copy --
+              # acknowledged per #163's review note; believed benign since
+              # DNS/HTTP host matching is itself case-insensitive, but a more
+              # surgical (comparison-only) fix was deliberately not pursued
+              # here to avoid re-touching an already-merged, already-tested
+              # assignment for a cosmetic-only concern.
               CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             live)
@@ -334,7 +350,15 @@ jobs:
               # case-sensitively. Without this, a mixed-case caprover_host
               # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
               # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
+              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
+              # used as the CapRover connection target on the
+              # no-caprover_url-override path, not just a comparison copy --
+              # acknowledged per #163's review note; believed benign since
+              # DNS/HTTP host matching is itself case-insensitive, but a more
+              # surgical (comparison-only) fix was deliberately not pursued
+              # here to avoid re-touching an already-merged, already-tested
+              # assignment for a cosmetic-only concern.
               CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             stable)
@@ -354,7 +378,15 @@ jobs:
               # case-sensitively. Without this, a mixed-case caprover_host
               # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
               # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
+              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
+              # used as the CapRover connection target on the
+              # no-caprover_url-override path, not just a comparison copy --
+              # acknowledged per #163's review note; believed benign since
+              # DNS/HTTP host matching is itself case-insensitive, but a more
+              # surgical (comparison-only) fix was deliberately not pursued
+              # here to avoid re-touching an already-merged, already-tested
+              # assignment for a cosmetic-only concern.
               CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
           esac
@@ -932,7 +964,20 @@ jobs:
           # Only meaningful when the target is a bare Tailscale MagicDNS hostname
           # (http(s)://<hostname>.<tailnet>.ts.net[:port]) — CapRover public-domain
           # targets (app.qwickforge.com etc.) are out of scope for this guard.
-          if [[ "$RAW_URL" != *.ts.net* ]]; then
+          #
+          # ci-workflows#163: compared case-insensitively. DNS hostnames are
+          # case-insensitive (same principle as #160/#161), but this gate
+          # wasn't -- a legitimately-cased Tailscale hostname like
+          # "https://myapp.mytailnet.TS.NET" failed to match lowercase
+          # "*.ts.net*" and silently SKIPPED the infra#101 safety check
+          # entirely (not just picked a wrong-but-valid value, the way
+          # #161's bug did -- the check never ran at all). RAW_URL_LOWER is
+          # used only for this comparison; the real RAW_URL is left
+          # untouched for CANONICAL_HOSTNAME below and everything else,
+          # since verify-ts-lb-target.sh already downcases the hostname it
+          # receives internally (see that script's own comment).
+          RAW_URL_LOWER="$(printf '%s' "$RAW_URL" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$RAW_URL_LOWER" != *.ts.net* ]]; then
             echo "Target '$RAW_URL' is not a Tailscale hostname; guard not applicable, skipping."
             exit 0
           fi
@@ -1156,7 +1201,11 @@ jobs:
           # Only meaningful when the target is a bare Tailscale MagicDNS hostname
           # (http(s)://<hostname>.<tailnet>.ts.net[:port]) — CapRover public-domain
           # targets (app.qwickforge.com etc.) are out of scope for this guard.
-          if [[ "$RAW_URL" != *.ts.net* ]]; then
+          #
+          # ci-workflows#163: compared case-insensitively -- see the sibling
+          # comment in deploy-caprover's copy of this step for why.
+          RAW_URL_LOWER="$(printf '%s' "$RAW_URL" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$RAW_URL_LOWER" != *.ts.net* ]]; then
             echo "Target '$RAW_URL' is not a Tailscale hostname; guard not applicable, skipping."
             exit 0
           fi
