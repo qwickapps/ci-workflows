@@ -1,0 +1,45 @@
+name: Blue-Green Workflow Guard Tests
+
+# Regression gate for qwickapps/ci-workflows#153: scripts/blue-green-workflow-guard.sh
+# (check 3 of the blue-green SOP gate) had scripts/tests/blue-green-workflow-guard.test.sh
+# sitting next to it the whole time, but nothing in CI ever ran that test file — the
+# check itself was silently un-covered. That gap is exactly how qwickapps/billing's
+# promote-to-live.yml / promote-to-stable.yml (CapRover secrets accessed directly, no
+# canonical uses: line, no "deploy" in either filename) evaded the guard's old
+# filename-based (*deploy*.yml) trigger for months: the fix that would have caught it
+# had no test proving it actually would.
+#
+# Tests:
+#   bash scripts/tests/blue-green-workflow-guard.test.sh
+#     - a workflow file (any filename) that references a CapRover secret without
+#       calling the canonical deploy-app.yml is rejected
+#     - the same workflow with an explicit `# blue-green-exempt: <reason>` comment,
+#       or a canonical `uses:` line, is allowed
+#     - workflow files that never touch a CapRover secret are never flagged,
+#       regardless of filename
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/blue-green-workflow-guard.sh'
+      - 'scripts/tests/blue-green-workflow-guard.test.sh'
+      - '.github/workflows/blue-green-workflow-guard-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/blue-green-workflow-guard.sh'
+      - 'scripts/tests/blue-green-workflow-guard.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  guard-tests:
+    name: blue-green-workflow-guard.sh behavior tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run blue-green-workflow-guard.sh tests
+        run: bash scripts/tests/blue-green-workflow-guard.test.sh
