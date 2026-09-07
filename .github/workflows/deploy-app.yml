@@ -289,7 +289,15 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:release-candidate"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
+              # comparison above (ci-workflows#160) -- DNS hostnames are
+              # case-insensitive, but this value feeds the downstream
+              # dev/main credential-selection glob (deploy-caprover job)
+              # case-sensitively. Without this, a mixed-case caprover_host
+              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
+              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             uat)
               TARGET_APP="${APP_NAME}-uat"
@@ -300,7 +308,15 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:release"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="${{ inputs.run_migrations }}"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
+              # comparison above (ci-workflows#160) -- DNS hostnames are
+              # case-insensitive, but this value feeds the downstream
+              # dev/main credential-selection glob (deploy-caprover job)
+              # case-sensitively. Without this, a mixed-case caprover_host
+              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
+              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             live)
               TARGET_APP="${APP_NAME}-live"
@@ -311,7 +327,15 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:stable"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
+              # comparison above (ci-workflows#160) -- DNS hostnames are
+              # case-insensitive, but this value feeds the downstream
+              # dev/main credential-selection glob (deploy-caprover job)
+              # case-sensitively. Without this, a mixed-case caprover_host
+              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
+              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             stable)
               TARGET_APP="${APP_NAME}-stable"
@@ -323,7 +347,15 @@ jobs:
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
               CAPROVER_REQUIRED="false"
-              CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
+              # comparison above (ci-workflows#160) -- DNS hostnames are
+              # case-insensitive, but this value feeds the downstream
+              # dev/main credential-selection glob (deploy-caprover job)
+              # case-sensitively. Without this, a mixed-case caprover_host
+              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
+              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
+              # instead of OCI_DEV_CAPROVER_PASSWORD downstream.
+              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
           esac
 
@@ -641,7 +673,16 @@ jobs:
           # Derive password from the CapRover URL (not stage), so callers that
           # override caprover_host get the correct credential regardless of stage.
           # dev.qwickforge.com → OCI_DEV; everything else → OCI_MAIN.
-          case "$CP_URL" in
+          #
+          # ci-workflows#161: matched case-insensitively. DNS hostnames are
+          # case-insensitive (same principle as ci-workflows#160's
+          # normalize_host lowercasing), but this glob wasn't -- a caller
+          # passing a mixed-case caprover_url directly (bypassing
+          # caprover_host_name entirely, so lowercasing only that output
+          # would have missed this path) selected OCI_MAIN_CAPROVER_PASSWORD
+          # for a host that was actually dev, just spelled with capitals.
+          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
+          case "$CP_URL_LOWER" in
             *dev.qwickforge.com*)
               CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
               ;;
