@@ -91,7 +91,29 @@ jobs:
           HAS_SECTION=$(python3 - "$BODY" <<'PYEOF'
           import re, sys
           body = sys.argv[1]
-          if re.search(r'^##\s+(test plan|validation)\s*$', body, re.IGNORECASE | re.MULTILINE):
+          # ci-workflows#156: an exact-heading match on '## Test plan'/'## Validation'
+          # missed equivalent headings (e.g. protocols#1408's '## Testing —
+          # deliberate, not "waited for the cooldown to lapse"'), producing a
+          # false "no evidence" warning on a PR with substantive, differently-
+          # spelled evidence. Broadened to a small known-equivalent set. Only
+          # 'testing' tolerates arbitrary trailing text (the one case that
+          # actually needs it, per #1408) -- 'test plan' and 'validation'
+          # only tolerate a specific '& evidence'/'evidence' suffix or an
+          # exact match, deliberately NOT "any trailing word", because this
+          # same gate's own output text (below) tells authors to add a
+          # '## Validation debt' section for explained skips -- a naive
+          # word-boundary match would wrongly treat that as an evidence
+          # heading too and corrupt section-boundary detection (a sibling
+          # section's items would be read as still inside the prior one).
+          if re.search(
+              r'^##\s+('
+              r'test\s+plan(\s*(&|and)\s*evidence)?'
+              r'|validation(\s+evidence)?'
+              r'|testing\b.*'
+              r'|verification'
+              r'|evidence'
+              r')\s*$',
+              body, re.IGNORECASE | re.MULTILINE):
               print("true")
           else:
               print("false")
@@ -112,7 +134,15 @@ jobs:
           in_section = False
           unchecked = []
           for i, line in enumerate(lines):
-              if re.match(r'^##\s+(test plan|validation)\s*$', line.strip(), re.IGNORECASE):
+              if re.match(
+                  r'^##\s+('
+                  r'test\s+plan(\s*(&|and)\s*evidence)?'
+                  r'|validation(\s+evidence)?'
+                  r'|testing\b.*'
+                  r'|verification'
+                  r'|evidence'
+                  r')\s*$',
+                  line.strip(), re.IGNORECASE):
                   in_section = True
                   continue
               if in_section and re.match(r'^##', line):
