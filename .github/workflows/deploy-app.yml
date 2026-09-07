@@ -216,6 +216,44 @@ jobs:
               ;;
           esac
 
+          # ci-workflows#153 check 1: stage/host agreement. `<app>-build`
+          # must deploy to oci-dev; `<app>-uat`/`<app>-live` must deploy to
+          # oci-main. This is a caller-input check, not derived from STAGE
+          # alone: TARGET_APP_URL below is computed unconditionally from the
+          # canonical dev/app.qwickforge.com pattern for informational
+          # (health-check) purposes, but the actual CapRover deploy target
+          # is caprover_url/caprover_host, both caller-supplied -- nothing
+          # upstream of this point validated those against stage, which is
+          # exactly how faabzi-uat-build ended up on oci-main. `stable`
+          # never goes through CapRover at all (see deploy-stable job,
+          # Coolify-based; caprover_required is forced false for it below),
+          # so it's exempt here.
+          if [ "$STAGE_INPUT" != "stable" ]; then
+            CANONICAL_DEV_HOST="captain.dev.qwickforge.com"
+            CANONICAL_MAIN_HOST="captain.app.qwickforge.com"
+            normalize_host() {
+              printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#[:/].*$##'
+            }
+            RESOLVED_HOST=""
+            if [ -n "${{ inputs.caprover_url }}" ]; then
+              RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_url }}")"
+            elif [ -n "${{ inputs.caprover_host }}" ]; then
+              RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_host }}")"
+            fi
+            case "$STAGE_INPUT" in
+              build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
+              uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+            esac
+            if [ -z "$RESOLVED_HOST" ]; then
+              echo "ERROR: stage '$STAGE_INPUT' requires caprover_host or caprover_url"
+              exit 1
+            fi
+            if [ "$RESOLVED_HOST" != "$EXPECTED_HOST" ]; then
+              echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153: build->oci-dev, uat/live->oci-main), but resolved host is '$RESOLVED_HOST'"
+              exit 1
+            fi
+          fi
+
           if [ -n "$INPUT_IMAGE" ]; then
             IMAGE_BASE="$(printf '%s' "$INPUT_IMAGE" | sed 's/@.*$//' | sed -E 's/:[^:/]+$//')"
           fi
@@ -272,6 +310,20 @@ jobs:
               RUN_MIGRATIONS_FOR_STAGE="false"
               CAPROVER_REQUIRED="false"
               CAPROVER_HOST_NAME="${{ inputs.caprover_host }}"
+              ;;
+          esac
+
+          # ci-workflows#153 check 2: no per-environment build slots. A
+          # CapRover app name matching -(uat|live|stable)-build$ is refused
+          # outright -- `<app>-build` is the only legal build slot. The case
+          # block above can only ever produce this shape if a caller passes
+          # an app_name that already carries an environment suffix (e.g.
+          # app_name: "myapp-uat" with stage=build), so this is a defensive
+          # check on the final computed slot name, not on app_name alone.
+          case "$TARGET_APP" in
+            *-uat-build|*-live-build|*-stable-build)
+              echo "ERROR: computed CapRover app name '$TARGET_APP' is a per-environment build slot, forbidden by the blue-green SOP (ci-workflows#153) -- '<app>-build' is the only legal build slot; app_name must not itself carry an environment suffix"
+              exit 1
               ;;
           esac
 
