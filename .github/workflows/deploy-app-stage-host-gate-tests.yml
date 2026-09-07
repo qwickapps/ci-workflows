@@ -1,0 +1,41 @@
+name: Deploy App Stage/Host Gate Tests
+
+# Regression gate for ci-workflows#153 checks 1 and 2 (deploy-app.yml's
+# resolve-stage job): a workflow deploying stage=build to anything but
+# oci-dev, or stage=uat/live to anything but oci-main, is refused (check 1);
+# a computed CapRover app name matching -(uat|live|stable)-build$ is refused
+# outright (check 2) -- this is the check that would have caught
+# faabzi-uat-build existing on oci-main.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-stage-host-gate.test.sh
+#     - extracts resolve-stage's actual embedded script from this file (a
+#       real YAML parse, not a copy) and EXECUTES it under controlled
+#       inputs, proving both a violating input set fails and the equivalent
+#       compliant input set succeeds -- a dynamic proof, not a string grep.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-stage-host-gate-tests.yml'
+      - 'scripts/tests/deploy-app-stage-host-gate.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-stage-host-gate.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml stage/host gate tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run stage/host gate contract test
+        run: bash scripts/tests/deploy-app-stage-host-gate.test.sh
