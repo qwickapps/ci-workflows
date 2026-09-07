@@ -232,7 +232,10 @@ jobs:
             CANONICAL_DEV_HOST="captain.dev.qwickforge.com"
             CANONICAL_MAIN_HOST="captain.app.qwickforge.com"
             normalize_host() {
-              printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#[:/].*$##'
+              # DNS hostnames are case-insensitive; lowercase so a caller
+              # passing e.g. Captain.App.QwickForge.Com still matches the
+              # canonical lowercase host below.
+              printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#[:/].*$##' | tr '[:upper:]' '[:lower:]'
             }
             RESOLVED_HOST=""
             if [ -n "${{ inputs.caprover_url }}" ]; then
@@ -243,6 +246,17 @@ jobs:
             case "$STAGE_INPUT" in
               build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
               uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+              # Unreachable today -- STAGE_INPUT is validated to be one of
+              # build|uat|live|stable above, and stable is exempted before
+              # this case block runs. Kept as an explicit fail-closed arm so
+              # that if a stage is ever added to that allow-list without also
+              # updating this mapping, the script dies with a clear
+              # diagnostic instead of an "unbound variable" error from
+              # set -u when $EXPECTED_HOST is referenced below unset.
+              *)
+                echo "ERROR: no canonical host mapping for stage '$STAGE_INPUT'"
+                exit 1
+                ;;
             esac
             if [ -z "$RESOLVED_HOST" ]; then
               echo "ERROR: stage '$STAGE_INPUT' requires caprover_host or caprover_url"
@@ -320,7 +334,16 @@ jobs:
           # an app_name that already carries an environment suffix (e.g.
           # app_name: "myapp-uat" with stage=build), so this is a defensive
           # check on the final computed slot name, not on app_name alone.
-          case "$TARGET_APP" in
+          #
+          # Matched case-insensitively: app_name is a free-form string input
+          # with no pattern constraint and is never lowercased elsewhere in
+          # this file, so app_name="faabzi-UAT" (or any other non-lowercase
+          # casing of the uat/live/stable suffix) would otherwise bypass this
+          # lowercase-only glob and reproduce the exact faabzi-uat-build
+          # incident this check exists to prevent, just with different
+          # casing (found in adversarial review of ci-workflows#157).
+          TARGET_APP_LC="$(printf '%s' "$TARGET_APP" | tr '[:upper:]' '[:lower:]')"
+          case "$TARGET_APP_LC" in
             *-uat-build|*-live-build|*-stable-build)
               echo "ERROR: computed CapRover app name '$TARGET_APP' is a per-environment build slot, forbidden by the blue-green SOP (ci-workflows#153) -- '<app>-build' is the only legal build slot; app_name must not itself carry an environment suffix"
               exit 1

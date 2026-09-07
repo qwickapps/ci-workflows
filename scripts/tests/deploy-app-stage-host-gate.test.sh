@@ -175,6 +175,23 @@ IN_STAGE=build IN_APP_NAME=faabzi-stable IN_CAPROVER_HOST=captain.dev.qwickforge
 IN_STAGE=build IN_APP_NAME=faabzi IN_CAPROVER_HOST=captain.dev.qwickforge.com \
   assert_succeeds "plain app_name + stage=build (the only legal build slot) succeeds"
 
+# RED: mixed-case app_name suffix reproduces the exact faabzi-uat-build
+# incident with different casing -- the check-2 glob is lowercase-only, so
+# app_name="faabzi-UAT" + stage=build must still be refused. This is the
+# case-sensitivity bypass found in adversarial review of ci-workflows#157.
+IN_STAGE=build IN_APP_NAME=faabzi-UAT IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+  assert_fails_with "app_name carrying a mixed-case -UAT suffix + stage=build is refused" \
+  "is a per-environment build slot"
+
+echo ""
+echo "== Check 1: case-insensitive host comparison =="
+
+# GREEN: mixed-case resolved host must still match the canonical lowercase
+# host -- DNS hostnames are case-insensitive, and the comparison must not
+# reject a caller who happens to pass e.g. Captain.App.QwickForge.Com.
+IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=Captain.App.QwickForge.Com \
+  assert_succeeds "mixed-case uat host still matches the canonical oci-main host"
+
 echo ""
 echo "Tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
