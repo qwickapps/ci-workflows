@@ -91,6 +91,44 @@ jobs:
 
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA" HEAD 2>/dev/null || git diff --name-only HEAD~1 HEAD)"
 
+          # ci-workflows#147: a PR whose diff is ONLY lockfiles (a Dependabot
+          # security bump, e.g.) has no source file in it at all, let alone a
+          # test file — the check below is structurally impossible to pass for
+          # that PR shape, not flaky. Keyed on what the diff actually contains,
+          # not on PR author/title (Dependabot isn't the only opener of these,
+          # and title/author matching is the brittle pattern that's bitten
+          # this fleet repeatedly — protocols#1342). These files are machine-
+          # generated; "100% of the diff is lockfiles" cannot smuggle in an
+          # untested behavior change, so this is a safe, unambiguous
+          # short-circuit — it does not need to inspect diff CONTENT the way
+          # a manifest-file (package.json etc.) exemption would.
+          NON_LOCKFILE_FILES=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              */package-lock.json|package-lock.json) ;;
+              */pnpm-lock.yaml|pnpm-lock.yaml)        ;;
+              */yarn.lock|yarn.lock)                  ;;
+              */npm-shrinkwrap.json|npm-shrinkwrap.json) ;;
+              */Cargo.lock|Cargo.lock)                ;;
+              */go.sum|go.sum)                        ;;
+              */poetry.lock|poetry.lock)               ;;
+              */Pipfile.lock|Pipfile.lock)             ;;
+              */composer.lock|composer.lock)           ;;
+              */Gemfile.lock|Gemfile.lock)             ;;
+              *) NON_LOCKFILE_FILES="$NON_LOCKFILE_FILES $f" ;;
+            esac
+          done <<EOF
+          $CHANGED_FILES
+          EOF
+
+          if [ -n "$CHANGED_FILES" ] && [ -z "$NON_LOCKFILE_FILES" ]; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "detail=Lockfile-only diff — no source change to test." >> "$GITHUB_OUTPUT"
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Test file patterns (bash 3.2 safe — no grep -P, no case folding)
           TEST_FILES=""
           while IFS= read -r f; do
