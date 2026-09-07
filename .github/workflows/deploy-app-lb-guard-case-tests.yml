@@ -1,0 +1,38 @@
+name: Deploy App LB Guard Case Tests
+
+# Regression gate for ci-workflows#163: deploy-app.yml's "Verify LB target
+# resolves to the node just deployed (infra#101 guard)" step (present in
+# both deploy-caprover and deploy-stable) must not fail open (silently skip
+# the safety check entirely) for a legitimately-cased Tailscale hostname.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-lb-guard-case.test.sh
+#     - extracts the gate's actual embedded logic from this file (a real
+#       YAML parse) and EXECUTES it under controlled inputs, asserting
+#       whether it skips or proceeds -- a dynamic proof, not a string grep.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-lb-guard-case-tests.yml'
+      - 'scripts/tests/deploy-app-lb-guard-case.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-lb-guard-case.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml LB guard case tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run LB guard case contract test
+        run: bash scripts/tests/deploy-app-lb-guard-case.test.sh
