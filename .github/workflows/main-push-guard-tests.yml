@@ -11,10 +11,20 @@ name: Main Push Guard Tests
 # drops or breaks the `outputs` block fails loudly on the PR instead of
 # silently reappearing.
 #
+# Also covers ci-workflows#139: the Test job hardcoded pnpm for every
+# language: ts | js caller (npm install -g pnpm; pnpm install
+# --frozen-lockfile unconditionally), which fails closed with
+# ERR_PNPM_NO_LOCKFILE for every npm-only repo (confirmed: qwickapps/agents,
+# qwickapps/projects). Detection now reads the checked-out lockfile instead
+# of assuming.
+#
 # Tests:
 #   bash scripts/tests/main-push-guard-outputs.test.sh
 #     - on.workflow_call.outputs.image_ref/image_tag exist and are
 #       wired to jobs.build-push.outputs.image_ref/image_tag
+#   bash scripts/tests/main-push-guard-pkgmgr.test.sh
+#     - package-manager detection picks pnpm/npm/fails loudly correctly
+#       for pnpm-only, npm-only, both-lockfiles, and neither-lockfile repos
 
 on:
   pull_request:
@@ -22,11 +32,13 @@ on:
       - '.github/workflows/main-push-guard.yml'
       - '.github/workflows/main-push-guard-tests.yml'
       - 'scripts/tests/main-push-guard-outputs.test.sh'
+      - 'scripts/tests/main-push-guard-pkgmgr.test.sh'
   push:
     branches: [main, dev]
     paths:
       - '.github/workflows/main-push-guard.yml'
       - 'scripts/tests/main-push-guard-outputs.test.sh'
+      - 'scripts/tests/main-push-guard-pkgmgr.test.sh'
 
 permissions:
   contents: read
@@ -47,3 +59,6 @@ jobs:
 
       - name: Run main-push-guard.yml output contract test
         run: bash scripts/tests/main-push-guard-outputs.test.sh
+
+      - name: Run main-push-guard.yml package-manager detection test
+        run: bash scripts/tests/main-push-guard-pkgmgr.test.sh
