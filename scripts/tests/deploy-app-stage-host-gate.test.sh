@@ -77,7 +77,13 @@ run_resolve_stage() {
     export GITHUB_SHA="0123456789abcdef0123456789abcdef01234567"
     export GITHUB_OUTPUT="$TMPDIR/gh-output-$$"
     : > "$GITHUB_OUTPUT"
+    set +e
     bash "$TMPDIR/resolve-stage.sh"
+    rc=$?
+    set -e
+    echo "--- GITHUB_OUTPUT ---"
+    cat "$GITHUB_OUTPUT"
+    exit "$rc"
   ) > "$out_file" 2>&1
 }
 
@@ -191,6 +197,56 @@ echo "== Check 1: case-insensitive host comparison =="
 # reject a caller who happens to pass e.g. Captain.App.QwickForge.Com.
 IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=Captain.App.QwickForge.Com \
   assert_succeeds "mixed-case uat host still matches the canonical oci-main host"
+
+echo ""
+echo "== ci-workflows#166: stage normalized once at the input boundary =="
+
+# GREEN: a mixed-case stage input ("BUILD") is normalized rather than
+# rejected by the `case "$STAGE_INPUT" in build|uat|live|stable)` validity
+# check, and still resolves to the correct oci-dev host requirement.
+IN_STAGE=BUILD IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+  assert_succeeds "mixed-case stage 'BUILD' is normalized and succeeds against the correct oci-dev host"
+
+# RED: normalizing stage must not create a NEW bypass of check 1 -- a
+# mixed-case stage input pointed at the WRONG host is still refused, proving
+# the host-agreement guard applies to the normalized value, not the raw one.
+IN_STAGE=Live IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+  assert_fails_with "mixed-case stage 'Live' targeting the wrong (oci-dev) host is still refused" \
+  "stage 'live' must deploy to 'captain.app.qwickforge.com'"
+
+# RED: normalization must not widen the validity check itself -- a stage
+# that is genuinely invalid even after lowercasing is still rejected.
+IN_STAGE=Bogus IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+  assert_fails_with "genuinely invalid stage 'Bogus' is still rejected after normalization" \
+  "invalid stage 'bogus'"
+
+echo ""
+echo "== ci-workflows#166: caprover_host_name normalized once (boundary hoist) =="
+
+# GREEN + output check: mixed-case caprover_host still produces a lowercase
+# caprover_host_name output now that the lowercasing happens once before the
+# stage case block, not duplicated inside each of its four arms.
+assert_output_contains() {
+  local desc="$1" needle="$2"
+  local out="$TMPDIR/out-$RANDOM"
+  set +e
+  run_resolve_stage "$out"
+  local rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] && grep -qF "$needle" "$out"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc -- expected exit=0 and output containing: $needle"
+    echo "    actual exit=$rc, output:"
+    sed 's/^/      /' "$out"
+    fail=$((fail + 1))
+  fi
+}
+
+IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=Captain.Dev.QwickForge.Com \
+  assert_output_contains "mixed-case caprover_host still yields a lowercased caprover_host_name output" \
+  "caprover_host_name=captain.dev.qwickforge.com"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

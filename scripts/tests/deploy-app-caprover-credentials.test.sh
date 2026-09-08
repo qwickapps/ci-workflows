@@ -84,6 +84,28 @@ assert_selects() {
   fi
 }
 
+# assert_selects_and_url: same as assert_selects, plus asserts the resolved
+# CAPROVER_URL is exactly the expected well-formed value (single scheme
+# prefix) -- guards against ci-workflows#166's malformed-double-scheme bug
+# ("https://HTTPS://...") when caprover_url carries a mixed-case scheme.
+assert_selects_and_url() {
+  local desc="$1" expect_marker="$2" expect_url="$3"
+  local out="$TMPDIR/out-$RANDOM"
+  set +e
+  run_resolve_creds "$out"
+  local rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] && grep -qF "CAPROVER_PASSWORD=$expect_marker" "$out" && grep -qF "CAPROVER_URL=$expect_url" "$out"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc -- expected exit=0, CAPROVER_PASSWORD=$expect_marker, CAPROVER_URL=$expect_url"
+    echo "    actual exit=$rc, output:"
+    sed 's/^/      /' "$out"
+    fail=$((fail + 1))
+  fi
+}
+
 echo "== ci-workflows#161: case-insensitive dev/main credential selection =="
 
 # Baseline: lowercase host via caprover_host_name selects DEV correctly
@@ -108,6 +130,19 @@ IN_CAPROVER_URL="https://Captain.Dev.QwickForge.Com" NEEDS_CAPROVER_HOST_NAME="c
 # too-broad fix).
 NEEDS_CAPROVER_HOST_NAME="Captain.App.QwickForge.Com" \
   assert_selects "mixed-case main host still selects MAIN" MAIN_SECRET_MARKER
+
+echo ""
+echo "== ci-workflows#166: case-insensitive scheme handling on caprover_url =="
+
+# RED (pre-fix)/GREEN (post-fix): a mixed-case SCHEME in caprover_url (as
+# opposed to a mixed-case host, which #161 already covered) used to fail the
+# case-sensitive `http://*|https://*` scheme-presence check and get a second
+# "https://" prepended, producing a malformed double-scheme URL
+# ("https://HTTPS://Captain.Dev.QwickForge.Com"). Must still select the
+# correct DEV credential AND produce a single well-formed lowercase URL.
+IN_CAPROVER_URL="HTTPS://Captain.Dev.QwickForge.Com" \
+  assert_selects_and_url "mixed-case scheme in caprover_url selects DEV and normalizes to a single scheme" \
+  DEV_SECRET_MARKER "https://captain.dev.qwickforge.com"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

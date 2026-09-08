@@ -66,7 +66,11 @@ is_workflow_file() {
 }
 
 references_caprover_secret() {
-  grep -Eq "$CAPROVER_SECRET_PATTERN" "$1"
+  # ci-workflows#155/#166: matched case-insensitively. secrets.*CAPROVER*
+  # only matched a literal uppercase "CAPROVER" substring; a workflow
+  # referencing e.g. secrets.OCI_DEV_Caprover_Password (or any other casing)
+  # would silently evade this content-based trigger entirely.
+  grep -Eqi "$CAPROVER_SECRET_PATTERN" "$1"
 }
 
 failed=0

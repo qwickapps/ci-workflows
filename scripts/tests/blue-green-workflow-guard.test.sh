@@ -133,3 +133,23 @@ not: a workflow
 CAPROVER_PASSWORD: ${{ secrets.CAPROVER_PASSWORD }}
 YAML
 assert_pass "ignores deploy-shaped files outside the workflow directory even if they mention a CapRover secret" "$SCRIPT" docs/deploy.yml
+
+# ci-workflows#155/#166: the CapRover-secret content trigger itself was
+# case-sensitive (`secrets\.[A-Za-z0-9_]*CAPROVER[A-Za-z0-9_]*`, requiring a
+# literal uppercase "CAPROVER"). A direct-deploy workflow spelling the secret
+# name in any other case evaded detection entirely -- must still be rejected.
+cat > .github/workflows/deploy.yml <<'YAML'
+name: Deploy
+on:
+  push:
+    branches: [live]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to CapRover
+        env:
+          CAPROVER_PASSWORD: ${{ secrets.oci_main_caprover_password }}
+        run: echo direct push to live
+YAML
+assert_fail "rejects a direct deploy workflow spelling the CapRover secret name in lowercase (case-insensitive trigger)" "$SCRIPT" .github/workflows/deploy.yml
