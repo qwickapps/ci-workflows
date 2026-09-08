@@ -77,6 +77,17 @@ on:
         required: false
         type: boolean
         default: false
+      # ── Lockfile consistency gate (ci-workflows#165) ─────────────────────────
+      enforce_lockfile_consistency:
+        description: "Fail when Dockerfile* install steps use a different package manager/lockfile than CI validates, in either direction."
+        required: false
+        type: boolean
+        default: true
+      ci_package_manager:
+        description: "Package manager this workflow installs TS dependencies with (the 'Install dependencies (TS)' steps below use pnpm). Keep in sync with those steps."
+        required: false
+        type: string
+        default: "pnpm"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATE 1: validate-commits
@@ -140,6 +151,38 @@ jobs:
             exit 0
           fi
           actionlint .github/workflows/*.yml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 1b: lockfile-consistency  (needs: validate-commits — runs in parallel
+#          with lint/test)
+#   ci-workflows#165: a Dockerfile installing from a different lockfile than
+#   CI validates lets a dependency-patch PR go fully green on a tree that
+#   never ships (mcp#365, secrets#89). Covers the reverse case too
+#   (ci-workflows#139): this workflow hardcoding a package manager the repo
+#   doesn't use. Self-no-ops for non-Node repos (no package.json).
+# ─────────────────────────────────────────────────────────────────────────────
+  lockfile-consistency:
+    name: "Gate 1b · Lockfile Consistency"
+    runs-on: [self-hosted, macmini]
+    needs: [validate-commits]
+    if: inputs.enforce_lockfile_consistency
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout ci-workflows guard script
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          path: .ci-workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run lockfile consistency guard
+        run: |
+          chmod +x .ci-workflows/scripts/lockfile-consistency-guard.sh
+          .ci-workflows/scripts/lockfile-consistency-guard.sh --ci-manager "${{ inputs.ci_package_manager }}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATE 2a: lint-and-typecheck  (needs: validate-commits)
@@ -225,7 +268,18 @@ jobs:
   build:
     name: "Gate 3 · Build"
     runs-on: [self-hosted, macmini]
-    needs: [lint-and-typecheck, test]
+    needs: [lint-and-typecheck, test, lockfile-consistency]
+    # ci-workflows#165: lockfile-consistency self-no-ops for non-Node repos
+    # rather than being skipped via `if:`, but it CAN be skipped when a
+    # caller sets enforce_lockfile_consistency: false — and GitHub Actions
+    # skips a job's dependents by default when a needed job is skipped.
+    # Treat 'skipped' the same as 'success' so only an actual guard FAILURE
+    # blocks the build.
+    if: |
+      always() &&
+      needs.lint-and-typecheck.result == 'success' &&
+      needs.test.result == 'success' &&
+      (needs.lockfile-consistency.result == 'success' || needs.lockfile-consistency.result == 'skipped')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -384,7 +438,7 @@ jobs:
     name: "Gate 5 · Report Status"
     runs-on: [self-hosted, macmini]
     if: always()
-    needs: [validate-commits, lint-and-typecheck, test, build, push-image, definition-of-done]
+    needs: [validate-commits, lockfile-consistency, lint-and-typecheck, test, build, push-image, definition-of-done]
     steps:
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
@@ -397,12 +451,14 @@ jobs:
         id: overall
         env:
           VALIDATE_RESULT: ${{ needs.validate-commits.result }}
+          LOCKFILE_RESULT: ${{ needs.lockfile-consistency.result }}
           LINT_RESULT:     ${{ needs.lint-and-typecheck.result }}
           TEST_RESULT:     ${{ needs.test.result }}
           BUILD_RESULT:    ${{ needs.build.result }}
           PUSH_RESULT:     ${{ needs.push-image.result }}
           DOD_RESULT:      ${{ needs.definition-of-done.result }}
           USES_DOD:        ${{ inputs.uses_dod }}
+          ENFORCE_LOCKFILE: ${{ inputs.enforce_lockfile_consistency }}
           HAS_DOCKERFILE:  ${{ inputs.has_dockerfile }}
           IMAGE_TAG:       ${{ needs.push-image.outputs.image_tag }}
         run: |
@@ -417,7 +473,7 @@ jobs:
           }
 
           OVERALL="success"
-          for R in "$VALIDATE_RESULT" "$LINT_RESULT" "$TEST_RESULT" "$BUILD_RESULT"; do
+          for R in "$VALIDATE_RESULT" "$LOCKFILE_RESULT" "$LINT_RESULT" "$TEST_RESULT" "$BUILD_RESULT"; do
             if [ "$R" = "failure" ] || [ "$R" = "cancelled" ]; then
               OVERALL="failure"; break
             fi
@@ -445,9 +501,15 @@ jobs:
             DOD_LINE="Def of Done       $(icon "$DOD_RESULT")  ${DOD_RESULT}"
           fi
 
+          LOCKFILE_LINE="Lockfile Consist. ⏭️  skipped (enforce_lockfile_consistency=false)"
+          if [ "$ENFORCE_LOCKFILE" = "true" ]; then
+            LOCKFILE_LINE="Lockfile Consist. $(icon "$LOCKFILE_RESULT")  ${LOCKFILE_RESULT}"
+          fi
+
           CHECK_OUTPUT="Gate              Status    Details
           -----------------------------------------------------
           Validate Commits  $(icon "$VALIDATE_RESULT")  ${VALIDATE_RESULT}  (attribution + branch target)
+          ${LOCKFILE_LINE}
           Lint & Typecheck  $(icon "$LINT_RESULT")  ${LINT_RESULT}  (language: ${{ inputs.language }})
           Tests             $(icon "$TEST_RESULT")  ${TEST_RESULT}  (language: ${{ inputs.language }})
           Build             $(icon "$BUILD_RESULT")  ${BUILD_RESULT}  (${{ inputs.build_command != '' && inputs.build_command || 'no build command' }})

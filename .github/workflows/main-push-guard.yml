@@ -36,6 +36,16 @@ on:
         required: false
         type: boolean
         default: true
+      enforce_lockfile_consistency:
+        description: 'Fail when Dockerfile* install steps use a different package manager/lockfile than CI validates, in either direction (ci-workflows#165).'
+        required: false
+        type: boolean
+        default: true
+      ci_package_manager:
+        description: 'Package manager the "Install dependencies" step below installs with for language: ts | js. Keep in sync with that step.'
+        required: false
+        type: string
+        default: 'pnpm'
     secrets:
       GHCR_PUSH_TOKEN:
         required: false
@@ -114,6 +124,29 @@ jobs:
           .ci-workflows/scripts/blue-green-workflow-guard.sh
 
   # ---------------------------------------------------------------------------
+  # 0.5 Lockfile consistency guard (ci-workflows#165)
+  # ---------------------------------------------------------------------------
+  lockfile-consistency:
+    name: Lockfile Consistency
+    if: inputs.enforce_lockfile_consistency
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+
+      - name: Checkout ci-workflows guard script
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          path: .ci-workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run lockfile consistency guard
+        run: |
+          chmod +x .ci-workflows/scripts/lockfile-consistency-guard.sh
+          .ci-workflows/scripts/lockfile-consistency-guard.sh --ci-manager "${{ inputs.ci_package_manager }}"
+
+  # ---------------------------------------------------------------------------
   # 1. Test (type-check + unit tests)
   # ---------------------------------------------------------------------------
   test:
@@ -176,7 +209,17 @@ jobs:
   build-push:
     name: Build and Push Docker Image
     runs-on: ${{ fromJson(inputs.runs_on) }}
-    needs: [test]
+    needs: [test, lockfile-consistency]
+    # ci-workflows#165: lockfile-consistency runs unconditionally when enabled
+    # (it self-no-ops for non-Node repos), but GitHub Actions skips a job's
+    # dependents by default when a needed job is skipped -- e.g. a caller
+    # explicitly setting enforce_lockfile_consistency: false. Treat 'skipped'
+    # the same as 'success' so that only an actual guard FAILURE blocks the
+    # image push.
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.lockfile-consistency.result == 'success' || needs.lockfile-consistency.result == 'skipped')
     permissions:
       contents: read
       packages: write
