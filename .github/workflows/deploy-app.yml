@@ -183,7 +183,15 @@ jobs:
           # deploy and not a stale leftover from a previous one.
           echo "deploy_start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-          STAGE_INPUT="${{ inputs.stage }}"
+          # ci-workflows#166: normalized ONCE here (the input boundary), not
+          # at each downstream comparison -- every stage-based guard in this
+          # file (the validity check below, the per-env host mapping, the
+          # stage case block, and every `needs.resolve-stage.outputs.stage ==
+          # 'build'/'live'/'stable'` condition in the jobs after this one)
+          # now compares against this single normalized value instead of
+          # needing its own case fix, the way #157/#160/#163's bugs each had
+          # to be found and patched individually.
+          STAGE_INPUT="$(printf '%s' "${{ inputs.stage }}" | tr '[:upper:]' '[:lower:]')"
           APP_NAME="${{ inputs.app_name }}"
           INPUT_IMAGE="${{ inputs.image_ref }}"
 
@@ -268,6 +276,16 @@ jobs:
             fi
           fi
 
+          # ci-workflows#161/#166: computed ONCE here for all four stages,
+          # rather than duplicated identically in each arm of the stage case
+          # block below (ci-workflows#166 found the block had been copy-pasted
+          # into all four arms). DNS/HTTP host matching is case-insensitive,
+          # and this value feeds the downstream dev/main credential-selection
+          # glob (deploy-caprover job) case-sensitively, so the actual
+          # CapRover connection target is lowercased here, not just a
+          # comparison copy.
+          CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
+
           if [ -n "$INPUT_IMAGE" ]; then
             IMAGE_BASE="$(printf '%s' "$INPUT_IMAGE" | sed 's/@.*$//' | sed -E 's/:[^:/]+$//')"
           fi
@@ -289,23 +307,6 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:release-candidate"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
-              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
-              # comparison above (ci-workflows#160) -- DNS hostnames are
-              # case-insensitive, but this value feeds the downstream
-              # dev/main credential-selection glob (deploy-caprover job)
-              # case-sensitively. Without this, a mixed-case caprover_host
-              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
-              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
-              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
-              # used as the CapRover connection target on the
-              # no-caprover_url-override path, not just a comparison copy --
-              # acknowledged per #163's review note; believed benign since
-              # DNS/HTTP host matching is itself case-insensitive, but a more
-              # surgical (comparison-only) fix was deliberately not pursued
-              # here to avoid re-touching an already-merged, already-tested
-              # assignment for a cosmetic-only concern.
-              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             uat)
               TARGET_APP="${APP_NAME}-uat"
@@ -316,23 +317,6 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:release"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="${{ inputs.run_migrations }}"
-              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
-              # comparison above (ci-workflows#160) -- DNS hostnames are
-              # case-insensitive, but this value feeds the downstream
-              # dev/main credential-selection glob (deploy-caprover job)
-              # case-sensitively. Without this, a mixed-case caprover_host
-              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
-              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
-              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
-              # used as the CapRover connection target on the
-              # no-caprover_url-override path, not just a comparison copy --
-              # acknowledged per #163's review note; believed benign since
-              # DNS/HTTP host matching is itself case-insensitive, but a more
-              # surgical (comparison-only) fix was deliberately not pursued
-              # here to avoid re-touching an already-merged, already-tested
-              # assignment for a cosmetic-only concern.
-              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             live)
               TARGET_APP="${APP_NAME}-live"
@@ -343,23 +327,6 @@ jobs:
               NEXT_TAG="${IMAGE_BASE}:stable"
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
-              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
-              # comparison above (ci-workflows#160) -- DNS hostnames are
-              # case-insensitive, but this value feeds the downstream
-              # dev/main credential-selection glob (deploy-caprover job)
-              # case-sensitively. Without this, a mixed-case caprover_host
-              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
-              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
-              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
-              # used as the CapRover connection target on the
-              # no-caprover_url-override path, not just a comparison copy --
-              # acknowledged per #163's review note; believed benign since
-              # DNS/HTTP host matching is itself case-insensitive, but a more
-              # surgical (comparison-only) fix was deliberately not pursued
-              # here to avoid re-touching an already-merged, already-tested
-              # assignment for a cosmetic-only concern.
-              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
             stable)
               TARGET_APP="${APP_NAME}-stable"
@@ -371,23 +338,6 @@ jobs:
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
               CAPROVER_REQUIRED="false"
-              # ci-workflows#161: lowercased, matching the RESOLVED_HOST
-              # comparison above (ci-workflows#160) -- DNS hostnames are
-              # case-insensitive, but this value feeds the downstream
-              # dev/main credential-selection glob (deploy-caprover job)
-              # case-sensitively. Without this, a mixed-case caprover_host
-              # (e.g. "Captain.Dev.QwickForge.Com") passes check 1's
-              # comparison fine but then selects OCI_MAIN_CAPROVER_PASSWORD
-              # instead of OCI_DEV_CAPROVER_PASSWORD downstream. Note: unlike
-              # #163's RAW_URL_LOWER fix, this lowercases the ACTUAL value
-              # used as the CapRover connection target on the
-              # no-caprover_url-override path, not just a comparison copy --
-              # acknowledged per #163's review note; believed benign since
-              # DNS/HTTP host matching is itself case-insensitive, but a more
-              # surgical (comparison-only) fix was deliberately not pursued
-              # here to avoid re-touching an already-merged, already-tested
-              # assignment for a cosmetic-only concern.
-              CAPROVER_HOST_NAME="$(printf '%s' "${{ inputs.caprover_host }}" | tr '[:upper:]' '[:lower:]')"
               ;;
           esac
 
@@ -696,6 +646,19 @@ jobs:
             CP_URL="https://${{ needs.resolve-stage.outputs.caprover_host_name }}"
           fi
 
+          # ci-workflows#166: normalized ONCE here, immediately after CP_URL
+          # is resolved, instead of lowercasing a separate comparison-only
+          # copy further down (as the credential glob alone used to, per
+          # ci-workflows#161). This single value now drives both the
+          # scheme-presence check below and the dev/main credential-selection
+          # glob -- a caller passing e.g. "HTTPS://Captain.Dev.QwickForge.Com"
+          # as caprover_url previously hit the scheme check's case-sensitive
+          # `http://*|https://*` glob, failed to match, and got a malformed
+          # double-scheme URL ("https://HTTPS://...") prepended. DNS/HTTP
+          # host matching is case-insensitive (ci-workflows#161), so
+          # lowercasing the actual connection URL here is safe.
+          CP_URL="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
+
           # Ensure scheme is present — caprover_host inputs are bare hostnames
           case "$CP_URL" in
             http://*|https://*) ;;
@@ -705,16 +668,7 @@ jobs:
           # Derive password from the CapRover URL (not stage), so callers that
           # override caprover_host get the correct credential regardless of stage.
           # dev.qwickforge.com → OCI_DEV; everything else → OCI_MAIN.
-          #
-          # ci-workflows#161: matched case-insensitively. DNS hostnames are
-          # case-insensitive (same principle as ci-workflows#160's
-          # normalize_host lowercasing), but this glob wasn't -- a caller
-          # passing a mixed-case caprover_url directly (bypassing
-          # caprover_host_name entirely, so lowercasing only that output
-          # would have missed this path) selected OCI_MAIN_CAPROVER_PASSWORD
-          # for a host that was actually dev, just spelled with capitals.
-          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
-          case "$CP_URL_LOWER" in
+          case "$CP_URL" in
             *dev.qwickforge.com*)
               CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
               ;;
@@ -981,7 +935,14 @@ jobs:
             echo "Target '$RAW_URL' is not a Tailscale hostname; guard not applicable, skipping."
             exit 0
           fi
-          CANONICAL_HOSTNAME=$(echo "$RAW_URL" | sed -E 's#^[a-z]+://##; s#\..*$##')
+          # ci-workflows#166: derived from the already-lowercased
+          # RAW_URL_LOWER, not raw RAW_URL -- otherwise an uppercase URL
+          # SCHEME (as opposed to the .ts.net suffix #163 already fixed above)
+          # left this lowercase-only regex's leading "http://"/"https://"
+          # unstripped, feeding a garbled hostname into verify-ts-lb-target.sh
+          # and failing the guard closed for an otherwise-legitimate
+          # mixed-case URL that had just passed the gate above.
+          CANONICAL_HOSTNAME=$(echo "$RAW_URL_LOWER" | sed -E 's#^[a-z]+://##; s#\..*$##')
 
           # TS_API_KEY fallback: fetch from the secrets service if the GH Actions
           # secret is missing or the '-' placeholder. Same pattern as mcp's own
@@ -1209,7 +1170,14 @@ jobs:
             echo "Target '$RAW_URL' is not a Tailscale hostname; guard not applicable, skipping."
             exit 0
           fi
-          CANONICAL_HOSTNAME=$(echo "$RAW_URL" | sed -E 's#^[a-z]+://##; s#\..*$##')
+          # ci-workflows#166: derived from the already-lowercased
+          # RAW_URL_LOWER, not raw RAW_URL -- otherwise an uppercase URL
+          # SCHEME (as opposed to the .ts.net suffix #163 already fixed above)
+          # left this lowercase-only regex's leading "http://"/"https://"
+          # unstripped, feeding a garbled hostname into verify-ts-lb-target.sh
+          # and failing the guard closed for an otherwise-legitimate
+          # mixed-case URL that had just passed the gate above.
+          CANONICAL_HOSTNAME=$(echo "$RAW_URL_LOWER" | sed -E 's#^[a-z]+://##; s#\..*$##')
 
           # TS_API_KEY fallback: fetch from the secrets service if the GH Actions
           # secret is missing or the '-' placeholder. Same pattern as mcp's own

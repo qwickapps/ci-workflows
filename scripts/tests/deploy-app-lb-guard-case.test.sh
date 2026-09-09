@@ -26,9 +26,11 @@ fail=0
 
 # extract_gate2 JOB STEP_INDEX OUTPUT_REF -- pulls the run script for that
 # step (a real YAML parse), substitutes the one output reference it needs,
-# and truncates at the gate's own closing "fi" (its own `if` block's first
-# match) -- everything after that point makes real network/secrets calls
-# this test doesn't need or want to exercise.
+# and truncates right after the CANONICAL_HOSTNAME assignment (which
+# immediately follows the gate's own closing "fi") -- everything after that
+# point makes real network/secrets calls this test doesn't need or want to
+# exercise. Printing CANONICAL_HOSTNAME lets tests assert on it directly
+# (ci-workflows#166), not just on the skip/proceed decision.
 extract_gate2() {
   local job="$1" idx="$2" output_ref="$3"
   python3 -c "
@@ -37,7 +39,8 @@ with open('$WORKFLOW') as f:
     doc = yaml.safe_load(f)
 print(doc['jobs']['$job']['steps'][$idx]['run'])
 " | sed -E "s/\\\$\\{\\{ needs\\.resolve-stage\\.outputs\\.$output_ref \\}\\}/\$IN_URL/g" \
-  | sed -n '1,/^fi$/p'
+  | sed -n '1,/CANONICAL_HOSTNAME=/p'
+  echo 'echo "CANONICAL_HOSTNAME=$CANONICAL_HOSTNAME"'
 }
 
 run_gate() {
@@ -80,6 +83,20 @@ assert_proceeds() {
   fi
 }
 
+assert_canonical_hostname() {
+  local desc="$1" job="$2" idx="$3" output_ref="$4" url="$5" expect="$6"
+  local out
+  out="$(run_gate "$job" "$idx" "$output_ref" "$url")"
+  if grep -qF "CANONICAL_HOSTNAME=$expect" <<<"$out"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc -- expected CANONICAL_HOSTNAME=$expect"
+    echo "    output: $out"
+    fail=$((fail + 1))
+  fi
+}
+
 echo "== deploy-caprover job's LB guard (stable_app_url) =="
 
 assert_proceeds "lowercase .ts.net hostname proceeds (baseline, already worked)" \
@@ -90,6 +107,18 @@ assert_proceeds "MIXED-CASE .TS.NET hostname proceeds, does not fail open (ci-wo
 
 assert_skips "a genuinely non-Tailscale URL still correctly skips" \
   deploy-caprover 17 stable_app_url "https://myapp.app.qwickforge.com"
+
+# RED (pre-fix)/GREEN (post-fix): a mixed-case URL SCHEME (as opposed to a
+# mixed-case ".ts.net" suffix, which #163 already covered) used to survive
+# the gate above but then break the case-sensitive scheme-strip regex in
+# CANONICAL_HOSTNAME, leaving the scheme prefix attached and feeding a
+# garbled hostname to verify-ts-lb-target.sh -- failing the guard closed for
+# a legitimate deploy (ci-workflows#166).
+assert_canonical_hostname "mixed-case SCHEME still yields a clean canonical hostname (ci-workflows#166)" \
+  deploy-caprover 17 stable_app_url "HTTPS://myapp.mytailnet.ts.net" "myapp"
+
+assert_canonical_hostname "mixed-case scheme AND .TS.NET together still yield a clean canonical hostname" \
+  deploy-caprover 17 stable_app_url "HTTPS://myapp.mytailnet.TS.NET" "myapp"
 
 echo ""
 echo "== deploy-stable job's LB guard (target_app_url) =="
@@ -102,6 +131,9 @@ assert_proceeds "MIXED-CASE .TS.NET hostname proceeds, does not fail open (ci-wo
 
 assert_skips "a genuinely non-Tailscale URL still correctly skips" \
   deploy-stable 8 target_app_url "https://myapp.app.qwickforge.com"
+
+assert_canonical_hostname "mixed-case SCHEME still yields a clean canonical hostname (ci-workflows#166)" \
+  deploy-stable 8 target_app_url "HTTPS://myapp.mytailnet.ts.net" "myapp"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
