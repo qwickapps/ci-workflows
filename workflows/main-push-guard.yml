@@ -103,8 +103,21 @@ jobs:
     runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+
+      - name: Reset and init ci-workflows submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .gitmodules ]; then
+            submodule_paths="$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' || true)"
+            while IFS= read -r submodule_path; do
+              [ -n "$submodule_path" ] || continue
+              if git -C "$submodule_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$submodule_path" checkout -- .
+              fi
+            done <<< "$submodule_paths"
+            git submodule update --init
+          fi
 
       - name: Setup Node.js
         if: inputs.language == 'ts' || inputs.language == 'js'
@@ -144,8 +157,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: true
+
+      - name: Reset and init ci-workflows submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .gitmodules ]; then
+            submodule_paths="$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' || true)"
+            while IFS= read -r submodule_path; do
+              [ -n "$submodule_path" ] || continue
+              if git -C "$submodule_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$submodule_path" checkout -- .
+              fi
+            done <<< "$submodule_paths"
+            git submodule update --init
+          fi
 
       - name: Generate image metadata
         id: meta
