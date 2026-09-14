@@ -1,0 +1,165 @@
+name: Main Push Guard (reusable)
+
+# qwickapps/ci-workflows#175: the old per-repo main-push-guard.yml detected a
+# direct push to main with no associated PR, printed a WARNING, and then
+# unconditionally `exit 0`'d -- every green check it ever produced was a
+# constant, not a verdict. Private repos on the GitHub Free plan have no
+# branch protection, so a post-push workflow can never BLOCK a push that has
+# already landed; the only thing this can honestly be is a loud detector.
+#
+# One reusable workflow, called by a thin per-repo wrapper, so there is one
+# place to fix this kind of bug instead of N copies (aos#149: runs on
+# self-hosted since GitHub-hosted Actions minutes are billing-blocked
+# org-wide).
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  guard:
+    name: Verify Push via PR
+    runs-on: [self-hosted, Linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Verify push originated from a PR (or a recognised exception)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+
+          COMMIT_MSG="$(git log -1 --pretty=%s)"
+          echo "Commit: $SHA"
+          echo "Message: $COMMIT_MSG"
+
+          # ------------------------------------------------------------------
+          # 1. Merge commits are always allowed -- this IS how a PR lands.
+          # ------------------------------------------------------------------
+          if echo "$COMMIT_MSG" | grep -qE "^Merge pull request"; then
+            echo "Merge commit -- allowed."
+            exit 0
+          fi
+
+          # ------------------------------------------------------------------
+          # 2. Release/CI commits from a VERIFIED AUTOMATION IDENTITY only.
+          # The old check trusted any commit message starting with
+          # chore:/release:/ci:, regardless of author -- trivially spoofable
+          # by a human typing that prefix. The author LOGIN (from the GitHub
+          # API, not a locally-settable `git config user.name`) must actually
+          # be the org's automation bot.
+          # ------------------------------------------------------------------
+          AUTHOR_LOGIN="$(gh api "repos/${REPO}/commits/${SHA}" --jq '.author.login // empty' 2>/dev/null || true)"
+          echo "Author login (API): ${AUTHOR_LOGIN:-<none>}"
+          if [ "$AUTHOR_LOGIN" = "github-actions[bot]" ] && echo "$COMMIT_MSG" | grep -qE "^(chore|release|ci):"; then
+            echo "Verified automation identity (github-actions[bot]) with an automation-style commit -- allowed."
+            exit 0
+          fi
+
+          # ------------------------------------------------------------------
+          # 3. Was this commit part of a merged PR? Distinguish "verified: no
+          # PR" from "could not verify" -- an API error must FAIL, never
+          # silently pass. (The old `|| echo 0` bug treated an error as "no
+          # PR found", which happened to warn-not-fail here only because the
+          # step always exited 0 regardless -- fixing that made the silent
+          # fallthrough load-bearing, so it gets fixed too.)
+          # ------------------------------------------------------------------
+          COULD_NOT_VERIFY=""
+          VIOLATION_REASON="direct push, no associated merged PR"
+          PR_LIST_OUTPUT="$(gh pr list --repo "$REPO" --state merged --search "$SHA" --json number 2>/tmp/pr_list_err)"
+          PR_LIST_RC=$?
+          if [ "$PR_LIST_RC" -ne 0 ]; then
+            echo "::error::Could not verify PR association for $SHA -- gh pr list failed (rc=$PR_LIST_RC): $(cat /tmp/pr_list_err)"
+            COULD_NOT_VERIFY="true"
+            VIOLATION_REASON="could-not-verify: gh pr list failed"
+          else
+            PR_COUNT="$(echo "$PR_LIST_OUTPUT" | jq 'length')"
+            if [ "${PR_COUNT:-0}" -gt 0 ]; then
+              echo "Push is associated with a merged PR -- allowed."
+              exit 0
+            fi
+          fi
+
+          # ------------------------------------------------------------------
+          # 4. A recorded SDLC protocol exception for this exact commit?
+          # Workflow-readable form: an issue in THIS repo, labelled
+          # sdlc-exception, whose body names this SHA. (scripts/
+          # record-protocol-exception.sh's own JSON records under
+          # ~/.qwickapps/states/protocol-exceptions/ are session-local and
+          # unreachable from a GitHub-hosted-identity runner job -- this is a
+          # separate, repo-readable surface for the same kind of record, not
+          # a replacement for that script.)
+          # ------------------------------------------------------------------
+          EXCEPTION_COUNT="$(gh issue list --repo "$REPO" --label sdlc-exception --state all --search "$SHA" --json number --jq 'length' 2>/dev/null || echo 0)"
+          if [ "${EXCEPTION_COUNT:-0}" -gt 0 ]; then
+            echo "Recorded SDLC exception found for $SHA (label sdlc-exception) -- allowed."
+            exit 0
+          fi
+
+          # ------------------------------------------------------------------
+          # No allowlist entry matched. Loud failure: upsert an issue, notify,
+          # and fail the run.
+          # ------------------------------------------------------------------
+          AUTHOR_NAME="$(git log -1 --pretty=%an)"
+          AUTHOR_EMAIL="$(git log -1 --pretty=%ae)"
+          RUN_URL="https://github.com/${REPO}/actions/runs/${{ github.run_id }}"
+          DEDUPE_KEY="push-guard:${REPO}"
+
+          printf -v BODY '**%s**\n\n- Repo: `%s`\n- Branch: `%s`\n- SHA: `%s`\n- Author: %s <%s> (API login: %s)\n- Message: %s\n- Run: %s\n\nDedupe key: `%s`' \
+            "${VIOLATION_REASON:-direct push, no associated merged PR}" \
+            "${REPO}" "${REF_NAME}" "${SHA}" \
+            "${AUTHOR_NAME}" "${AUTHOR_EMAIL}" "${AUTHOR_LOGIN:-none}" \
+            "${COMMIT_MSG}" "${RUN_URL}" "${DEDUPE_KEY}"
+
+          EXISTING_ISSUE="$(gh issue list --repo "$REPO" --state open --search "$DEDUPE_KEY in:body" --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$EXISTING_ISSUE" ] && [ "$EXISTING_ISSUE" != "null" ]; then
+            echo "Updating existing push-guard issue #${EXISTING_ISSUE}"
+            gh issue comment "$EXISTING_ISSUE" --repo "$REPO" --body "$BODY" || echo "::warning::Failed to comment on existing issue"
+            ISSUE_NUM="$EXISTING_ISSUE"
+          else
+            echo "Creating new push-guard issue"
+            ISSUE_URL="$(gh issue create --repo "$REPO" --title "Direct push to ${REF_NAME} without a PR (push-guard)" --body "$BODY" 2>/dev/null || true)"
+            echo "Created: $ISSUE_URL"
+            ISSUE_NUM="${ISSUE_URL##*/}"
+          fi
+
+          {
+            echo "ISSUE_NUM=${ISSUE_NUM:-}"
+            echo "VIOLATION_REASON=${VIOLATION_REASON}"
+          } >> "$GITHUB_ENV"
+
+          if [ -n "${COULD_NOT_VERIFY:-}" ]; then
+            echo "::error::${VIOLATION_REASON}"
+          else
+            echo "::error::Direct push to ${REF_NAME} with no merged PR, no verified automation identity, and no recorded SDLC exception."
+          fi
+          exit 1
+
+      - name: Notify owning lead and prime via Telegram
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf -v MSG '[FAIL] push-guard: unreviewed push to %s@%s\nReason: %s\nSHA: %s\nIssue: #%s\nRun: %s' \
+            "${{ github.repository }}" "${{ github.ref_name }}" "${VIOLATION_REASON:-see run}" \
+            "${{ github.sha }}" "${ISSUE_NUM:-unknown}" "${RUN_URL}"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":$(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+              || echo "::warning::Telegram notification failed (non-fatal)"
+          else
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set on this repo -- cannot notify. The upserted issue is the durable record either way."
+          fi
