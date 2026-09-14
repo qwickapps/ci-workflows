@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: true
+      platforms:
+        description: 'Comma-separated docker buildx target platforms (e.g. linux/amd64,linux/arm64). Defaults to the runner-native arch only, unchanged for existing callers.'
+        required: false
+        type: string
+        default: 'linux/arm64'
     secrets:
       GHCR_PUSH_TOKEN:
         required: false
@@ -263,17 +268,33 @@ jobs:
           {"auths":{"${{ env.REGISTRY }}":{"auth":"$AUTH"}}}
           EOF
 
+      - name: Clean up stale buildx builders
+        run: |
+          docker ps -a --filter name=buildx_buildkit_ --format '{{.Names}}' | xargs -r docker rm -f 2>/dev/null || true
+          docker buildx rm --all-inactive --force 2>/dev/null || true
+
+      - name: Set up QEMU
+        if: inputs.platforms != 'linux/arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        # network=host driver-opt is the same fix deploy-app.yml already uses for
+        # its own buildx job on this runner — plain `docker build` was used here
+        # historically to route around Colima BuildKit containers failing to start
+        # ("unexpected EOF"); network=host resolves that instead of avoiding buildx.
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
       - name: Build and push Docker image
-        # Build with plain docker (no buildx container needed — avoids "unexpected
-        # EOF" when Colima can't reliably start BuildKit containers). Push via
-        # docker push so the client passes $DOCKER_CONFIG auth to the daemon.
         run: |
           set -euo pipefail
           IMAGE_REF="${{ steps.meta.outputs.image_ref }}"
-          docker build \
+          docker buildx build \
+            --platform "${{ inputs.platforms }}" \
+            --push \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             -t "$IMAGE_REF" \
             -f "${{ inputs.dockerfile_path }}" \
             .
-          docker push "$IMAGE_REF"
