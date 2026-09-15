@@ -21,20 +21,29 @@
 # CapRover a GHCR token as a plain script argument, not a local `docker
 # buildx imagetools inspect` + Docker-config login.
 #
-# aos#193 Phase 1 gave both jobs a permissions block anyway, for a
-# different reason: deploy-caprover's first-deploy proof (§2) needs
-# packages: read to query GHCR release/stable tag history via the GH
-# Packages API, and checks: write to create/query
-# blue-green/first-deploy-used and blue-green/live-e2e-approved check
-# runs; deploy-stable's gate (§1/§5, only active when the caller passes
-# require_live_approval_check: true) needs checks: read to query the
-# live-e2e-approved check run it verifies against. Both are additive
-# grants scoped to exactly what aos#193 Phase 1 needs, nothing broader.
+# aos#193 Phase 1's FIRST round gave both jobs a permissions block anyway
+# (deploy-caprover: contents/packages/checks; deploy-stable: contents/
+# checks), for a different reason: the first-deploy-proof and
+# live-e2e-approved-gate features. The SECOND round of review reverted
+# both blocks entirely (not just the checks: * lines) after finding a
+# real, empirically-confirmed break: a reusable workflow job's requested
+# permissions must be a SUBSET of what the calling workflow itself grants,
+# and GitHub validates this for the WHOLE workflow_call at dispatch time --
+# not lazily per job, and not skipped for a job whose `if:` would evaluate
+# false. None of the 14 org callers of deploy-app.yml grant `checks` (and
+# only some already grant `packages`, via the earlier, separate #137/#138
+# fix), so giving deploy-caprover/deploy-stable ANY new permissions block
+# here would break every one of them at dispatch time the moment this
+# merged -- see those two jobs' own header comments in deploy-app.yml for
+# the empirical repro. Landing the needed grants in the 14 callers' own
+# top-level permissions is a required Phase 1b follow-up BEFORE either job
+# can safely carry its own permissions block again.
 #
 # A permissions: block on a job REPLACES the job's entire default
 # permission set, not adds to it -- this also checks that no OTHER job in
-# the file (which doesn't have a GHCR-login step) was accidentally given a
-# permissions block, which would silently strip that job's actual defaults.
+# the file (which doesn't have a GHCR-login step, including
+# deploy-caprover/deploy-stable) was accidentally given a permissions
+# block, which would silently strip that job's actual defaults.
 
 set -euo pipefail
 
@@ -81,11 +90,11 @@ assert "verify-provenance job: permissions = {packages: read}" \
 assert "retag job: permissions = {packages: write}" \
   test "$(job_permissions_json retag)" = '{"packages": "write"}'
 
-assert "deploy-caprover job: permissions = {contents: read, packages: read, checks: write} (aos#193 Phase 1)" \
-  test "$(job_permissions_json deploy-caprover)" = '{"contents": "read", "packages": "read", "checks": "write"}'
+assert "deploy-caprover job: NO permissions block (aos#193 Phase 1 review round 2 -- see this test's header comment)" \
+  test "$(job_permissions_json deploy-caprover)" = "null"
 
-assert "deploy-stable job: permissions = {contents: read, checks: read} (aos#193 Phase 1)" \
-  test "$(job_permissions_json deploy-stable)" = '{"contents": "read", "checks": "read"}'
+assert "deploy-stable job: NO permissions block (aos#193 Phase 1 review round 2 -- see this test's header comment)" \
+  test "$(job_permissions_json deploy-stable)" = "null"
 
 echo "== No workflow-level permissions block (per-job scoping only) =="
 TOPLEVEL=$(python3 -c "
