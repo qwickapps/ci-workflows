@@ -1,0 +1,44 @@
+name: Deploy Stable CapRover Tests
+
+# Regression gate for qwickapps/mcp#392: deploy-stable's Coolify deployment
+# target was orphaned tooling -- no app by that name existed on either
+# Coolify instance. The real, live stable slot has always been a CapRover
+# app on the same cluster as live. deploy-stable was rewritten to mirror
+# deploy-caprover's CapRover pattern instead. This gate exists so a future
+# edit that reintroduces the Coolify path (e.g. a bad merge or revert)
+# fails the PR instead of silently resurrecting it.
+#
+# Test: bash scripts/tests/deploy-stable-caprover.test.sh
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-stable-caprover-tests.yml'
+      - 'scripts/tests/deploy-stable-caprover.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-stable-caprover.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-stable CapRover tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run deploy-stable CapRover contract test
+        run: bash scripts/tests/deploy-stable-caprover.test.sh
