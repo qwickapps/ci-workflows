@@ -58,9 +58,11 @@ assert "workflow file exists" \
 
 PM_RUN_FILE="$(mktemp)"
 PLATFORMS_RUN_FILE="$(mktemp)"
-trap 'rm -f "$PM_RUN_FILE" "$PLATFORMS_RUN_FILE"' EXIT
+IMAGE_NAME_RUN_FILE="$(mktemp)"
+trap 'rm -f "$PM_RUN_FILE" "$PLATFORMS_RUN_FILE" "$IMAGE_NAME_RUN_FILE"' EXIT
 
-if python3 - "$WORKFLOW" "$PM_RUN_FILE" "$PLATFORMS_RUN_FILE" <<'PY'
+if python3 - "$WORKFLOW" "$PM_RUN_FILE" "$PLATFORMS_RUN_FILE" "$IMAGE_NAME_RUN_FILE" <<'PY'
+import re
 import sys
 try:
     import yaml
@@ -70,7 +72,9 @@ except ImportError:
     )
     sys.exit(2)
 
-path, pm_run_out, platforms_run_out = sys.argv[1], sys.argv[2], sys.argv[3]
+path, pm_run_out, platforms_run_out, image_name_run_out = (
+    sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],
+)
 with open(path, "r", encoding="utf-8") as fh:
     doc = yaml.safe_load(fh)
 
@@ -131,11 +135,56 @@ if "PLATFORMS" not in platforms_env:
 if platforms_step.get("continue-on-error"):
     errors.append("validate-platforms's step has continue-on-error: true")
 
-# Whole-file scan (round-3 LOW): a fix at one interpolation site doesn't
-# prove there isn't another -- e.g. round 3's image_name fix left
-# steps.meta.outputs.image_ref (itself derived from inputs.image_name)
-# interpolated one step later. No run: block anywhere in this file should
-# contain a raw ${{ inputs. or ${{ steps. expression.
+# The image_name validation (added round-3, in build-push's "Generate
+# image metadata" step) is defence in depth on top of the env: fix --
+# extract its script too, for the same behavioral treatment.
+build_push_job = jobs.get("build-push") or {}
+build_push_steps = build_push_job.get("steps") or []
+meta_step = next(
+    (s for s in build_push_steps if isinstance(s, dict) and s.get("name") == "Generate image metadata"),
+    {},
+)
+meta_run = meta_step.get("run") or ""
+meta_env = meta_step.get("env") or {}
+if not meta_step:
+    errors.append("jobs.build-push has no 'Generate image metadata' step")
+if "IMAGE_NAME" not in meta_env:
+    errors.append("the metadata step has no env.IMAGE_NAME")
+
+# Whole-file scan (round-3 LOW, tightened round-4 MEDIUM): a fix at one
+# interpolation site doesn't prove there isn't another -- e.g. round 3's
+# image_name fix left steps.meta.outputs.image_ref (itself derived from
+# inputs.image_name) interpolated one step later. Round 4 found the
+# plain-substring version of this scan missed `${{ needs.* }}` entirely,
+# and any spacing other than exactly one space after `${{` (including a
+# no-space `${{inputs.x}}`, which GitHub treats identically and which is
+# exactly the round-1 injection re-added without a space). Use a regex
+# that covers inputs/steps/needs and any amount of whitespace.
+BAD_EXPR_RE = re.compile(r"\$\{\{\s*(?:inputs|steps|needs)\.")
+
+# Self-check the regex itself against the round-4 review's exact fixtures,
+# so a future "simplify this back to a substring check" regresses here
+# directly rather than only failing if someone happens to hit this exact
+# file's real content.
+_SHOULD_MATCH = (
+    'echo "${{ needs.validate-platforms.outputs.x }}"',       # N1
+    'IMAGE_REF="${{ needs.build.outputs.image_ref }}"',        # N2
+    'IMAGE="${{inputs.image_name}}"',                          # S2 (no space)
+    '-f "${{  inputs.dockerfile_path }}"',                     # S3 (two spaces)
+    'IMAGE_REF="${{ steps.meta.outputs.image_ref }}"',         # round-3 regression
+)
+_SHOULD_NOT_MATCH = (
+    'IMAGE_REF="$IMAGE_REF"',
+    'echo "${{ env.REGISTRY }}"',
+    'echo "${{ github.sha }}"',
+)
+for fixture in _SHOULD_MATCH:
+    if not BAD_EXPR_RE.search(fixture):
+        errors.append(f"BAD_EXPR_RE regressed: should match but didn't: {fixture!r}")
+for fixture in _SHOULD_NOT_MATCH:
+    if BAD_EXPR_RE.search(fixture):
+        errors.append(f"BAD_EXPR_RE regressed: should NOT match but did: {fixture!r}")
+
 for job_name, job in jobs.items():
     if not isinstance(job, dict):
         continue
@@ -143,12 +192,11 @@ for job_name, job in jobs.items():
         if not isinstance(s, dict):
             continue
         run_text = s.get("run") or ""
-        for bad in ("${{ inputs.", "${{ steps."):
-            if bad in run_text:
-                errors.append(
-                    f"jobs.{job_name}.steps[{i}] ({s.get('name')!r}) run: still "
-                    f"contains a raw {bad!r} expression -- pass it through env: instead"
-                )
+        for m in BAD_EXPR_RE.finditer(run_text):
+            errors.append(
+                f"jobs.{job_name}.steps[{i}] ({s.get('name')!r}) run: still "
+                f"contains a raw {m.group(0)!r} expression -- pass it through env: instead"
+            )
 
 if errors:
     for e in errors:
@@ -159,20 +207,32 @@ with open(pm_run_out, "w", encoding="utf-8") as fh:
     fh.write(run)
 with open(platforms_run_out, "w", encoding="utf-8") as fh:
     fh.write(platforms_run)
+# The metadata step's script continues past validation into
+# ${{ github.sha }}/${{ env.REGISTRY }}/${{ env.OWNER }} -- legitimate,
+# non-input-derived GitHub expressions that are fine in the real workflow
+# (the runner substitutes them before bash ever sees the script) but that
+# a standalone bash execution can't resolve. Truncate to just the
+# validation block itself (through its closing fi, right before the
+# first unrelated SHA= assignment) -- that's the actual unit under test.
+meta_run_for_test = meta_run.split("SHA=")[0]
+with open(image_name_run_out, "w", encoding="utf-8") as fh:
+    fh.write(meta_run_for_test)
 sys.exit(0)
 PY
 then
-  echo "  PASS: both validation steps correctly shaped (exact if:, no continue-on-error, env-only), and no run: block anywhere in the file has a raw \${{ inputs. or \${{ steps. expression"
+  echo "  PASS: all three validation/metadata steps correctly shaped (exact if:, no continue-on-error, env-only), no run: block anywhere in the file has a raw \${{ inputs./steps./needs. expression, and the whole-file regex scan matches its own round-4 fixtures"
   pass=$((pass + 1))
 else
   echo "  FAIL: validation step structure regressed, or a raw input/output expression reappeared in a run: block (see errors above)"
   fail=$((fail + 1))
   PM_RUN_FILE=""
   PLATFORMS_RUN_FILE=""
+  IMAGE_NAME_RUN_FILE=""
 fi
 
-# --- Behavioral check: actually execute both extracted scripts against a
-# set of valid and invalid (including the reviews' injection PoCs) values. ---
+# --- Behavioral check: actually execute all three extracted scripts
+# against a set of valid and invalid (including the reviews' injection
+# PoCs) values. ---
 
 run_pm_case() {
   local value="$1"
@@ -182,6 +242,12 @@ run_pm_case() {
 run_platforms_case() {
   local value="$1"
   PLATFORMS="$value" bash "$PLATFORMS_RUN_FILE" >/tmp/mpg-mp-test-out.$$ 2>&1
+}
+
+run_image_name_case() {
+  local value="$1"
+  IMAGE_NAME="$value" GITHUB_SHA="abcdef1234567890" GITHUB_OUTPUT=/dev/null \
+    bash "$IMAGE_NAME_RUN_FILE" >/tmp/mpg-mp-test-out.$$ 2>&1
 }
 
 if [ -n "${PM_RUN_FILE:-}" ] && [ -s "$PM_RUN_FILE" ]; then
@@ -216,6 +282,23 @@ if [ -n "${PLATFORMS_RUN_FILE:-}" ] && [ -s "$PLATFORMS_RUN_FILE" ]; then
   done
 else
   echo "  SKIP: platforms behavioral checks skipped, structural check already failed"
+fi
+
+if [ -n "${IMAGE_NAME_RUN_FILE:-}" ] && [ -s "$IMAGE_NAME_RUN_FILE" ]; then
+  for good in img-projects img-qwickdb-pgbouncer img.x_y-1 a 0img; do
+    assert "IMAGE_NAME='$good' is accepted (exit 0)" \
+      run_image_name_case "$good"
+  done
+
+  for bad in '' 'img;id' 'img x' 'img|id' 'img&id' "img'x" 'img"x' 'img$HOME' '../img' 'img:tag' 'IMG-Projects' 'img-x$(echo INJECTED-IMAGE-NAME >&2)'; do
+    assert "IMAGE_NAME='$bad' is rejected (non-zero exit, no code execution)" \
+      bash -c '! IMAGE_NAME="$1" bash "$2" >/tmp/mpg-mp-test-out.$$ 2>&1' _ "$bad" "$IMAGE_NAME_RUN_FILE"
+
+    assert "IMAGE_NAME='$bad' never printed INJECTED-IMAGE-NAME (injection did not run)" \
+      bash -c '! grep -q INJECTED-IMAGE-NAME /tmp/mpg-mp-test-out.$$ 2>/dev/null'
+  done
+else
+  echo "  SKIP: image_name behavioral checks skipped, structural check already failed"
 fi
 
 rm -f /tmp/mpg-mp-test-out.$$
