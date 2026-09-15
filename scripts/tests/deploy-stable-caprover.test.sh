@@ -212,9 +212,17 @@ assert_run "G9: AOS_BIN is resolved from inside the fresh per-job venv, not PATH
 # aos#193 review finding #3 (round 2): python3 is resolved to an absolute
 # path once, explicitly, and that captured path -- never a bare python3 --
 # is what actually builds the venv.
-assert_run "finding #3: python3 is resolved to an absolute path before building the venv" \
-  'PYTHON3_BIN="\$\(command -v python3'
-assert_run "finding #3: the venv is built with the resolved absolute-path python3, never a bare 'python3 -m venv'" \
+#
+# aos#193 review finding L1 (round 3): `command -v python3` was NOT
+# actually a fix -- it returns an absolute path for a STUB python3 too, as
+# long as the stub sits somewhere earlier on PATH. "Is the resolved path
+# absolute" proves nothing about which binary it is. Pin to a single,
+# fixed, well-known path instead of resolving from PATH at all.
+assert_run "finding L1 (round 3): python3 is pinned to a fixed, well-known path, never resolved via PATH lookup" \
+  'PYTHON3_BIN="/usr/bin/python3"'
+assert_run "finding L1 (round 3): the fixed interpreter is verified executable before use, with no PATH-based fallback" \
+  '\[ ! -x "\$PYTHON3_BIN" \]'
+assert_run "finding #3/L1: the venv is built with the pinned absolute-path python3, never a bare 'python3 -m venv'" \
   '"\$PYTHON3_BIN" -m venv "\$AOS_VENV"'
 
 # aos#193 review finding #4 (round 2): a real, committed, checksum-verified
