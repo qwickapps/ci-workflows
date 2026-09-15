@@ -1105,6 +1105,18 @@ jobs:
       needs.verify-provenance.result == 'success' &&
       needs.resolve-stage.outputs.stage == 'stable'
     runs-on: [self-hosted, macmini]
+    # verify-provenance already inspects the same image successfully in this
+    # same run -- but each job is a fresh environment, so its DOCKER_CONFIG
+    # (with the GHCR auth it wrote) is not inherited here. Without a step
+    # writing that same auth into THIS job's own Docker config, `docker
+    # buildx imagetools inspect` below falls back to an anonymous pull,
+    # which 401s against a private GHCR image (found 2026-09-15 -- this
+    # job appears to have never actually succeeded before, since deploy
+    # runs across the fleet almost never target stage=stable).
+    permissions:
+      packages: read
+    env:
+      DOCKER_CONFIG: /tmp/docker-stable-${{ github.run_id }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -1118,6 +1130,17 @@ jobs:
           sparse-checkout: |
             scripts
           sparse-checkout-cone-mode: false
+
+      - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$DOCKER_CONFIG/cli-plugins"
+          if [ -f "$HOME/.docker/cli-plugins/docker-buildx" ]; then
+            ln -sf "$HOME/.docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          fi
+          AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$DOCKER_CONFIG/config.json"
 
       - name: Ensure stable image exists
         run: |
