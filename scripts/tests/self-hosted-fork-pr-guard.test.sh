@@ -20,9 +20,14 @@
 #     self-hosted -- fails closed rather than requiring an exact
 #     "self-hosted" string match
 #   F/G: requires the job's normalized `if:` to equal the canonical guard
-#     exactly (or `<canonical> && (...)`), not a substring match -- a
-#     wrong-polarity guard (e.g. `event_name == 'pull_request' || ...`,
-#     which lets fork PRs straight through) no longer passes
+#     EXACTLY, not a substring match -- a wrong-polarity guard (e.g.
+#     `event_name == 'pull_request' || ...`, which lets fork PRs straight
+#     through) no longer passes. (Round 1 allowed `<canonical> && (...)`
+#     as an escape hatch for callers with extra conditions; round 3
+#     dropped it -- && binds tighter than || in GH Actions expression
+#     syntax, so appending anything after the unparenthesized canonical
+#     OR-expression silently defeats the guard. No job here used the
+#     allowance.)
 #   H/I: scans every fork-controllable trigger (pull_request,
 #     pull_request_review, pull_request_review_comment, issue_comment,
 #     merge_group), not just pull_request
@@ -78,15 +83,18 @@ def normalize_expr(s):
     return re.sub(r'\s+', ' ', s.strip())
 
 def guard_is_canonical(job_if):
+    # Exact match only. A '<canonical> && (...)' allowance was tried and
+    # dropped (round 3 review): && binds tighter than || in GitHub Actions
+    # expression syntax, so \"A || B && (x)\" parses as \"A || (B && (x))\" --
+    # appending anything after the unparenthesized canonical OR-expression
+    # silently defeats it for fork PRs (event_name != 'pull_request' being
+    # true short-circuits the whole thing regardless of the appended
+    # condition, but for an actual pull_request event the fork-check clause
+    # B is now gated behind an unrelated (x), which a fork PR can trivially
+    # satisfy or which may evaluate true anyway). No job in this repo uses
+    # the allowance, so dropping it costs nothing here.
     norm = normalize_expr(job_if)
-    if norm is None:
-        return False
-    if norm == CANONICAL:
-        return True
-    # allow additional caller-specific conditions ANDed on, e.g.
-    # \"<canonical> && (some_other_condition)\"
-    prefix = CANONICAL + ' && ('
-    return norm.startswith(prefix) and norm.endswith(')')
+    return norm == CANONICAL
 
 def is_github_hosted_label(label):
     if not isinstance(label, str):
@@ -155,7 +163,7 @@ def check_job(file_label, job_id, job, fork_triggered, visited_callees):
                 findings.append({'file': file_label, 'job': job_id, 'problems': ['no if: guard at all']})
             elif not guard_is_canonical(job_if):
                 findings.append({'file': file_label, 'job': job_id, 'problems': [
-                    f'if: present but is not the canonical guard (or <canonical> && (...)): {job_if!r}'
+                    f'if: present but does not match the canonical guard exactly: {job_if!r}'
                 ]})
         return
 
