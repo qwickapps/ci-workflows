@@ -1,0 +1,45 @@
+name: Create Blue-Green Check-Run Tests
+
+# Regression gate for scripts/create-blue-green-check-run.sh (aos#193
+# Phase 1 §1/§2/§5): the shared writer both blue-green check-run records
+# (first-deploy-used, live-e2e-approved) go through. Primary focus is
+# aos#193 review §5 mutation gap "P5": --on-permission-denied skip must
+# swallow ONLY a genuine 403 ("HTTP 403" / "Resource not accessible by
+# integration"), never any other `gh api` failure (network error, rate
+# limit, malformed payload, ...) -- broadening that match would let skip
+# silently hide a real outage as if it were the documented
+# "checks:write not granted yet (Phase 1b)" case.
+#
+# Tests:
+#   bash scripts/tests/create-blue-green-check-run.test.sh
+#     - invokes the real script as a subprocess with gh replaced by a
+#       mock first on PATH.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/create-blue-green-check-run.sh'
+      - '.github/workflows/create-blue-green-check-run-tests.yml'
+      - 'scripts/tests/create-blue-green-check-run.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/create-blue-green-check-run.sh'
+      - 'scripts/tests/create-blue-green-check-run.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: create-blue-green-check-run.sh tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: see the sibling comment in
+    # deploy-app-stage-host-gate-tests.yml for why this guard is needed.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run create-blue-green-check-run.sh tests
+        run: bash scripts/tests/create-blue-green-check-run.test.sh
