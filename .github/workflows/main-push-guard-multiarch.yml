@@ -158,6 +158,25 @@ jobs:
     needs: [validate-platforms]
     runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
+      - name: Validate package_manager input
+        # Fleet follow-up on ci-workflows#181: every install/build/test step
+        # below is individually gated by `inputs.package_manager == 'npm' |
+        # 'pnpm'`. Before this check, an unrecognized value (typo, or a
+        # manager other than npm/pnpm) matched none of those `if:` conditions
+        # and every step was silently skipped — the Test job still reported
+        # green with zero install/build/test steps having run. Fail loudly
+        # instead, before checkout, naming the bad value and the options.
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: |
+          set -euo pipefail
+          case "${{ inputs.package_manager }}" in
+            npm|pnpm) ;;
+            *)
+              echo "::error::inputs.package_manager='${{ inputs.package_manager }}' is not a recognized package manager. Valid options: npm, pnpm."
+              exit 1
+              ;;
+          esac
+
       - name: Prepare runner (per-job hygiene)
         shell: bash
         run: |
