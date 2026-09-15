@@ -1484,6 +1484,18 @@ jobs:
         # (default) reproduces today's deploy-stable behavior exactly, with
         # no gate at all.
         if: inputs.require_live_approval_check == true
+        env:
+          # aos#193 review finding L2 (round 3): every other call site in
+          # this workflow passes its GitHub token via `env: GH_TOKEN` and
+          # references "$GH_TOKEN" in the script body -- this step was the
+          # one exception, passing "${{ github.token }}" directly as a
+          # `--github-token` argv value, which is visible to any other
+          # process on the shared macmini runner via `ps`. Match the
+          # existing convention.
+          GH_TOKEN: ${{ github.token }}
+          STABLE_GATE_REPO: ${{ github.repository }}
+          STABLE_GATE_APP_NAME: ${{ inputs.app_name }}
+          STABLE_GATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           chmod +x .ci-workflows/scripts/*.sh
@@ -1517,12 +1529,25 @@ jobs:
           # be absolute (not just "command -v succeeded") is the concrete,
           # auditable check: it is logged here so a suspicious resolution
           # is visible in the job log, not silently trusted.
-          PYTHON3_BIN="$(command -v python3 || true)"
-          if [ -z "$PYTHON3_BIN" ] || [[ "$PYTHON3_BIN" != /* ]]; then
-            echo "::error::verify-stable-gate: could not resolve python3 to an absolute path (got '${PYTHON3_BIN:-<empty>}') -- refusing to build the aos venv with an unresolved interpreter" >&2
+          #
+          # aos#193 review finding (LOW, round 3): `command -v python3`
+          # was not actually a fix -- it returns an absolute path for a
+          # STUB `python3` too, as long as the stub sits somewhere earlier
+          # on PATH (for example /tmp/x/python3). "Is the resolved path
+          # absolute" proves nothing about which binary it is. Pin to a
+          # single, fixed, well-known path instead of resolving from PATH
+          # at all: macOS's own Command Line Tools always provide
+          # /usr/bin/python3 on every self-hosted macmini runner (it is
+          # part of the base OS, not something a job or a stale PATH entry
+          # can shadow ahead of it, since this script never consults PATH
+          # to find it). Refuse outright if that exact path is missing or
+          # not executable -- no PATH-based fallback, ever.
+          PYTHON3_BIN="/usr/bin/python3"
+          if [ ! -x "$PYTHON3_BIN" ]; then
+            echo "::error::verify-stable-gate: fixed interpreter '$PYTHON3_BIN' is missing or not executable on this runner -- refusing to build the aos venv (this is deliberately NOT a PATH-based lookup, see the comment above)" >&2
             exit 1
           fi
-          echo "Using python3 interpreter: $PYTHON3_BIN"
+          echo "Using fixed python3 interpreter: $PYTHON3_BIN"
 
           # Pinned to the exact reviewed/merged commit the aos#193 design
           # doc built this contract against (round-6 review, 197 tests
@@ -1600,10 +1625,10 @@ jobs:
           mkdir -p "$AOS_ENV_ROOT"
 
           .ci-workflows/scripts/verify-stable-gate.sh \
-            --github-token "${{ github.token }}" \
-            --repo "${{ github.repository }}" \
-            --app-name "${{ inputs.app_name }}" \
-            --sha "${{ github.sha }}" \
+            --github-token "$GH_TOKEN" \
+            --repo "$STABLE_GATE_REPO" \
+            --app-name "$STABLE_GATE_APP_NAME" \
+            --sha "$STABLE_GATE_SHA" \
             --aos-bin "$AOS_BIN" \
             --aos-environment-root "$AOS_ENV_ROOT" \
             --aos-manifest "$AOS_MANIFEST_ABS_PATH"
