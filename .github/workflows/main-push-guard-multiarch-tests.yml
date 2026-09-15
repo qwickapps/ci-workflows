@@ -1,0 +1,52 @@
+name: Main Push Guard Multiarch Tests
+
+# Regression gate for the ci-workflows#182 review finding: the
+# "Validate package_manager input" step in main-push-guard-multiarch.yml
+# (added in #181) originally interpolated `${{ inputs.package_manager }}`
+# directly into the shell, so a value like `$(echo INJECTED >&2)npm` ran
+# the injected command, evaluated to `npm`, passed validation, and every
+# install/build/test step then silently skipped (each is individually
+# gated on the raw, unexpanded input equalling the literal 'npm'/'pnpm') —
+# the Test job went green having run nothing. Nothing caught it because
+# nothing tested this file's validation step. This gate exists so a
+# future edit that reintroduces direct `${{ }}` interpolation there fails
+# loudly on the PR instead of silently reappearing.
+#
+# Tests:
+#   bash scripts/tests/main-push-guard-multiarch-package-manager.test.sh
+#     - the validation step is jobs.test's first step, passes
+#       PACKAGE_MANAGER through env: (never raw ${{ }} in the script),
+#       and its script actually accepts npm/pnpm and rejects everything
+#       else, including the review's injection PoC.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/main-push-guard-multiarch.yml'
+      - '.github/workflows/main-push-guard-multiarch-tests.yml'
+      - 'scripts/tests/main-push-guard-multiarch-package-manager.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/main-push-guard-multiarch.yml'
+      - 'scripts/tests/main-push-guard-multiarch-package-manager.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  package-manager-validation:
+    name: main-push-guard-multiarch.yml package_manager validation tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Run package_manager validation test
+        run: bash scripts/tests/main-push-guard-multiarch-package-manager.test.sh
