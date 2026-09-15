@@ -18,12 +18,14 @@ on:
   pull_request:
     paths:
       - 'scripts/verify-stable-gate.sh'
+      - 'scripts/lib/check-run-binding.sh'
       - '.github/workflows/verify-stable-gate-tests.yml'
       - 'scripts/tests/verify-stable-gate.test.sh'
   push:
     branches: [main, dev]
     paths:
       - 'scripts/verify-stable-gate.sh'
+      - 'scripts/lib/check-run-binding.sh'
       - 'scripts/tests/verify-stable-gate.test.sh'
 
 permissions:
