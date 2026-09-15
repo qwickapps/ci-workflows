@@ -256,6 +256,13 @@ echo "check-first-deploy-proof: GHCR release/stable tag history found=${GHCR_TAG
 
 # ── Check 3: single-use marker absence (this commit only -- see limitation
 #    note above), scoped and bound to THIS app + a legitimate creator ────
+# aos#193 review finding #2 (BLOCKER B2, round 3): the exact step name that
+# creates this marker, matched against
+# check_run_binding_verify's job/step binding check (fifth argument) --
+# must match deploy-app.yml's "Mark first-deploy-used (aos#193 Phase 1 §2)"
+# step exactly, so a run that merely referenced deploy-app.yml without ever
+# reaching that specific step cannot satisfy the binding.
+MARKER_CREATING_STEP_NAME="Mark first-deploy-used (aos#193 Phase 1 §2)"
 MARKER_CHECK_NAME="blue-green/first-deploy-used/${APP_NAME}"
 MARKER_CHECK_NAME_ENCODED="$(jq -rn --arg n "$MARKER_CHECK_NAME" '$n | @uri')"
 echo "check-first-deploy-proof: checking for an existing '${MARKER_CHECK_NAME}' marker on ${COMMIT_SHA}..." >&2
@@ -308,9 +315,24 @@ if [ "$MARKER_CANDIDATE_COUNT" != "0" ]; then
       [ -z "$candidate" ] && continue
       CAND_APP_SLUG="$(printf '%s' "$candidate" | jq -r '.app_slug')"
       CAND_EXTERNAL_ID="$(printf '%s' "$candidate" | jq -r '.external_id')"
-      if check_run_binding_verify "$REPO" "$COMMIT_SHA" "$CAND_APP_SLUG" "$CAND_EXTERNAL_ID"; then
+      if check_run_binding_verify "$REPO" "$COMMIT_SHA" "$CAND_APP_SLUG" "$CAND_EXTERNAL_ID" "$MARKER_CREATING_STEP_NAME"; then
         MARKER_FOUND="true"
         break
+      else
+        # aos#193 review finding #2 (BLOCKER B2, round 3): a return of 2
+        # means the binding could NOT be verified (a transient API
+        # failure, or the creating run has not completed yet) -- that is
+        # NOT evidence the marker is absent. Silently continuing the loop
+        # (as if this candidate simply didn't match) would let a rate
+        # limit or a still-in-progress run make a real single-use marker
+        # disappear exactly when GitHub is degraded. Only a return of 1
+        # (a definitive structural mismatch) is safe to treat as "keep
+        # looking at the next candidate".
+        binding_rc=$?
+        if [ "$binding_rc" -eq 2 ]; then
+          echo "::error::check-first-deploy-proof: refusing to conclude first-deploy status -- a candidate '${MARKER_CHECK_NAME}' record's creator binding could not be verified (see the check-run-binding error above); this is NOT evidence the marker is absent, so the whole check fails closed rather than silently skipping it" >&2
+          exit 1
+        fi
       fi
     done < <(printf '%s' "$PAYLOAD_MATCHING_CANDIDATES" | jq -c '.[]')
     if [ "$MARKER_FOUND" != "true" ]; then
