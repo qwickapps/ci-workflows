@@ -1,0 +1,334 @@
+name: Main Push Guard Multi-Arch (Reusable)
+
+# Opt-in multi-arch sibling of main-push-guard.yml (aos#124 follow-up to the
+# closed ci-workflows#173).
+#
+# ci-workflows#173 tried to add multi-arch buildx support by editing
+# main-push-guard.yml in place. Independent review found that this changed
+# behaviour for all 6 existing callers (force-removing other jobs'
+# in-flight BuildKit containers, moving every build onto an untested
+# docker-container builder path) and failed the #180 reusable-workflow
+# signature guard, which hard-fails ANY key-set change to an existing
+# reusable workflow's `on.workflow_call.inputs/outputs/secrets`.
+#
+# This file is a brand-new reusable workflow instead: main-push-guard.yml is
+# not touched, so its 6 existing callers keep byte-identical behaviour, and
+# the #180 guard passes cleanly (a new file with no prior signature to diff
+# against is explicitly fine per scripts/check-reusable-workflow-signatures.sh).
+# Only callers that explicitly point `uses:` at this file opt into multi-arch.
+#
+# Also folds in the projects#110 review finding that main-push-guard.yml's
+# Test job hardcodes `pnpm install --frozen-lockfile` regardless of which
+# lockfile a caller actually committed: this file takes an explicit
+# `package_manager` input instead of guessing.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'Project language (ts | js | go | python)'
+        required: false
+        type: string
+        default: 'ts'
+      package_manager:
+        description: 'Node package manager to use for install/build/test (npm | pnpm) — must match the lockfile actually committed in the caller repo'
+        required: false
+        type: string
+        default: 'pnpm'
+      image_name:
+        description: 'Docker image name (e.g. img-forge)'
+        required: true
+        type: string
+      dockerfile_path:
+        description: 'Path to the Dockerfile relative to repo root'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      node_version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '20'
+      runs_on:
+        description: 'Runner label(s) as a JSON array string'
+        required: false
+        type: string
+        default: '["self-hosted", "macmini"]'
+      enforce_blue_green_deploy_contract:
+        description: 'Fail changed .github/workflows/*deploy*.yml files unless they call the canonical blue-green reusable workflow or carry an exemption.'
+        required: false
+        type: boolean
+        default: true
+      platforms:
+        description: 'REQUIRED. Comma-separated buildx platform list, e.g. linux/amd64,linux/arm64. No default — an empty or missing value fails the run rather than silently building for whatever buildx would pick on its own.'
+        required: true
+        type: string
+    secrets:
+      GHCR_PUSH_TOKEN:
+        required: false
+    outputs:
+      image_ref:
+        description: 'Fully-qualified image ref that was built and pushed (registry/owner/image:sha-tag), a multi-arch manifest list'
+        value: ${{ jobs.build-push.outputs.image_ref }}
+      image_tag:
+        description: 'Just the sha-<short> tag portion of image_ref'
+        value: ${{ jobs.build-push.outputs.image_tag }}
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: qwickapps
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 0. Validate the platforms input before anything else runs
+  # ---------------------------------------------------------------------------
+  validate-platforms:
+    name: Validate platforms input
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Reject empty/malformed platforms
+        run: |
+          set -euo pipefail
+          PLATFORMS="${{ inputs.platforms }}"
+          if [ -z "$PLATFORMS" ]; then
+            echo "::error::inputs.platforms is empty. This reusable workflow requires an explicit, non-empty platform list (e.g. linux/amd64,linux/arm64) — it will not silently fall back to a default or empty platform set."
+            exit 1
+          fi
+          if ! [[ "$PLATFORMS" =~ ^linux/[a-z0-9]+(/v[0-9]+)?(,linux/[a-z0-9]+(/v[0-9]+)?)*$ ]]; then
+            echo "::error::inputs.platforms='${PLATFORMS}' is not a valid comma-separated linux/<arch> list (no spaces)."
+            exit 1
+          fi
+          echo "platforms OK: ${PLATFORMS}"
+
+  # ---------------------------------------------------------------------------
+  # 1. Blue-green deploy contract guard (unchanged from main-push-guard.yml)
+  # ---------------------------------------------------------------------------
+  blue-green-deploy-contract:
+    name: Blue-Green Deploy Contract
+    if: inputs.enforce_blue_green_deploy_contract
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout ci-workflows guard script
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          path: .ci-workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute changed file range
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=50
+            BASE_SHA="$(git merge-base "origin/${{ github.base_ref }}" HEAD)"
+            HEAD_SHA="${{ github.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            BASE_SHA="HEAD^"
+            HEAD_SHA="HEAD"
+          else
+            BASE_SHA=""
+            HEAD_SHA="HEAD"
+          fi
+
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Blue-green guard range: ${BASE_SHA:-<initial>}..${HEAD_SHA}"
+
+      - name: Enforce reusable deploy workflow
+        env:
+          BASE_SHA: ${{ steps.diff.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.diff.outputs.head_sha }}
+        run: |
+          chmod +x .ci-workflows/scripts/blue-green-workflow-guard.sh
+          .ci-workflows/scripts/blue-green-workflow-guard.sh
+
+  # ---------------------------------------------------------------------------
+  # 2. Test (type-check + unit tests) — package-manager aware
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    needs: [validate-platforms]
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Prepare runner (per-job hygiene)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The self-hosted macOS runners re-degrade between jobs (pnpm/npm
+          # cache, docker keychain, stale git auth, temp dir). Neutralize the
+          # recurring failure modes deterministically BEFORE checkout so runs
+          # are reliable.
+          mkdir -p "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          git config --global --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.docker/config.json" ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore) | del(.credHelpers)' "$HOME/.docker/config.json" > "$tmp" 2>/dev/null \
+              && mv "$tmp" "$HOME/.docker/config.json" || rm -f "$tmp"
+          fi
+          command -v pnpm >/dev/null 2>&1 && pnpm store prune >/dev/null 2>&1 || true
+          echo "runner hygiene complete"
+
+      - uses: actions/checkout@v4
+        with:
+          # .ci-workflows is CI tooling, not app code. Skip persisting the auth
+          # header into the submodule — that step fails on the macOS self-hosted
+          # runner ("Unable to replace auth placeholder in .git/config"). The
+          # submodule is still fetched; build/test are read-only and don't push.
+          persist-credentials: false
+
+      - name: Reset and init ci-workflows submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .gitmodules ]; then
+            submodule_paths="$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' || true)"
+            while IFS= read -r submodule_path; do
+              [ -n "$submodule_path" ] || continue
+              if git -C "$submodule_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$submodule_path" checkout -- .
+              fi
+            done <<< "$submodule_paths"
+            git submodule update --init
+          fi
+
+      - name: Setup Node.js
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install pnpm
+        if: (inputs.language == 'ts' || inputs.language == 'js') && inputs.package_manager == 'pnpm'
+        # --force overwrites stale pnpm/pnpx symlinks left in the reused node
+        # toolcache on the self-hosted runner (npm errors EEXIST otherwise).
+        run: npm install -g pnpm --force
+
+      - name: Install dependencies (pnpm)
+        if: (inputs.language == 'ts' || inputs.language == 'js') && inputs.package_manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
+
+      - name: Install dependencies (npm)
+        if: (inputs.language == 'ts' || inputs.language == 'js') && inputs.package_manager == 'npm'
+        run: npm ci
+
+      - name: Type check + build (pnpm)
+        if: inputs.language == 'ts' && inputs.package_manager == 'pnpm'
+        run: pnpm build
+
+      - name: Type check + build (npm)
+        if: inputs.language == 'ts' && inputs.package_manager == 'npm'
+        run: npm run build
+
+      - name: Run tests (pnpm)
+        if: (inputs.language == 'ts' || inputs.language == 'js') && inputs.package_manager == 'pnpm'
+        run: pnpm test
+
+      - name: Run tests (npm)
+        if: (inputs.language == 'ts' || inputs.language == 'js') && inputs.package_manager == 'npm'
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # 3. Build and push multi-arch Docker image (tagged with commit SHA)
+  # ---------------------------------------------------------------------------
+  build-push:
+    name: Build and Push Multi-Arch Docker Image
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    needs: [validate-platforms, test]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_CONFIG: /tmp/docker-config-${{ github.run_id }}
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Prepare runner (per-job hygiene)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Same per-job hygiene as the Test job — see note there. Runs before
+          # checkout so the build job is reliable on the re-degrading runners.
+          mkdir -p "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          git config --global --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.docker/config.json" ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore) | del(.credHelpers)' "$HOME/.docker/config.json" > "$tmp" 2>/dev/null \
+              && mv "$tmp" "$HOME/.docker/config.json" || rm -f "$tmp"
+          fi
+          command -v pnpm >/dev/null 2>&1 && pnpm store prune >/dev/null 2>&1 || true
+          echo "runner hygiene complete"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Reset and init ci-workflows submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .gitmodules ]; then
+            submodule_paths="$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' || true)"
+            while IFS= read -r submodule_path; do
+              [ -n "$submodule_path" ] || continue
+              if git -C "$submodule_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$submodule_path" checkout -- .
+              fi
+            done <<< "$submodule_paths"
+            git submodule update --init
+          fi
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA="${{ github.sha }}"
+          TAG="sha-${SHA:0:7}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ inputs.image_name }}:${TAG}"
+          echo "image_ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Authenticate to GHCR (direct config write — no docker login/keychain)
+        # See main-push-guard.yml's build-push job for why: docker/login-action
+        # invokes the osxkeychain helper on this self-hosted macOS runner and
+        # fails headless. Write registry auth straight into the isolated
+        # DOCKER_CONFIG so buildx pushes with it and docker login is never called.
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          AUTH="$(printf '%s:%s' '${{ github.actor }}' "$GHCR_TOKEN" | base64 | tr -d '\n')"
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {"auths":{"${{ env.REGISTRY }}":{"auth":"$AUTH"}}}
+          EOF
+
+      - name: Build and push multi-arch Docker image
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ steps.meta.outputs.image_ref }}"
+          docker --config "$DOCKER_CONFIG" buildx build \
+            --platform "${{ inputs.platforms }}" \
+            --push \
+            --provenance=false \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t "$IMAGE_REF" \
+            -f "${{ inputs.dockerfile_path }}" \
+            .
