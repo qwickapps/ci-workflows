@@ -7,12 +7,20 @@
 #
 #   1. At least one `blue-green/live-e2e-approved` check run on the exact
 #      commit sha about to deploy to stable, with conclusion == 'success'.
-#      Zero means never approved -- refused. Among any that DO exist, the
+#      Zero means never approved -- refused. Among the successful,
+#      payload-matched candidates, at most one may name any given run_id
+#      (see aos#193 review finding B4b, round 6 -- two or more sharing a
+#      run_id, at ANY attempt, refuses outright as ambiguous, since
+#      "Re-run failed jobs" gives a genuinely-approved run a second
+#      attempt that copies its already-passed jobs forward, and a forged
+#      record naming that new attempt would otherwise bind and, being
+#      newer, win). Among the (at most one per run_id) survivors, the
 #      MOST RECENT one (highest check-run id) that also passes checks 3
 #      and 4 below is selected deterministically -- see aos#193 review
 #      finding M2 (round 4): requiring exact uniqueness here used to let a
 #      routine "Re-run all jobs" on an already-approved live run (which
-#      creates a second, equally legitimate check run) permanently refuse
+#      creates a second, equally legitimate check run FOR A DIFFERENT
+#      run_id -- e.g. a full workflow re-dispatch) permanently refuse
 #      stable for that sha. A candidate that fails 3 or 4 is skipped in
 #      favor of an older one; this does not reopen a forgery risk, because
 #      every candidate -- however many exist -- must independently pass
@@ -271,21 +279,45 @@ if [ -z "$CANDIDATES" ]; then
   refuse "no_successful_check_run" "found ${COUNT} '${CHECK_NAME}' check run(s) on ${SHA}, but none has conclusion='success' with a payload matching repo/app_name/sha/stage=live"
 fi
 
-# aos#193 review finding B4 (BLOCKER, round 5): group the real contenders
-# by the (run_id, run_attempt) their external_id names -- a MALFORMED
-# external_id groups under its own literal (raw) value, which two
-# candidates could only share by both being malformed the exact same
-# way, an edge case the binding check's own malformed-external_id refusal
-# already handles independently. Two OR MORE candidates naming the same
-# run+attempt is never legitimate; refuse before ever running the binding
-# check on either.
-DUPLICATE_RUN_REF="$(printf '%s' "$CANDIDATES" | jq -s -c '
-  group_by(.external_id) | map(select(length > 1)) | .[0] // empty
+# aos#193 review finding B4b (BLOCKER, round 6): round 5 grouped by the
+# raw external_id STRING (effectively (run_id, run_attempt)), which a
+# forger could evade two confirmed ways:
+#   1. "Re-run failed jobs" gives a genuinely-approved run a SECOND
+#      attempt that copies its already-passed jobs forward (confirmed
+#      live: qwickapps/protocols run 34785141909's attempt 2 lists the
+#      previously-passed jobs with the SAME started_at under new job ids,
+#      only the actually-failed job re-executes) -- so a forged record
+#      naming "777-2" (a different attempt of the SAME real run as a
+#      genuine "777-1") grouped separately and evaded the round-5 check
+#      entirely, while still binding successfully (the run itself really
+#      is legitimate) and, being newer, winning.
+#   2. Leading zeros: GitHub's API resolves "actions/runs/035002254495"
+#      and ".../attempts/01/jobs" to the exact same run/attempt as
+#      "35002254495"/"1" (confirmed live) -- so "0777-1" named the same
+#      run as a genuine "777-1" but grouped as a different STRING.
+#
+# Fix: group by the run_id ALONE (not run_id+attempt), as its normalized
+# INTEGER value (so "0777" and "777" collapse to the same key) -- two or
+# more candidates naming the same run_id, at ANY attempt, is refused. This
+# accepts a real consequence: a legitimate "Re-run all jobs" that
+# produces a second genuinely-approved record for the SAME run also now
+# refuses (there is no way to tell it apart from the forged-attempt case
+# above using only what the check-runs API exposes) -- the refusal
+# message says so explicitly, since the remedy is simple: dispatch a
+# fresh live run rather than rerunning the old one.
+DUP_RUN_ID_GROUPS="$(printf '%s' "$CANDIDATES" | jq -s -c '
+  def run_id_key:
+    if (.external_id | test("^[0-9]+-[0-9]+$")) then
+      (.external_id | capture("^(?<rid>[0-9]+)-(?<att>[0-9]+)$").rid | tonumber)
+    else
+      .external_id
+    end;
+  group_by(run_id_key) | map(select(length > 1)) | .[0] // empty
 ')"
-if [ -n "$DUPLICATE_RUN_REF" ] && [ "$DUPLICATE_RUN_REF" != "null" ]; then
-  DUP_EXTERNAL_ID="$(printf '%s' "$DUPLICATE_RUN_REF" | jq -r '.[0].external_id')"
-  DUP_IDS="$(printf '%s' "$DUPLICATE_RUN_REF" | jq -c '[.[].id]')"
-  refuse "ambiguous_duplicate_run_reference" "check-run ids ${DUP_IDS} all name external_id='${DUP_EXTERNAL_ID}' -- a legitimate run+attempt can create at most one record, so two or more candidates naming the same one is never legitimate (aos#193 review finding B4, round 5) -- refusing rather than silently trusting whichever has the highest id"
+if [ -n "$DUP_RUN_ID_GROUPS" ] && [ "$DUP_RUN_ID_GROUPS" != "null" ]; then
+  DUP_IDS="$(printf '%s' "$DUP_RUN_ID_GROUPS" | jq -c '[.[].id]')"
+  DUP_EXTERNAL_IDS="$(printf '%s' "$DUP_RUN_ID_GROUPS" | jq -c '[.[].external_id]')"
+  refuse "ambiguous_duplicate_run_reference" "check-run ids ${DUP_IDS} (external_id values ${DUP_EXTERNAL_IDS}) all name the same run_id -- whether from a leading-zero string or a second attempt of the same run, a given run_id can be legitimately claimed by at most one record here, so two or more is never legitimate (aos#193 review finding B4b, round 6) -- refusing rather than silently trusting whichever has the highest id. If this is a genuine rerun, dispatch a fresh live run rather than re-running the old one; a new run_id resolves this cleanly."
 fi
 
 LIVE_APPROVED_CREATING_STEP_NAME="Create live-e2e-approved check run (aos#193 Phase 1 §1)"
