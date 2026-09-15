@@ -632,7 +632,20 @@ jobs:
           # the whole reusable workflow at load time), so DOCKER_CONFIG is
           # computed here and exported via GITHUB_ENV instead -- same pattern
           # the build and retag jobs already use below.
-          DOCKER_CONFIG="${RUNNER_TEMP}/docker-vp-${{ github.run_id }}"
+          #
+          # This exact path is also recomputed independently (not read back
+          # from $DOCKER_CONFIG) by the cleanup step below -- actions-runner-
+          # critical-macmini's own .env sets a persistent, ambient
+          # DOCKER_CONFIG for this runner. If this step fails on any line
+          # before its GITHUB_ENV export (mkdir/symlink/printf), that export
+          # never runs, so $DOCKER_CONFIG in every later step -- including
+          # the always()-run cleanup step -- would silently fall back to the
+          # runner's own ambient value instead of this job's temp one, and a
+          # naive `rm -rf "$DOCKER_CONFIG"` would delete the runner's real
+          # Docker config for every job that ever runs there. Recomputing
+          # the same deterministic path independently in cleanup means it
+          # never depends on this export having succeeded.
+          DOCKER_CONFIG="${RUNNER_TEMP}/ghcr-docker-config-${GITHUB_RUN_ID}-${GITHUB_JOB}"
           # umask 077: this runner is shared (self-hosted, macmini) -- the
           # default mode would leave config.json (containing a GHCR token)
           # world/group-readable to every other job/user on the same box.
@@ -663,7 +676,20 @@ jobs:
           fi
       - name: Remove GHCR credentials
         if: always()
-        run: rm -rf "$DOCKER_CONFIG"
+        run: |
+          # Deliberately NOT reading $DOCKER_CONFIG here -- see the comment
+          # in the credential step above. This recomputes the exact same
+          # deterministic path independently, so a credential step that
+          # failed before exporting DOCKER_CONFIG can never cause this to
+          # delete the runner's own ambient DOCKER_CONFIG. The case guard
+          # is a second, independent line of defense against ever deleting
+          # anything outside RUNNER_TEMP, even under a future refactor.
+          set -euo pipefail
+          TARGET="${RUNNER_TEMP:?RUNNER_TEMP not set}/ghcr-docker-config-${GITHUB_RUN_ID}-${GITHUB_JOB}"
+          case "$TARGET" in
+            "$RUNNER_TEMP"/*) rm -rf "$TARGET" ;;
+            *) echo "::error::refusing to delete outside RUNNER_TEMP: $TARGET"; exit 1 ;;
+          esac
 
   # -- CapRover deployment --------------------------------------------
   deploy-caprover:
@@ -1153,7 +1179,20 @@ jobs:
           # the whole reusable workflow at load time), so DOCKER_CONFIG is
           # computed here and exported via GITHUB_ENV instead -- same pattern
           # the build and retag jobs already use below.
-          DOCKER_CONFIG="${RUNNER_TEMP}/docker-stable-${{ github.run_id }}"
+          #
+          # This exact path is also recomputed independently (not read back
+          # from $DOCKER_CONFIG) by the cleanup step below -- actions-runner-
+          # critical-macmini's own .env sets a persistent, ambient
+          # DOCKER_CONFIG for this runner. If this step fails on any line
+          # before its GITHUB_ENV export (mkdir/symlink/printf), that export
+          # never runs, so $DOCKER_CONFIG in every later step -- including
+          # the always()-run cleanup step -- would silently fall back to the
+          # runner's own ambient value instead of this job's temp one, and a
+          # naive `rm -rf "$DOCKER_CONFIG"` would delete the runner's real
+          # Docker config for every job that ever runs there. Recomputing
+          # the same deterministic path independently in cleanup means it
+          # never depends on this export having succeeded.
+          DOCKER_CONFIG="${RUNNER_TEMP}/ghcr-docker-config-${GITHUB_RUN_ID}-${GITHUB_JOB}"
           # umask 077: this runner is shared (self-hosted, macmini) -- the
           # default mode would leave config.json (containing a GHCR token)
           # world/group-readable to every other job/user on the same box.
@@ -1306,4 +1345,17 @@ jobs:
 
       - name: Remove GHCR credentials
         if: always()
-        run: rm -rf "$DOCKER_CONFIG"
+        run: |
+          # Deliberately NOT reading $DOCKER_CONFIG here -- see the comment
+          # in the credential step above. This recomputes the exact same
+          # deterministic path independently, so a credential step that
+          # failed before exporting DOCKER_CONFIG can never cause this to
+          # delete the runner's own ambient DOCKER_CONFIG. The case guard
+          # is a second, independent line of defense against ever deleting
+          # anything outside RUNNER_TEMP, even under a future refactor.
+          set -euo pipefail
+          TARGET="${RUNNER_TEMP:?RUNNER_TEMP not set}/ghcr-docker-config-${GITHUB_RUN_ID}-${GITHUB_JOB}"
+          case "$TARGET" in
+            "$RUNNER_TEMP"/*) rm -rf "$TARGET" ;;
+            *) echo "::error::refusing to delete outside RUNNER_TEMP: $TARGET"; exit 1 ;;
+          esac
