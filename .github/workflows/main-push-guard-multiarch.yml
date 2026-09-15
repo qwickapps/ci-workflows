@@ -87,9 +87,10 @@ jobs:
     runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - name: Reject empty/malformed platforms
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           set -euo pipefail
-          PLATFORMS="${{ inputs.platforms }}"
           if [ -z "$PLATFORMS" ]; then
             echo "::error::inputs.platforms is empty. This reusable workflow requires an explicit, non-empty platform list (e.g. linux/amd64,linux/arm64) — it will not silently fall back to a default or empty platform set."
             exit 1
@@ -158,6 +159,27 @@ jobs:
     needs: [validate-platforms]
     runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
+      - name: Validate package_manager input
+        # Fleet follow-up on ci-workflows#181: every install/build/test step
+        # below is individually gated by `inputs.package_manager == 'npm' |
+        # 'pnpm'`. Before this check, an unrecognized value (typo, or a
+        # manager other than npm/pnpm) matched none of those `if:` conditions
+        # and every step was silently skipped — the Test job still reported
+        # green with zero install/build/test steps having run. Fail loudly
+        # instead, before checkout, naming the bad value and the options.
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          case "$PACKAGE_MANAGER" in
+            npm|pnpm) ;;
+            *)
+              echo "::error::inputs.package_manager='${PACKAGE_MANAGER}' is not a recognized package manager. Valid options: npm, pnpm."
+              exit 1
+              ;;
+          esac
+
       - name: Prepare runner (per-job hygiene)
         shell: bash
         run: |
@@ -289,10 +311,17 @@ jobs:
 
       - name: Generate image metadata
         id: meta
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
         run: |
+          set -euo pipefail
+          if ! [[ "$IMAGE_NAME" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::inputs.image_name='${IMAGE_NAME}' is not a valid image name (expected [a-z0-9][a-z0-9._-]*)."
+            exit 1
+          fi
           SHA="${{ github.sha }}"
           TAG="sha-${SHA:0:7}"
-          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ inputs.image_name }}:${TAG}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${IMAGE_NAME}:${TAG}"
           echo "image_ref=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Image: ${IMAGE}"
@@ -320,15 +349,18 @@ jobs:
           EOF
 
       - name: Build and push multi-arch Docker image
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          DOCKERFILE_PATH: ${{ inputs.dockerfile_path }}
+          IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
         run: |
           set -euo pipefail
-          IMAGE_REF="${{ steps.meta.outputs.image_ref }}"
           docker --config "$DOCKER_CONFIG" buildx build \
-            --platform "${{ inputs.platforms }}" \
+            --platform "$PLATFORMS" \
             --push \
             --provenance=false \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             -t "$IMAGE_REF" \
-            -f "${{ inputs.dockerfile_path }}" \
+            -f "$DOCKERFILE_PATH" \
             .
