@@ -1146,11 +1146,15 @@ jobs:
         # aos#193 review finding #5: the check run's NAME is scoped to
         # this app (blue-green/live-e2e-approved/<app_name>, not a bare
         # shared name) so one app's approval on a commit can never satisfy
-        # a different app's stable gate in a multi-app repo; app_name and
-        # workflow_ref are also embedded in output.text and re-verified by
-        # verify-stable-gate.sh on read, binding this record to
-        # {repo, app_name, sha, creating workflow run identity} in full,
-        # not just repo+sha. --on-permission-denied skip: see finding #1's
+        # a different app's stable gate in a multi-app repo; app_name is
+        # also embedded in output.text and re-verified by
+        # verify-stable-gate.sh on read. The creating run's identity
+        # itself (repo, sha, and proof it actually executed
+        # deploy-app.yml) is bound via --external-id below plus
+        # verify-stable-gate.sh's GitHub-Actions-API check -- see aos#193
+        # review finding #1 (round 2) and scripts/lib/check-run-binding.sh,
+        # never a self-reported workflow_ref text field.
+        # --on-permission-denied skip: see finding #1's
         # comment on create-blue-green-check-run.sh -- deploy-caprover has
         # no checks:write today by design (Phase 1b follow-up); a 403 here
         # must not fail a live deploy that already passed real e2e/health
@@ -1161,20 +1165,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # aos#193 review finding #1 (BLOCKER, round 2): no workflow_ref
+          # field is recorded here -- inside a reusable workflow,
+          # github.workflow_ref names the CALLER's workflow, never
+          # deploy-app.yml itself, and a self-reported text field is
+          # trivially forgeable anyway. The read side (verify-stable-gate.sh)
+          # instead independently verifies, via the GitHub Actions API,
+          # that THIS run (named below by --external-id) actually executed
+          # deploy-app.yml -- see scripts/lib/check-run-binding.sh.
           OUTPUT_JSON="$(jq -nc \
             --arg repo "${{ github.repository }}" \
             --arg app "${{ inputs.app_name }}" \
             --arg sha "${{ github.sha }}" \
             --arg stage "live" \
             --arg e2e_digest "${{ steps.e2e-command.outputs.e2e_digest }}" \
-            --arg workflow_ref "${{ github.workflow_ref }}" \
             '{
               repo: $repo,
               app_name: $app,
               sha: $sha,
               stage: $stage,
               e2e_digest: $e2e_digest,
-              workflow_ref: $workflow_ref,
               directive_payload: null,
               directive_signature: null,
               directive_body: null
@@ -1203,8 +1213,10 @@ jobs:
         # gating self-evident without relying on that transitively.
         #
         # aos#193 review finding #5: same app-scoped name + embedded
-        # app_name/workflow_ref binding as the live-e2e-approved check run
-        # above, and the identical --on-permission-denied skip reasoning
+        # app_name binding (plus the GitHub-Actions-API run binding via
+        # --external-id, aos#193 review finding #1) as the live-e2e-approved
+        # check run above, and the identical --on-permission-denied skip
+        # reasoning
         # (a missing marker here just means a LATER run's check 3 can't
         # see it -- checks 1/2 in check-first-deploy-proof.sh, which don't
         # depend on this marker, remain the primary proof; see that
@@ -1226,8 +1238,7 @@ jobs:
               --arg app "${{ inputs.app_name }}" \
               --arg sha "${{ github.sha }}" \
               --arg image "${{ needs.resolve-stage.outputs.image_ref }}" \
-              --arg workflow_ref "${{ github.workflow_ref }}" \
-              '{repo: $repo, app_name: $app, sha: $sha, image_ref: $image, workflow_ref: $workflow_ref}')" \
+              '{repo: $repo, app_name: $app, sha: $sha, image_ref: $image}')" \
             --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
             --on-permission-denied skip
 
@@ -1490,11 +1501,34 @@ jobs:
           # just exits 0 makes this step report PASS regardless of the
           # real directive).
           echo "::group::Installing pinned aos CLI (qwickapps/aos@41f0a59, aos#123/#125 directive verify) into a fresh per-job venv"
+
+          # aos#193 review finding #3 (LOW-but-required, round 2): resolve
+          # python3 to an absolute path ONCE, explicitly, and use that
+          # captured absolute path for every step that builds/verifies
+          # this venv -- never a bare `python3` re-resolved from PATH at
+          # each call site. This runner is shared; a stub `python3`
+          # earlier on PATH (or a stale leftover from an unrelated job on
+          # the same box) could otherwise fake the ENTIRE venv --
+          # including a forged dist-info/direct_url.json carrying the
+          # pinned commit -- defeating the commit-pin check below at its
+          # root, since everything downstream (pip, the aos binary itself)
+          # would then also be whatever that stub planted, not real
+          # venv-created binaries. Requiring the resolved path to actually
+          # be absolute (not just "command -v succeeded") is the concrete,
+          # auditable check: it is logged here so a suspicious resolution
+          # is visible in the job log, not silently trusted.
+          PYTHON3_BIN="$(command -v python3 || true)"
+          if [ -z "$PYTHON3_BIN" ] || [[ "$PYTHON3_BIN" != /* ]]; then
+            echo "::error::verify-stable-gate: could not resolve python3 to an absolute path (got '${PYTHON3_BIN:-<empty>}') -- refusing to build the aos venv with an unresolved interpreter" >&2
+            exit 1
+          fi
+          echo "Using python3 interpreter: $PYTHON3_BIN"
+
           # Pinned to the exact reviewed/merged commit the aos#193 design
           # doc built this contract against (round-6 review, 197 tests
           # passing), not @main -- bump this deliberately, not silently,
           # when aos ships a directive-verify-relevant change.
-          python3 -m venv "$AOS_VENV"
+          "$PYTHON3_BIN" -m venv "$AOS_VENV"
           "$AOS_VENV/bin/pip" install --quiet "git+https://github.com/qwickapps/aos.git@${AOS_PIN_COMMIT}"
 
           # Verify the installed binary's commit matches the pin exactly,
@@ -1511,6 +1545,22 @@ jobs:
             exit 1
           fi
           echo "Confirmed installed aos matches pinned commit ${AOS_PIN_COMMIT}"
+
+          # Defense in depth beyond the dist-info file check above: ask
+          # the VENV'S OWN python3 (absolute path, never bare `python3`)
+          # to actually import the installed package and report where it
+          # resolved from -- it must live inside this venv, not be
+          # satisfied by some other aos install a stub PATH entry could
+          # have smuggled in ahead of the venv's site-packages.
+          AOS_MODULE_FILE="$("$AOS_VENV/bin/python3" -c 'import aos, sys; sys.stdout.write(aos.__file__)')"
+          case "$AOS_MODULE_FILE" in
+            "$AOS_VENV"/*) ;;
+            *)
+              echo "::error::verify-stable-gate: the venv's own python3 resolved the 'aos' package to '${AOS_MODULE_FILE}', which is NOT inside ${AOS_VENV} -- refusing" >&2
+              exit 1
+              ;;
+          esac
+          echo "Confirmed the venv's own python3 imports aos from inside the venv: ${AOS_MODULE_FILE}"
           echo "::endgroup::"
 
           AOS_BIN="$AOS_VENV/bin/aos"
@@ -1519,13 +1569,33 @@ jobs:
             exit 1
           fi
 
+          # aos#193 review finding #4 (HIGH, round 2): pass a REAL,
+          # committed, checksum-verified manifest via --aos-manifest --
+          # never merely unset $AOS_MANIFEST and hope for a bundled
+          # default (aos@41f0a59 ships no manifest in its wheel at all;
+          # see verify-stable-gate.sh's header comment for the full
+          # correction of this script's previous, factually-wrong claim
+          # about a "bundled default manifest"). The checksum is a literal
+          # value recorded in THIS file's git history, independent of
+          # whatever the runner's filesystem currently holds -- so a
+          # compromised runner cannot silently swap the manifest's
+          # contents without this check catching it.
+          AOS_MANIFEST_PATH=".ci-workflows/scripts/aos-manifest/prime-manifest.yaml"
+          AOS_MANIFEST_EXPECTED_SHA256="86131c696dda7edb197a4814210ae9f566b8ae00953f5d5d62a7cd9dc09edbc7"
+          if [ ! -f "$AOS_MANIFEST_PATH" ]; then
+            echo "::error::verify-stable-gate: pinned manifest not found at ${AOS_MANIFEST_PATH} (expected from the ci-workflows checkout above)" >&2
+            exit 1
+          fi
+          AOS_MANIFEST_ACTUAL_SHA256="$(sha256sum "$AOS_MANIFEST_PATH" | awk '{print $1}')"
+          if [ "$AOS_MANIFEST_ACTUAL_SHA256" != "$AOS_MANIFEST_EXPECTED_SHA256" ]; then
+            echo "::error::verify-stable-gate: pinned manifest checksum mismatch -- ${AOS_MANIFEST_PATH} sha256='${AOS_MANIFEST_ACTUAL_SHA256}', expected '${AOS_MANIFEST_EXPECTED_SHA256}'. Refusing: this manifest must match exactly what this workflow file's own git history pins, never a runner-local substitute." >&2
+            exit 1
+          fi
+          AOS_MANIFEST_ABS_PATH="$(cd "$(dirname "$AOS_MANIFEST_PATH")" && pwd)/$(basename "$AOS_MANIFEST_PATH")"
+          echo "Confirmed pinned manifest checksum: ${AOS_MANIFEST_PATH} sha256=${AOS_MANIFEST_ACTUAL_SHA256}"
+
           # A fresh, job-scoped, empty environment root -- never the shared
           # macmini runner's ambient $AOS_ENVIRONMENT_ROOT, if any is set.
-          # verify-stable-gate.sh itself explicitly unsets $AOS_MANIFEST
-          # (never inherited) for the aos call, so manifest resolution
-          # always falls back to this pinned venv's own bundled default
-          # manifest -- see that script's header comment for why that is
-          # now a designed-in fail-closed guarantee, not an accident.
           AOS_ENV_ROOT="${RUNNER_TEMP}/aos-stable-gate-env-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$AOS_ENV_ROOT"
 
@@ -1535,7 +1605,8 @@ jobs:
             --app-name "${{ inputs.app_name }}" \
             --sha "${{ github.sha }}" \
             --aos-bin "$AOS_BIN" \
-            --aos-environment-root "$AOS_ENV_ROOT"
+            --aos-environment-root "$AOS_ENV_ROOT" \
+            --aos-manifest "$AOS_MANIFEST_ABS_PATH"
 
       - name: Resolve CapRover credentials
         run: |
