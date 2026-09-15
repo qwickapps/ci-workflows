@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Regression test for the ci-workflows#182 review finding on
+# Regression test for the ci-workflows#182 review findings on
 # main-push-guard-multiarch.yml (introduced in #181): the
 # "Validate package_manager input" step originally interpolated
 # `${{ inputs.package_manager }}` directly into the shell via
@@ -10,15 +10,22 @@
 # (each individually gated on `inputs.package_manager == 'npm'|'pnpm'`)
 # silently skipped, since the *raw, unexpanded* input string never
 # equalled the literal `npm`/`pnpm` those `if:` conditions compare
-# against — the Test job went green having run nothing.
+# against — the Test job went green having run nothing. Round 3 found
+# the same class of bug one step later: `image_name` was fixed at its
+# own interpolation site, but its value still flowed unvalidated into
+# `steps.meta.outputs.image_ref`, which the build step then
+# re-interpolated with `${{ steps.meta.outputs.image_ref }}`.
 #
-# This test asserts both halves of the fix stay in place:
-#   1. Structural: the validation step passes the input through `env:`
-#      (not `${{ }}` interpolated into `run:`), so a future edit can't
-#      silently reintroduce the injection.
-#   2. Behavioral: the step's own script, given each of a set of valid
-#      and invalid PACKAGE_MANAGER values, actually accepts/rejects
-#      correctly — including the exact injection PoC from the review.
+# This test asserts:
+#   1. Structural: the package_manager and platforms validation steps
+#      pass their inputs through `env:` (not `${{ }}` interpolated into
+#      `run:`), have the expected `if:`/no continue-on-error, and —
+#      whole-file — no `run:` block anywhere in this workflow contains a
+#      raw `${{ inputs.` or `${{ steps.` expression (round-3 LOW: a fix
+#      at one interpolation site doesn't prove there isn't another).
+#   2. Behavioral: both validation steps' own scripts, given a set of
+#      valid and invalid values, actually accept/reject correctly —
+#      including the exact injection PoCs from rounds 1-3.
 
 set -euo pipefail
 
@@ -40,19 +47,20 @@ assert() {
   fi
 }
 
-echo "== main-push-guard-multiarch.yml: package_manager validation is injection-safe (ci-workflows#182) =="
+echo "== main-push-guard-multiarch.yml: no input/output interpolated into a shell (ci-workflows#182) =="
 
 assert "workflow file exists" \
   test -f "$WORKFLOW"
 
-# --- Structural check: extract the validation step's run: body via PyYAML,
-# assert it exists, is the first step of jobs.test, takes no `${{ }}`
-# expression directly in its script, and reads PACKAGE_MANAGER from env. ---
+# --- Structural check: extract both validation steps' run: bodies via
+# PyYAML, assert their shape, and scan every job's every run: block for a
+# raw ${{ inputs. or ${{ steps. expression anywhere in the file. ---
 
-RUN_BODY_FILE="$(mktemp)"
-trap 'rm -f "$RUN_BODY_FILE"' EXIT
+PM_RUN_FILE="$(mktemp)"
+PLATFORMS_RUN_FILE="$(mktemp)"
+trap 'rm -f "$PM_RUN_FILE" "$PLATFORMS_RUN_FILE"' EXIT
 
-if python3 - "$WORKFLOW" "$RUN_BODY_FILE" <<'PY'
+if python3 - "$WORKFLOW" "$PM_RUN_FILE" "$PLATFORMS_RUN_FILE" <<'PY'
 import sys
 try:
     import yaml
@@ -62,7 +70,7 @@ except ImportError:
     )
     sys.exit(2)
 
-path, run_body_out = sys.argv[1], sys.argv[2]
+path, pm_run_out, platforms_run_out = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path, "r", encoding="utf-8") as fh:
     doc = yaml.safe_load(fh)
 
@@ -85,13 +93,6 @@ else:
         )
 
 run = step.get("run") or ""
-if "${{" in run:
-    errors.append(
-        "the validation step's run: script still contains a raw '${{' "
-        "expression -- inputs must be passed through env:, never "
-        "interpolated directly into the shell"
-    )
-
 env = step.get("env") or {}
 if "PACKAGE_MANAGER" not in env:
     errors.append("the validation step has no env.PACKAGE_MANAGER")
@@ -118,64 +119,106 @@ if step.get("continue-on-error"):
     )
 
 # The platforms validation step (validate-platforms job) is the other half
-# of the same fix; hold it to the same no-interpolation standard.
+# of the same fix; hold it to the same standard, and extract its script
+# for the behavioral check below.
 platforms_job = jobs.get("validate-platforms") or {}
 platforms_steps = platforms_job.get("steps") or []
 platforms_step = platforms_steps[0] if platforms_steps else {}
 platforms_run = platforms_step.get("run") or ""
 platforms_env = platforms_step.get("env") or {}
-if "${{" in platforms_run:
-    errors.append(
-        "validate-platforms's run: script still contains a raw '${{' "
-        "expression -- PLATFORMS must be passed through env:, never "
-        "interpolated directly into the shell"
-    )
 if "PLATFORMS" not in platforms_env:
     errors.append("validate-platforms's step has no env.PLATFORMS")
+if platforms_step.get("continue-on-error"):
+    errors.append("validate-platforms's step has continue-on-error: true")
+
+# Whole-file scan (round-3 LOW): a fix at one interpolation site doesn't
+# prove there isn't another -- e.g. round 3's image_name fix left
+# steps.meta.outputs.image_ref (itself derived from inputs.image_name)
+# interpolated one step later. No run: block anywhere in this file should
+# contain a raw ${{ inputs. or ${{ steps. expression.
+for job_name, job in jobs.items():
+    if not isinstance(job, dict):
+        continue
+    for i, s in enumerate(job.get("steps") or []):
+        if not isinstance(s, dict):
+            continue
+        run_text = s.get("run") or ""
+        for bad in ("${{ inputs.", "${{ steps."):
+            if bad in run_text:
+                errors.append(
+                    f"jobs.{job_name}.steps[{i}] ({s.get('name')!r}) run: still "
+                    f"contains a raw {bad!r} expression -- pass it through env: instead"
+                )
 
 if errors:
     for e in errors:
         sys.stderr.write(f"FAIL: {e}\n")
     sys.exit(1)
 
-with open(run_body_out, "w", encoding="utf-8") as fh:
+with open(pm_run_out, "w", encoding="utf-8") as fh:
     fh.write(run)
+with open(platforms_run_out, "w", encoding="utf-8") as fh:
+    fh.write(platforms_run)
 sys.exit(0)
 PY
 then
-  echo "  PASS: validation step is jobs.test's first step (exact if:, no continue-on-error), no raw \${{ }} in either validation step's script, both read from env"
+  echo "  PASS: both validation steps correctly shaped (exact if:, no continue-on-error, env-only), and no run: block anywhere in the file has a raw \${{ inputs. or \${{ steps. expression"
   pass=$((pass + 1))
 else
-  echo "  FAIL: validation step structure regressed (see errors above)"
+  echo "  FAIL: validation step structure regressed, or a raw input/output expression reappeared in a run: block (see errors above)"
   fail=$((fail + 1))
-  RUN_BODY_FILE=""
+  PM_RUN_FILE=""
+  PLATFORMS_RUN_FILE=""
 fi
 
-# --- Behavioral check: actually execute the extracted script against a set
-# of valid and invalid (including the review's injection PoC) values. ---
+# --- Behavioral check: actually execute both extracted scripts against a
+# set of valid and invalid (including the reviews' injection PoCs) values. ---
 
-run_case() {
+run_pm_case() {
   local value="$1"
-  PACKAGE_MANAGER="$value" bash "$RUN_BODY_FILE" >/tmp/mpg-mp-test-out.$$ 2>&1
+  PACKAGE_MANAGER="$value" bash "$PM_RUN_FILE" >/tmp/mpg-mp-test-out.$$ 2>&1
 }
 
-if [ -n "${RUN_BODY_FILE:-}" ] && [ -s "$RUN_BODY_FILE" ]; then
+run_platforms_case() {
+  local value="$1"
+  PLATFORMS="$value" bash "$PLATFORMS_RUN_FILE" >/tmp/mpg-mp-test-out.$$ 2>&1
+}
+
+if [ -n "${PM_RUN_FILE:-}" ] && [ -s "$PM_RUN_FILE" ]; then
   for good in npm pnpm; do
     assert "PACKAGE_MANAGER='$good' is accepted (exit 0)" \
-      run_case "$good"
+      run_pm_case "$good"
   done
 
   for bad in '' 'NPM' 'yarn' '$(echo INJECTED-VIA-CMDSUB >&2)npm'; do
     assert "PACKAGE_MANAGER='$bad' is rejected (non-zero exit, no code execution)" \
-      bash -c '! PACKAGE_MANAGER="$1" bash "$2" >/tmp/mpg-mp-test-out.$$ 2>&1' _ "$bad" "$RUN_BODY_FILE"
+      bash -c '! PACKAGE_MANAGER="$1" bash "$2" >/tmp/mpg-mp-test-out.$$ 2>&1' _ "$bad" "$PM_RUN_FILE"
 
     assert "PACKAGE_MANAGER='$bad' never printed INJECTED-VIA-CMDSUB (injection did not run)" \
       bash -c '! grep -q INJECTED-VIA-CMDSUB /tmp/mpg-mp-test-out.$$ 2>/dev/null'
   done
-  rm -f /tmp/mpg-mp-test-out.$$
 else
-  echo "  SKIP: behavioral checks skipped, structural check already failed"
+  echo "  SKIP: package_manager behavioral checks skipped, structural check already failed"
 fi
+
+if [ -n "${PLATFORMS_RUN_FILE:-}" ] && [ -s "$PLATFORMS_RUN_FILE" ]; then
+  for good in linux/amd64 linux/amd64,linux/arm64 linux/arm64/v7; do
+    assert "PLATFORMS='$good' is accepted (exit 0)" \
+      run_platforms_case "$good"
+  done
+
+  for bad in '' 'linux/amd64;id' '$(echo INJECTED-VIA-PLATFORMS >&2)linux/amd64' 'amd64'; do
+    assert "PLATFORMS='$bad' is rejected (non-zero exit, no code execution)" \
+      bash -c '! PLATFORMS="$1" bash "$2" >/tmp/mpg-mp-test-out.$$ 2>&1' _ "$bad" "$PLATFORMS_RUN_FILE"
+
+    assert "PLATFORMS='$bad' never printed INJECTED-VIA-PLATFORMS (injection did not run)" \
+      bash -c '! grep -q INJECTED-VIA-PLATFORMS /tmp/mpg-mp-test-out.$$ 2>/dev/null'
+  done
+else
+  echo "  SKIP: platforms behavioral checks skipped, structural check already failed"
+fi
+
+rm -f /tmp/mpg-mp-test-out.$$
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
