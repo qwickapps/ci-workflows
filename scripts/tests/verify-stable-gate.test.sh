@@ -71,23 +71,32 @@ write_valid_run_response() {
     repository: {full_name: $repo},
     status: "completed",
     conclusion: "success",
+    event: "push",
+    head_branch: "main",
     referenced_workflows: [{path: $wf, sha: "deadbeef", ref: "refs/heads/main"}]
   }' > "$RUN_RESPONSE_FILE"
 }
 write_valid_run_response
 
 # A default, fully-legitimate "actions/runs/{id}/attempts/{n}/jobs"
-# response -- a job whose steps include the exact step that creates the
-# live-e2e-approved record, concluded success (aos#193 review finding #1,
-# BLOCKER, round 3: binding to "the run referenced deploy-app.yml" alone
-# was not enough -- a uat run, or a live run whose e2e/approval step
-# failed, also referenced it). Individual scenarios below overwrite
-# $JOBS_RESPONSE_FILE to prove the step-binding check independently.
+# response -- a job named "<caller job> / deploy-caprover" (the
+# GitHub-generated name for a job invoked FROM a reusable workflow;
+# aos#193 review finding B1, round 4), itself concluded success, whose
+# steps include the exact step that creates the live-e2e-approved record,
+# also concluded success (aos#193 review finding #1, BLOCKER, round 3:
+# binding to "the run referenced deploy-app.yml" alone was not enough --
+# a uat run, or a live run whose e2e/approval step failed, also
+# referenced it; round 4: "any job in the run" was still not enough -- an
+# unrelated sibling job with a copied step name also satisfied it).
+# Individual scenarios below overwrite $JOBS_RESPONSE_FILE to prove the
+# job/step-binding check independently.
 write_valid_jobs_response() {
   jq -nc --arg step "$CREATING_STEP_NAME" '{
+    total_count: 1,
     jobs: [
       {
-        name: "deploy-caprover",
+        name: "deploy / deploy-caprover",
+        conclusion: "success",
         steps: [
           {name: "Checkout code", conclusion: "success"},
           {name: $step, conclusion: "success"}
@@ -117,7 +126,7 @@ case "\$url" in
   *commits/*/check-runs*)
     cat "$RESPONSE_FILE"
     ;;
-  *actions/runs/*/attempts/*/jobs)
+  *actions/runs/*/attempts/*/jobs*)
     if [ -f "$JOBS_QUERY_SHOULD_FAIL" ]; then
       echo "mock gh: simulated jobs API failure (rate limit / 404 / 5xx)" >&2
       exit 1
@@ -159,7 +168,7 @@ set_response_count() {
     total_count: $count,
     check_runs: (
       if $count == 0 then []
-      else [range($count) | {conclusion: "success", output: {}}]
+      else [range($count) | {id: (1000 + .), conclusion: "success", output: {}}]
       end
     )
   }' > "$RESPONSE_FILE"
@@ -168,15 +177,32 @@ set_response_count() {
 set_response_one() {
   # $1 = conclusion, $2 = output.text (a JSON *string* value, already
   # serialized -- pass "" to omit output.text entirely), $3 = app.slug
-  # (default "github-actions"), $4 = external_id (default $EXTERNAL_ID)
-  local conclusion="$1" text="$2" app_slug="${3:-github-actions}" ext_id="${4:-$EXTERNAL_ID}"
+  # (default "github-actions"), $4 = external_id (default $EXTERNAL_ID),
+  # $5 = id (default 5000)
+  local conclusion="$1" text="$2" app_slug="${3:-github-actions}" ext_id="${4:-$EXTERNAL_ID}" id="${5:-5000}"
   if [ -z "$text" ]; then
-    jq -nc --arg c "$conclusion" --arg slug "$app_slug" --arg eid "$ext_id" \
-      '{total_count: 1, check_runs: [{conclusion: $c, output: {}, app: {slug: $slug}, external_id: $eid}]}' > "$RESPONSE_FILE"
+    jq -nc --arg c "$conclusion" --arg slug "$app_slug" --arg eid "$ext_id" --argjson id "$id" \
+      '{total_count: 1, check_runs: [{id: $id, conclusion: $c, output: {}, app: {slug: $slug}, external_id: $eid}]}' > "$RESPONSE_FILE"
   else
-    jq -nc --arg c "$conclusion" --arg t "$text" --arg slug "$app_slug" --arg eid "$ext_id" \
-      '{total_count: 1, check_runs: [{conclusion: $c, output: {text: $t}, app: {slug: $slug}, external_id: $eid}]}' > "$RESPONSE_FILE"
+    jq -nc --arg c "$conclusion" --arg t "$text" --arg slug "$app_slug" --arg eid "$ext_id" --argjson id "$id" \
+      '{total_count: 1, check_runs: [{id: $id, conclusion: $c, output: {text: $t}, app: {slug: $slug}, external_id: $eid}]}' > "$RESPONSE_FILE"
   fi
+}
+
+set_response_two() {
+  # M2 (round 4): two check runs sharing the same name, as a real
+  # "Re-run all jobs" produces. $1/$2 = each one's (id, payload_text,
+  # app_slug, external_id) as a 4-field colon-free tuple passed via
+  # separate positional groups: id1 text1 eid1 id2 text2 eid2.
+  local id1="$1" text1="$2" eid1="$3" id2="$4" text2="$5" eid2="$6"
+  jq -nc --argjson id1 "$id1" --arg t1 "$text1" --arg eid1 "$eid1" \
+         --argjson id2 "$id2" --arg t2 "$text2" --arg eid2 "$eid2" '{
+    total_count: 2,
+    check_runs: [
+      {id: $id1, conclusion: "success", output: {text: $t1}, app: {slug: "github-actions"}, external_id: $eid1},
+      {id: $id2, conclusion: "success", output: {text: $t2}, app: {slug: "github-actions"}, external_id: $eid2}
+    ]
+  }' > "$RESPONSE_FILE"
 }
 
 matching_payload_text() {
@@ -235,24 +261,28 @@ assert_passes() {
 echo "== verify-stable-gate.sh: check-run count and conclusion =="
 
 set_response_count 0
-assert_refused "zero check runs -> refused (never approved)" "wrong_check_run_count"
+assert_refused "zero check runs -> refused (never approved)" "no_check_run_found"
 
+# aos#193 review finding M2 (round 4): two check runs with no usable
+# payload/output at all (as set_response_count's minimal fixture
+# produces) must still refuse -- multiplicity alone is no longer the
+# refusal reason, but "none of them are valid" still is.
 set_response_count 2
-assert_refused "two check runs -> refused (ambiguous)" "wrong_check_run_count"
+assert_refused "two check runs, neither carries a valid payload -> refused" "no_valid_approval_found"
 
 set_response_one "failure" ""
-assert_refused "one check run, conclusion=failure -> refused" "check_run_not_successful"
+assert_refused "one check run, conclusion=failure -> refused (never even becomes a success candidate)" "no_successful_check_run"
 
 echo ""
 echo "== verify-stable-gate.sh: payload cross-checks =="
 
 MISMATCHED_PAYLOAD="$(jq -nc --arg sha "$SHA" '{repo: "qwickapps/OTHER", sha: $sha, stage: "live"}')"
 set_response_one "success" "$MISMATCHED_PAYLOAD"
-assert_refused "repo mismatch in embedded payload -> refused" "payload_repo_mismatch"
+assert_refused "repo mismatch in embedded payload -> refused" "payload_mismatch"
 
 WRONG_STAGE_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{repo: $repo, app_name: $app, sha: $sha, stage: "uat"}')"
 set_response_one "success" "$WRONG_STAGE_PAYLOAD"
-assert_refused "stage != 'live' in embedded payload -> refused" "payload_stage_mismatch"
+assert_refused "stage != 'live' in embedded payload -> refused" "payload_mismatch"
 
 # aos#193 review mutation gap: removing the sha-payload check from
 # verify-stable-gate.sh (i.e. no longer verifying that the directive's
@@ -261,11 +291,11 @@ assert_refused "stage != 'live' in embedded payload -> refused" "payload_stage_m
 # matches on everything EXCEPT sha, is exactly that test.
 WRONG_SHA_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" '{repo: $repo, app_name: $app, sha: "ffffffffffffffffffffffffffffffffffffff", stage: "live"}')"
 set_response_one "success" "$WRONG_SHA_PAYLOAD"
-assert_refused "sha mismatch in embedded payload (record is for a DIFFERENT commit than the one actually being deployed) -> refused" "payload_sha_mismatch"
+assert_refused "sha mismatch in embedded payload (record is for a DIFFERENT commit than the one actually being deployed) -> refused" "payload_mismatch"
 
 WRONG_APP_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg sha "$SHA" '{repo: $repo, app_name: "some-other-app", sha: $sha, stage: "live"}')"
 set_response_one "success" "$WRONG_APP_PAYLOAD"
-assert_refused "app_name mismatch in embedded payload (a DIFFERENT app's approval on the same commit) -> refused (aos#193 review finding #5)" "payload_app_name_mismatch"
+assert_refused "app_name mismatch in embedded payload (a DIFFERENT app's approval on the same commit) -> refused (aos#193 review finding #5)" "payload_mismatch"
 
 echo ""
 echo "== verify-stable-gate.sh: GitHub-Actions-API binding (aos#193 review finding #1, BLOCKER, round 2) =="
@@ -295,12 +325,12 @@ printf '%s' "$IN_PROGRESS_RUN" > "$RUN_RESPONSE_FILE"
 set_response_one "success" "$MATCHING_PAYLOAD"
 assert_refused "the run named by external_id has not completed yet -> refused" "run_not_completed"
 
-NO_REFERENCED_WORKFLOW_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/some-other-repo/.github/workflows/totally-unrelated.yml@refs/heads/main"}]}')"
+NO_REFERENCED_WORKFLOW_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: [{path: "qwickapps/some-other-repo/.github/workflows/totally-unrelated.yml@refs/heads/main"}]}')"
 printf '%s' "$NO_REFERENCED_WORKFLOW_RUN" > "$RUN_RESPONSE_FILE"
 set_response_one "success" "$MATCHING_PAYLOAD"
 assert_refused "the run named by external_id never referenced deploy-app.yml (forgery attempt -- a DIFFERENT workflow's run trying to claim this record) -> refused (aos#193 review finding #1)" "run_did_not_reference_deploy_app_workflow"
 
-EMPTY_REFERENCED_WORKFLOWS_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: []}')"
+EMPTY_REFERENCED_WORKFLOWS_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: []}')"
 printf '%s' "$EMPTY_REFERENCED_WORKFLOWS_RUN" > "$RUN_RESPONSE_FILE"
 set_response_one "success" "$MATCHING_PAYLOAD"
 assert_refused "the run named by external_id references no reusable workflows at all -> refused" "run_did_not_reference_deploy_app_workflow"
@@ -320,7 +350,7 @@ echo "   prefix."
 # branch, a fork, or an attacker-controlled ref. This scenario used to pass
 # before the ref pin (round 2's `startswith($prefix)` alone was not
 # enough).
-WRONG_REF_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/evil", ref: "refs/heads/evil"}]}')"
+WRONG_REF_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/evil", ref: "refs/heads/evil"}]}')"
 printf '%s' "$WRONG_REF_RUN" > "$RUN_RESPONSE_FILE"
 set_response_one "success" "$MATCHING_PAYLOAD"
 assert_refused "the run referenced deploy-app.yml, but from a DIFFERENT ref than production callers use -> refused (ref pinning)" "run_did_not_reference_deploy_app_workflow_at_expected_ref"
@@ -363,10 +393,132 @@ rm -f "$JOBS_QUERY_SHOULD_FAIL"
 # stay caught by the ref pin even if the prefix check were somehow
 # loosened -- this scenario's path already starts with the real prefix,
 # so it isolates the ref check specifically.
-CORRECT_PREFIX_WRONG_REF_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/attacker-controlled", ref: "refs/heads/attacker-controlled"}]}')"
+CORRECT_PREFIX_WRONG_REF_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/attacker-controlled", ref: "refs/heads/attacker-controlled"}]}')"
 printf '%s' "$CORRECT_PREFIX_WRONG_REF_RUN" > "$RUN_RESPONSE_FILE"
 set_response_one "success" "$MATCHING_PAYLOAD"
 assert_refused "path prefix matches exactly but ref does not -> refused (proves the ref check is independent of the prefix check)" "run_did_not_reference_deploy_app_workflow_at_expected_ref"
+
+write_valid_run_response
+write_valid_jobs_response
+
+echo ""
+echo "== verify-stable-gate.sh: GitHub-Actions-API binding round 4 (aos#193 review finding B1, BLOCKER, round 4) =="
+echo "   'a job in the run has the expected step, succeeded' was STILL not"
+echo "   enough -- a sibling job, or a run triggered any way other than"
+echo "   push/workflow_dispatch on the default branch, also satisfied it."
+
+# B1 round 4a: the referenced run's event is pull_request (an
+# attacker-controlled PR branch), not push/workflow_dispatch. Everything
+# else about the run is otherwise valid.
+PR_EVENT_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "pull_request", head_branch: "attacker", referenced_workflows: [{path: $wf, ref: "refs/heads/main"}]}')"
+printf '%s' "$PR_EVENT_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the referenced run's event is pull_request (attacker-controlled branch), not push/workflow_dispatch -> refused" "run_event_not_allowed"
+write_valid_run_response
+
+# B1 round 4b: the referenced run's event IS push, but its head_branch is
+# NOT the default branch -- a forging workflow pushed to a scratch branch
+# rather than merged to main.
+NON_DEFAULT_BRANCH_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "scratch-branch", referenced_workflows: [{path: $wf, ref: "refs/heads/main"}]}')"
+printf '%s' "$NON_DEFAULT_BRANCH_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the referenced run is push, but NOT on the default branch (main) -> refused" "run_head_branch_not_default"
+write_valid_run_response
+
+# B1 round 4c: the exact failure scenario the reviewer demonstrated --
+# the record-creating step's name is copied into an UNRELATED SIBLING
+# job (e.g. "forge"), which succeeds, while deploy-app.yml's own
+# deploy-caprover job in the SAME run fails. Everything about the run
+# itself (event, branch, ref, sha) is legitimate.
+JOBS_STEP_IN_SIBLING_JOB="$(jq -nc --arg step "$CREATING_STEP_NAME" '{
+  total_count: 2,
+  jobs: [
+    {name: "deploy / resolve-stage", conclusion: "failure", steps: [{name: "Resolve stage", conclusion: "failure"}]},
+    {name: "forge", conclusion: "success", steps: [{name: "Checkout code", conclusion: "success"}, {name: $step, conclusion: "success"}]}
+  ]
+}')"
+printf '%s' "$JOBS_STEP_IN_SIBLING_JOB" > "$JOBS_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the record-creating step succeeded, but in an UNRELATED SIBLING job, not deploy-app.yml's own deploy-caprover job -> refused (this is the reviewer's exact round-4 forgery scenario)" "run_did_not_execute_expected_step"
+write_valid_jobs_response
+
+# B1 round 4d: the step is inside a job correctly named "*/ deploy-caprover",
+# and the STEP itself succeeded, but the JOB's own overall conclusion is
+# "failure" (some other step in the same job broke). The step's own
+# success is not enough; the review specifically also requires the job's
+# conclusion.
+JOBS_MATCHING_JOB_BUT_JOB_FAILED="$(jq -nc --arg step "$CREATING_STEP_NAME" '{
+  total_count: 1,
+  jobs: [
+    {name: "deploy / deploy-caprover", conclusion: "failure", steps: [{name: "Checkout code", conclusion: "success"}, {name: $step, conclusion: "success"}, {name: "Some later step", conclusion: "failure"}]}
+  ]
+}')"
+printf '%s' "$JOBS_MATCHING_JOB_BUT_JOB_FAILED" > "$JOBS_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the record-creating step succeeded inside the right job, but that job's OWN overall conclusion is failure -> refused" "run_did_not_execute_expected_step"
+write_valid_jobs_response
+
+echo ""
+echo "== verify-stable-gate.sh: jobs-API pagination (aos#193 review finding M1, MEDIUM, round 4) =="
+
+# M1: total_count says more jobs exist than were actually returned on this
+# page -- the record-creating job/step could be on an unfetched page.
+# Must be treated as could-not-verify (hard failure), never as "the step
+# is absent".
+JOBS_TRUNCATED_PAGE="$(jq -nc '{
+  total_count: 35,
+  jobs: [range(30) | {name: ("job-" + (. | tostring)), conclusion: "success", steps: [{name: "Checkout code", conclusion: "success"}]}]
+}')"
+printf '%s' "$JOBS_TRUNCATED_PAGE" > "$JOBS_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "jobs response is truncated (total_count=35, only 30 returned) -> refused closed, never guessed as 'step absent'" "jobs_pagination_incomplete"
+write_valid_jobs_response
+
+echo ""
+echo "== verify-stable-gate.sh: non-object JSON responses (aos#193 review finding L1, LOW, round 4) =="
+
+# L1: a 2xx body that is valid JSON but not an OBJECT (a bare string, for
+# example) would otherwise make every field read below silently resolve
+# to "", hitting the ordinary mismatch path (refused) instead of
+# could-not-verify.
+printf '%s' '"just a string, not an object"' > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "run-lookup response is valid JSON but not an object -> could-not-verify, not a guessed mismatch" "run_query_failed"
+write_valid_run_response
+
+printf '%s' '"also just a string"' > "$JOBS_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "jobs-lookup response is valid JSON but not an object -> could-not-verify, not a guessed mismatch" "jobs_query_failed"
+write_valid_jobs_response
+
+echo ""
+echo "== verify-stable-gate.sh: reruns create a second, equally legitimate record (aos#193 review finding M2, MEDIUM, round 4) =="
+echo "   Requiring uniqueness used to make a routine 'Re-run all jobs' on an"
+echo "   already-approved live run permanently refuse stable for that sha."
+
+# M2a: two check runs on the same sha, both fully legitimate (as a real
+# rerun produces) -- must PASS, deterministically selecting the newest
+# (highest id).
+OLDER_ID=6000
+NEWER_ID=7000
+set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID"
+assert_passes "two check runs from a rerun, BOTH fully legitimate -> PASS (does not refuse merely for existing twice)"
+
+# M2b: two check runs -- the OLDER one is legitimate, the NEWER one has a
+# mismatched payload (e.g. a stray/irrelevant check run created later for
+# a different purpose). Must still find and use the older, valid one, not
+# just look at the newest and give up.
+STALE_MISMATCHED_PAYLOAD="$(jq -nc --arg sha "$SHA" '{repo: "qwickapps/OTHER", sha: $sha, stage: "live"}')"
+set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$STALE_MISMATCHED_PAYLOAD" "not-a-run-id"
+assert_passes "newest candidate is invalid, but an older one is fully legitimate -> PASS (falls through to the older valid one)"
+
+# M2c mutation-coverage proof: if the newest candidate had a legitimate
+# PAYLOAD but its binding genuinely fails (not a could-not-verify), the
+# gate must still try the older one rather than stopping at the first
+# payload match regardless of binding.
+BAD_BINDING_EXTERNAL_ID="not-a-run-id"
+set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$MATCHING_PAYLOAD" "$BAD_BINDING_EXTERNAL_ID"
+assert_passes "newest candidate's payload matches but its own binding is malformed -> PASS (falls through to the older, properly-bound one)"
 
 write_valid_run_response
 write_valid_jobs_response
