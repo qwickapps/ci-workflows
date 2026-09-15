@@ -196,6 +196,24 @@ CHECK_RUN_BINDING_DEFAULT_BRANCH="main"
 # "<calling job id> / <called job id>" shape GitHub assigns to a job
 # invoked FROM a reusable workflow. deploy-app.yml's own job that creates
 # both blue-green check runs is "deploy-caprover".
+#
+# aos#193 round-5 review, "probed, acceptable residuals": this suffix is
+# NOT cryptographic proof the job came from deploy-app.yml@main
+# specifically -- the jobs API exposes no per-job workflow path, and
+# `workflow_name` on a run is the CALLER's run name, not the reusable
+# workflow's identity. A caller-repo workflow could in principle name a
+# job "x / deploy-caprover", or call some OTHER reusable workflow whose
+# job id happens to also be "deploy-caprover". This is accepted as
+# equivalent to the trust this design already places in the default
+# branch: producing such a job requires event ∈ {push, workflow_dispatch}
+# AND head_branch == main AND head_sha == the exact sha being deployed --
+# i.e. the forging workflow must already exist in a commit on main. Anyone
+# who can land that commit could equally edit the CALLER's own deploy
+# workflow (e.g. set `e2e_command: "true"`) to produce a genuinely
+# legitimate record instead. This residual does not on its own grant
+# anything beyond what committing to main already grants -- it does NOT
+# excuse B4-style duplicate-record ambiguity, which is refused
+# independently regardless of this residual.
 CHECK_RUN_BINDING_JOB_NAME_SUFFIX=" / deploy-caprover"
 
 check_run_binding_verify() {
