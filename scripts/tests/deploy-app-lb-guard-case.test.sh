@@ -53,7 +53,11 @@ print(matches[0]['run'])
 run_gate() {
   local job="$1" step_name="$2" output_ref="$3" url="$4"
   local out
-  out="$(extract_gate2 "$job" "$step_name" "$output_ref")"
+  if ! out="$(extract_gate2 "$job" "$step_name" "$output_ref")"; then
+    echo "EXTRACTION_ERROR: step lookup failed for job='$job' step='$step_name'" >&2
+    echo "$out" >&2
+    return 2
+  fi
   if grep -q '\${{' <<<"$out"; then
     echo "EXTRACTION_ERROR: unsubstituted \${{ }} remain" >&2
     echo "$out" >&2
