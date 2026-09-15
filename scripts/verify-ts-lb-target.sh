@@ -31,9 +31,24 @@ set -euo pipefail
 #   4. Require that device's `created` timestamp to be at or after this
 #      deploy's start time (minus a small grace window) — proves the live
 #      registration was made BY THIS deploy, not a leftover from a previous
-#      one that happens to still be connected.
+#      one that happens to still be connected. Skippable with
+#      --skip-freshness-check (see below) when CANONICAL_HOSTNAME is not the
+#      node this deploy run itself produced.
 #   5. Optionally cross-check qwickway's own /gateway/status: the backend URL
 #      this deploy just configured must be reported healthy and active there.
+#
+# --skip-freshness-check (ci-workflows#189): rule 4 assumes CANONICAL_HOSTNAME
+# is the node THIS run just deployed, so a stale `created` timestamp means a
+# leftover corpse. That assumption doesn't hold when this script is used to
+# check a DIFFERENT, independently-deployed service as a fallback-health
+# sanity check (e.g. deploy-app.yml's live-stage call checks the stable
+# slot's device, not live's own) — a long-lived, persistent-identity service
+# being checked from an unrelated run is EXPECTED to have an old `created`
+# timestamp; that is not evidence of staleness there. Pass this flag to skip
+# rule 4 and rely on rules 1-3 alone (exactly one connected, authorized,
+# correctly-named device) as sufficient proof of a real, unambiguous,
+# currently-live backend. --deploy-start-epoch becomes optional when this
+# flag is set (rule 4 is the only rule that uses it).
 #
 # Usage:
 #   verify-ts-lb-target.sh \
@@ -42,11 +57,13 @@ set -euo pipefail
 #     --deploy-start-epoch 1755500000 \
 #     [--tailnet -] \
 #     [--grace-seconds 120] \
+#     [--skip-freshness-check] \
 #     [--gateway-status-url https://qwickapps-mcp.app.qwickforge.com/gateway/status] \
 #     [--expect-target-url http://qwickapps-mcp-build.taile324e7.ts.net:8080]
 #
-# Exit codes: 0 = LB target verified live and fresh. 1 = guard failed (deploy
-# must be treated as failed even if the container itself is healthy).
+# Exit codes: 0 = LB target verified live (and fresh, unless
+# --skip-freshness-check). 1 = guard failed (deploy must be treated as
+# failed even if the container itself is healthy).
 
 # select_live_target DEVICES_JSON CANONICAL_HOSTNAME
 #
@@ -108,6 +125,30 @@ parse_created_epoch() {
   date -d "$iso_ts" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso_ts" +%s 2>/dev/null || true
 }
 
+# check_freshness CREATED_ISO8601 DEPLOY_START_EPOCH GRACE_SECONDS
+#
+# Rule 4's decision, factored out (and defined before main so it can be
+# `source`d for unit tests, ci-workflows#189) so it's directly testable
+# without stubbing curl or running main(). Prints one of:
+#   OK
+#   FAIL_UNPARSEABLE
+#   FAIL_STALE
+check_freshness() {
+  local created_iso="$1" deploy_start_epoch="$2" grace_seconds="$3"
+  local created_epoch
+  created_epoch=$(parse_created_epoch "$created_iso")
+  if [[ -z "$created_epoch" ]]; then
+    echo "FAIL_UNPARSEABLE"
+    return
+  fi
+  local threshold=$(( deploy_start_epoch - grace_seconds ))
+  if [[ "$created_epoch" -lt "$threshold" ]]; then
+    echo "FAIL_STALE"
+  else
+    echo "OK"
+  fi
+}
+
 main() {
 
 TS_API_KEY=""
@@ -117,6 +158,7 @@ TAILNET="-"
 GRACE_SECONDS=120
 GATEWAY_STATUS_URL=""
 EXPECT_TARGET_URL=""
+SKIP_FRESHNESS_CHECK="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -125,6 +167,7 @@ while [[ $# -gt 0 ]]; do
     --deploy-start-epoch) DEPLOY_START_EPOCH="$2"; shift 2 ;;
     --tailnet) TAILNET="$2"; shift 2 ;;
     --grace-seconds) GRACE_SECONDS="$2"; shift 2 ;;
+    --skip-freshness-check) SKIP_FRESHNESS_CHECK="true"; shift 1 ;;
     --gateway-status-url) GATEWAY_STATUS_URL="$2"; shift 2 ;;
     --expect-target-url) EXPECT_TARGET_URL="$2"; shift 2 ;;
     *)
@@ -134,8 +177,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$TS_API_KEY" || -z "$CANONICAL_HOSTNAME" || -z "$DEPLOY_START_EPOCH" ]]; then
-  echo "Usage: verify-ts-lb-target.sh --ts-api-key KEY --canonical-hostname NAME --deploy-start-epoch EPOCH [options]" >&2
+if [[ -z "$TS_API_KEY" || -z "$CANONICAL_HOSTNAME" ]]; then
+  echo "Usage: verify-ts-lb-target.sh --ts-api-key KEY --canonical-hostname NAME (--deploy-start-epoch EPOCH | --skip-freshness-check) [options]" >&2
+  exit 1
+fi
+
+if [[ "$SKIP_FRESHNESS_CHECK" != "true" && -z "$DEPLOY_START_EPOCH" ]]; then
+  echo "Usage: verify-ts-lb-target.sh --ts-api-key KEY --canonical-hostname NAME (--deploy-start-epoch EPOCH | --skip-freshness-check) [options]" >&2
+  echo "  --deploy-start-epoch is required unless --skip-freshness-check is set" >&2
   exit 1
 fi
 
@@ -180,22 +229,25 @@ esac
 
 echo "[verify-ts-lb-target] Found exactly one live device: hostname=${LIVE_HOSTNAME} id=${LIVE_ID} created=${LIVE_CREATED}"
 
-# Freshness check: the live device must have been created at/after this
-# deploy started (minus grace), i.e. it is the node THIS deploy produced.
-# See parse_created_epoch() above for the UTC-parsing bug this depends on.
-CREATED_EPOCH=$(parse_created_epoch "$LIVE_CREATED")
-if [[ -z "$CREATED_EPOCH" ]]; then
-  echo "[verify-ts-lb-target] FAIL: could not parse created timestamp '${LIVE_CREATED}' for device ${LIVE_ID}" >&2
-  exit 1
-fi
+if [[ "$SKIP_FRESHNESS_CHECK" == "true" ]]; then
+  echo "[verify-ts-lb-target] Skipping freshness check (--skip-freshness-check): rules 1-3 (exactly one connected, authorized, correctly-named device) are treated as sufficient here."
+else
+  # Freshness check (rule 4): the live device must have been created at/after
+  # this deploy started (minus grace), i.e. it is the node THIS deploy
+  # produced. See check_freshness()/parse_created_epoch() above.
+  FRESHNESS_RESULT="$(check_freshness "$LIVE_CREATED" "$DEPLOY_START_EPOCH" "$GRACE_SECONDS")"
+  if [[ "$FRESHNESS_RESULT" == "FAIL_UNPARSEABLE" ]]; then
+    echo "[verify-ts-lb-target] FAIL: could not parse created timestamp '${LIVE_CREATED}' for device ${LIVE_ID}" >&2
+    exit 1
+  fi
+  if [[ "$FRESHNESS_RESULT" == "FAIL_STALE" ]]; then
+    CREATED_EPOCH=$(parse_created_epoch "$LIVE_CREATED")
+    echo "[verify-ts-lb-target] FAIL: live device for '${CANONICAL_HOSTNAME}' was created at ${LIVE_CREATED} (epoch ${CREATED_EPOCH}), which is before this deploy started (epoch ${DEPLOY_START_EPOCH}, grace ${GRACE_SECONDS}s). This is a leftover registration from a previous deploy, not the node this deploy just started — the LB may still be pointing at the old revision." >&2
+    exit 1
+  fi
 
-THRESHOLD=$(( DEPLOY_START_EPOCH - GRACE_SECONDS ))
-if [[ "$CREATED_EPOCH" -lt "$THRESHOLD" ]]; then
-  echo "[verify-ts-lb-target] FAIL: live device for '${CANONICAL_HOSTNAME}' was created at ${LIVE_CREATED} (epoch ${CREATED_EPOCH}), which is before this deploy started (epoch ${DEPLOY_START_EPOCH}, grace ${GRACE_SECONDS}s). This is a leftover registration from a previous deploy, not the node this deploy just started — the LB may still be pointing at the old revision." >&2
-  exit 1
+  echo "[verify-ts-lb-target] Freshness OK: device created at ${LIVE_CREATED} is at/after deploy start (grace ${GRACE_SECONDS}s)."
 fi
-
-echo "[verify-ts-lb-target] Freshness OK: device created at ${LIVE_CREATED} is at/after deploy start (grace ${GRACE_SECONDS}s)."
 
 # Optional cross-check against qwickway's own /gateway/status.
 if [[ -n "$GATEWAY_STATUS_URL" && -n "$EXPECT_TARGET_URL" ]]; then
@@ -217,7 +269,11 @@ if [[ -n "$GATEWAY_STATUS_URL" && -n "$EXPECT_TARGET_URL" ]]; then
   echo "[verify-ts-lb-target] Gateway status confirms ${EXPECT_TARGET_URL} is the active backend."
 fi
 
-echo "[verify-ts-lb-target] PASS: LB target for '${CANONICAL_HOSTNAME}' structurally resolves to the node this deploy just started (device ${LIVE_ID})."
+if [[ "$SKIP_FRESHNESS_CHECK" == "true" ]]; then
+  echo "[verify-ts-lb-target] PASS: LB target for '${CANONICAL_HOSTNAME}' structurally resolves to exactly one live, correctly-named device (${LIVE_ID})."
+else
+  echo "[verify-ts-lb-target] PASS: LB target for '${CANONICAL_HOSTNAME}' structurally resolves to the node this deploy just started (device ${LIVE_ID})."
+fi
 }
 
 # Only run main when executed directly, not when sourced for unit testing.
