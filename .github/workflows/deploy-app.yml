@@ -224,10 +224,13 @@ jobs:
           # (health-check) purposes, but the actual CapRover deploy target
           # is caprover_url/caprover_host, both caller-supplied -- nothing
           # upstream of this point validated those against stage, which is
-          # exactly how faabzi-uat-build ended up on oci-main. `stable`
-          # never goes through CapRover at all (see deploy-stable job,
-          # Coolify-based; caprover_required is forced false for it below),
-          # so it's exempt here.
+          # exactly how faabzi-uat-build ended up on oci-main. `stable` is
+          # exempt from THIS check specifically (this check exists to catch
+          # deploy-caprover being misrouted): stable deploys through its own
+          # deploy-stable job, gated purely on stage=='stable', never through
+          # deploy-caprover's caprover_required gate (still forced false for
+          # stable below) -- deploy-stable now does deploy via CapRover too
+          # (mcp#392), it just isn't reachable through this particular gate.
           if [ "$STAGE_INPUT" != "stable" ]; then
             CANONICAL_DEV_HOST="captain.dev.qwickforge.com"
             CANONICAL_MAIN_HOST="captain.app.qwickforge.com"
@@ -1133,30 +1136,29 @@ jobs:
             --caprover-url "$CAPROVER_URL" \
             --caprover-password "$CAPROVER_PASSWORD"
 
-  # -- Stable deploy on Coolify/macmini --------------------------------------
+  # -- Stable deploy on CapRover ----------------------------------------------
+  # mcp#392: the stable slot was assumed to be Coolify-based (see the
+  # pre-2026-09-15 history of this job) and deploy-stable deployed via
+  # deploy-to-coolify.sh accordingly. Read-only investigation on 2026-09-15
+  # (qwickapps/mcp#392) confirmed no app named "<app>-stable" exists on
+  # either Coolify instance (macmini or momo) -- the Coolify path was
+  # orphaned tooling with nothing real behind it. The actual, live stable
+  # slot has always been a CapRover app on the same oci-main cluster as
+  # live (confirmed: same nodeId), reachable at the same Tailscale-based
+  # health-check mechanism live uses. This job now mirrors deploy-caprover's
+  # pattern exactly instead of the orphaned Coolify one.
   deploy-stable:
-    needs: [resolve-stage, verify-provenance]
+    needs: [resolve-stage, validate-env, verify-provenance]
     if: |
       always() &&
       needs.resolve-stage.result == 'success' &&
+      needs.validate-env.result == 'success' &&
       needs.verify-provenance.result == 'success' &&
       needs.resolve-stage.outputs.stage == 'stable'
     runs-on: [self-hosted, macmini]
-    # verify-provenance already inspects the same image successfully in this
-    # same run -- but each job is a fresh environment, so its DOCKER_CONFIG
-    # (with the GHCR auth it wrote) is not inherited here. Without a step
-    # writing that same auth into THIS job's own Docker config, `docker
-    # buildx imagetools inspect` below falls back to an anonymous pull,
-    # which 401s against a private GHCR image (found 2026-09-15 -- this
-    # job appears to have never actually succeeded before, since deploy
-    # runs across the fleet almost never target stage=stable).
-    #
-    # contents: read is required too (unlike verify-provenance) -- this job
-    # runs actions/checkout to pull the repo's own scripts, which a
-    # packages-only permissions block would silently strip.
-    permissions:
-      contents: read
-      packages: read
+    concurrency:
+      group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
+      cancel-in-progress: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -1171,44 +1173,53 @@ jobs:
             scripts
           sparse-checkout-cone-mode: false
 
-      - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Resolve CapRover credentials
         run: |
-          # runner.temp isn't usable in a job-level env: block (GitHub rejects
-          # the whole reusable workflow at load time), so DOCKER_CONFIG is
-          # computed here and exported via GITHUB_ENV instead -- same pattern
-          # the build and retag jobs already use below.
-          #
-          # This exact path is also recomputed independently (not read back
-          # from $DOCKER_CONFIG) by the cleanup step below -- actions-runner-
-          # critical-macmini's own .env sets a persistent, ambient
-          # DOCKER_CONFIG for this runner. If this step fails on any line
-          # before its GITHUB_ENV export (mkdir/symlink/printf), that export
-          # never runs, so $DOCKER_CONFIG in every later step -- including
-          # the always()-run cleanup step -- would silently fall back to the
-          # runner's own ambient value instead of this job's temp one, and a
-          # naive `rm -rf "$DOCKER_CONFIG"` would delete the runner's real
-          # Docker config for every job that ever runs there. Recomputing
-          # the same deterministic path independently in cleanup means it
-          # never depends on this export having succeeded.
-          DOCKER_CONFIG="${RUNNER_TEMP}/ghcr-docker-config-${GITHUB_RUN_ID}-${GITHUB_JOB}"
-          # umask 077: this runner is shared (self-hosted, macmini) -- the
-          # default mode would leave config.json (containing a GHCR token)
-          # world/group-readable to every other job/user on the same box.
-          umask 077
-          mkdir -p "$DOCKER_CONFIG/cli-plugins"
-          if [ -f "$HOME/.docker/cli-plugins/docker-buildx" ]; then
-            ln -sf "$HOME/.docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          if [ -n "${{ inputs.caprover_url }}" ]; then
+            CP_URL="${{ inputs.caprover_url }}"
+          else
+            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
           fi
-          AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$DOCKER_CONFIG/config.json"
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
 
-      - name: Ensure stable image exists
+          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
+            echo "ERROR: caprover_host_name is required for stage stable"
+            exit 1
+          fi
+
+          # Ensure scheme is present -- caprover_host inputs are bare hostnames.
+          case "$CP_URL" in
+            http://*|https://*) ;;
+            *) CP_URL="https://$CP_URL" ;;
+          esac
+
+          # Same dev/main credential selection deploy-caprover uses (ci-workflows#161:
+          # matched case-insensitively).
+          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
+          case "$CP_URL_LOWER" in
+            *dev.qwickforge.com*)
+              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+              ;;
+            *)
+              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              ;;
+          esac
+
+          if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
+            echo "ERROR: CapRover credentials missing for stable deploy url ${CP_URL}"
+            exit 1
+          fi
+
+          {
+            echo "CAPROVER_URL=$CP_URL"
+            echo "CAPROVER_PASSWORD=$CP_PASS"
+            echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::$CP_PASS"
+
+      - name: Make scripts executable
         run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "${{ needs.resolve-stage.outputs.image_ref }}" >/dev/null
+          chmod +x .github/scripts/*.sh
+          chmod +x .ci-workflows/scripts/*.sh
 
       - name: Download rendered env file artifact (if present)
         uses: actions/download-artifact@v4
@@ -1248,34 +1259,131 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy image to macmini stable slot
-        env:
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      - name: Configure target slot (atomic env + config)
         run: |
           set -euo pipefail
-          .github/scripts/deploy-to-coolify.sh \
-            --coolify-url "${COOLIFY_URL}" \
-            --coolify-token "${COOLIFY_TOKEN}" \
-            --application-name "${{ inputs.app_name }}-stable" \
-            --image-name "${{ needs.resolve-stage.outputs.image_name }}" \
-            --image-tag "stable" \
-            --env-file "${{ steps.env-file.outputs.path }}"
+          TARGET_APP="${{ needs.resolve-stage.outputs.target_app }}"
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
 
-      - name: Verify stable health
+          CMD_ARGS=()
+          if [ "${{ inputs.cmd }}" = "__clear__" ]; then
+            CMD_ARGS+=(--cmd "")
+          elif [ -n "${{ inputs.cmd }}" ]; then
+            CMD_ARGS+=(--cmd "${{ inputs.cmd }}")
+          fi
+
+          # Same canonical configure script deploy-caprover uses (not the
+          # caller's own copy), so the anti-wipe fix (single atomic update)
+          # applies to the stable slot too, not just live/uat/build.
+          .ci-workflows/scripts/configure-caprover-app.sh \
+            --app-name "$TARGET_APP" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --container-port "${{ inputs.container_port }}" \
+            --env-file "$ENV_FILE" \
+            "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}"
+
+      - name: Deploy image to target slot
+        run: |
+          .github/scripts/deploy-from-ghcr.sh \
+            --app-name "${{ needs.resolve-stage.outputs.target_app }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --github-token "$GHCR_PULL_TOKEN" \
+            --github-owner "${{ env.OWNER }}"
+
+      - name: Validate target slot health
+        run: |
+          .github/scripts/validate-deployment-health.sh \
+            --app-name "${{ needs.resolve-stage.outputs.target_app }}" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --app-url "${{ needs.resolve-stage.outputs.target_app_url }}" \
+            --health-path "${{ inputs.health_path }}" \
+            --max-attempts 15 \
+            --sleep 20
+
+      - name: Deep subsystem health check
+        run: |
+          EFFECTIVE_CRITICAL="${{ inputs.critical_subsystems }}"
+          EFFECTIVE_WARNING="${{ inputs.warning_subsystems }}"
+          PROD_CRITICAL="${{ inputs.prod_critical_subsystems }}"
+
+          if [ -n "$PROD_CRITICAL" ]; then
+            if [ -n "$EFFECTIVE_CRITICAL" ]; then
+              EFFECTIVE_CRITICAL="${EFFECTIVE_CRITICAL},${PROD_CRITICAL}"
+            else
+              EFFECTIVE_CRITICAL="$PROD_CRITICAL"
+            fi
+          fi
+
+          ARGS=(--url "${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.health_path }}" --timeout 15 --max-attempts 3 --sleep 10)
+          if [ -n "$EFFECTIVE_CRITICAL" ]; then
+            ARGS+=(--critical-subsystems "$EFFECTIVE_CRITICAL")
+          fi
+          if [ -n "$EFFECTIVE_WARNING" ]; then
+            ARGS+=(--warning-subsystems "$EFFECTIVE_WARNING")
+          fi
+          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+            ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
+          fi
+          .github/scripts/deep-health-check.sh "${ARGS[@]}"
+
+      - name: Smoke test path
+        if: inputs.smoke_test_path != ''
         run: |
           set -euo pipefail
-          URL="${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.health_path }}"
-          for attempt in $(seq 1 15); do
-            echo "Attempt $attempt checking stable health"
-            if curl -kfsS --max-time 10 "$URL" >/dev/null 2>&1; then
-              echo "Stable health check passed"
+          SMOKE_URL="${{ needs.resolve-stage.outputs.target_app_url }}${{ inputs.smoke_test_path }}"
+          for attempt in $(seq 1 3); do
+            STATUS=$(curl -ksS -o /dev/null -w "%{http_code}" --max-time 15 "$SMOKE_URL" || echo 000)
+            echo "  Attempt $attempt: $STATUS"
+            if [ "$STATUS" = "200" ]; then
               exit 0
             fi
-            sleep 20
+            sleep 10
           done
-          echo "ERROR: stable health check failed"
+          echo "ERROR: smoke test failed for $SMOKE_URL"
           exit 1
+
+      - name: Smoke test command
+        if: inputs.smoke_test_command != ''
+        env:
+          APP_URL: ${{ needs.resolve-stage.outputs.target_app_url }}
+          HEALTH_PATH: ${{ inputs.health_path }}
+          IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
+          APP_NAME: ${{ inputs.app_name }}
+          ENV_LABEL: ${{ needs.resolve-stage.outputs.env_label }}
+        run: |
+          set -euo pipefail
+          ${{ inputs.smoke_test_command }}
+
+      - name: Run migration check
+        if: needs.resolve-stage.outputs.run_migrations_for_stage == 'true'
+        run: |
+          set -euo pipefail
+          if [ -x .github/scripts/check-migrations.sh ]; then
+            .github/scripts/check-migrations.sh
+          elif [ -x .github/scripts/run-migrations.sh ]; then
+            .github/scripts/run-migrations.sh
+          else
+            echo "WARNING: migration check enabled but no migration script is available"
+          fi
+
+      - name: Optional stable E2E
+        if: inputs.run_e2e == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Optional stable E2E dependencies
+        if: inputs.run_e2e == 'true'
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+          pnpm install --no-frozen-lockfile --store-dir .pnpm-store
+          pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
         env:
@@ -1327,35 +1435,3 @@ jobs:
             --ts-api-key "$TS_API_KEY_RESOLVED" \
             --canonical-hostname "$CANONICAL_HOSTNAME" \
             --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
-
-      - name: Optional stable E2E
-        if: inputs.run_e2e == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Optional stable E2E dependencies
-        if: inputs.run_e2e == 'true'
-        run: |
-          set -euo pipefail
-          corepack enable
-          corepack install
-          pnpm install --no-frozen-lockfile --store-dir .pnpm-store
-          pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
-
-      - name: Remove GHCR credentials
-        if: always()
-        run: |
-          # Deliberately NOT reading $DOCKER_CONFIG here -- see the comment
-          # in the credential step above. This recomputes the exact same
-          # deterministic path independently, so a credential step that
-          # failed before exporting DOCKER_CONFIG can never cause this to
-          # delete the runner's own ambient DOCKER_CONFIG. The case guard
-          # is a second, independent line of defense against ever deleting
-          # anything outside RUNNER_TEMP, even under a future refactor.
-          set -euo pipefail
-          TARGET="${RUNNER_TEMP:?RUNNER_TEMP not set}/ghcr-docker-config-${GITHUB_RUN_ID}-${GITHUB_JOB}"
-          case "$TARGET" in
-            "$RUNNER_TEMP"/*) rm -rf "$TARGET" ;;
-            *) echo "::error::refusing to delete outside RUNNER_TEMP: $TARGET"; exit 1 ;;
-          esac
