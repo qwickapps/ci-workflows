@@ -24,11 +24,9 @@
 #
 # The fix: the cleanup step recomputes the same deterministic path
 # ("$RUNNER_TEMP/ghcr-docker-config-$GITHUB_RUN_ID-$GITHUB_JOB")
-# independently -- it never reads $DOCKER_CONFIG at all -- plus (round 4)
-# resolves both RUNNER_TEMP and the target's parent with `cd -P ... && pwd`
-# and compares the resolved paths, instead of a plain string prefix match,
-# as a second, independent line of defense against `..` traversal or a
-# symlinked RUNNER_TEMP.
+# independently -- it never reads $DOCKER_CONFIG at all -- plus a `case`
+# guard requiring the computed path to still be under $RUNNER_TEMP as a
+# second, independent line of defense, even under a future refactor.
 
 set -euo pipefail
 
@@ -157,8 +155,14 @@ for JOB in verify-provenance; do
 
   # -- Scenario 4: RUNNER_TEMP is itself a symlink to a real directory
   # (realistic on the actual macmini runner -- macOS's /tmp is a symlink
-  # to /private/tmp). The `cd -P ... && pwd` resolution must still find
-  # and delete the real target through the symlink, not silently no-op.
+  # to /private/tmp). The guard's `case "$TARGET" in "$RUNNER_TEMP"/*)` is
+  # a plain string-prefix match, not a filesystem resolution -- TARGET is
+  # built directly from $RUNNER_TEMP, so the prefix always matches
+  # regardless of whether $RUNNER_TEMP itself resolves through a symlink.
+  # `rm -rf "$TARGET"` then reaches the real target the normal way any
+  # shell command does: the OS transparently follows the symlink when the
+  # path is actually accessed. No special resolution logic is needed or
+  # present for this to work.
   REAL_TEMP_DIR="$(mktemp -d)"
   SYMLINK_TEMP_DIR="$(mktemp -u)"
   ln -s "$REAL_TEMP_DIR" "$SYMLINK_TEMP_DIR"
