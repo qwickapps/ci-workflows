@@ -1,17 +1,279 @@
-name: Main Push Guard
+name: Main Push Guard (Reusable)
 
-# ci-workflows#175: thin wrapper. All logic lives in the reusable workflow so
-# there is one place to fix this kind of bug instead of N per-repo copies.
+# Reusable workflow - called by thin caller workflows in consuming repos.
+# Runs on pushes to main/dev: type-check, tests, Docker build+push to GHCR.
+# This is the gate that produces the deployable artifact after merge.
+
 on:
-  push:
-    branches: [main, dev]
+  workflow_call:
+    inputs:
+      language:
+        description: 'Project language (ts | js | go | python)'
+        required: false
+        type: string
+        default: 'ts'
+      image_name:
+        description: 'Docker image name (e.g. img-forge)'
+        required: true
+        type: string
+      dockerfile_path:
+        description: 'Path to the Dockerfile relative to repo root'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      node_version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '20'
+      runs_on:
+        description: 'Runner label(s) as a JSON array string'
+        required: false
+        type: string
+        default: '["self-hosted", "macmini"]'
+      enforce_blue_green_deploy_contract:
+        description: 'Fail changed .github/workflows/*deploy*.yml files unless they call the canonical blue-green reusable workflow or carry an exemption.'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      GHCR_PUSH_TOKEN:
+        required: false
+    # ci-workflows#122: the build-push job below already declares these as
+    # job-level `outputs`, but GitHub Actions never exposes a reusable
+    # workflow's job outputs to the caller unless the reusable workflow
+    # re-declares them here. Without this block, every consumer's
+    # `needs.<job-that-calls-this>.outputs.image_ref` silently resolved to
+    # an empty string — no error, no warning. Traced live in
+    # qwickapps/mcp#333: mcp's deploy.yml read that empty output, fell back
+    # to a default image path that rebuilt under the wrong GHCR repo name,
+    # and silently retagged `:release-candidate` there instead of the real
+    # image — leaving the real tag stuck on a two-month-old commit despite
+    # every push reporting success.
+    outputs:
+      image_ref:
+        description: 'Fully-qualified image ref that was built and pushed (registry/owner/image:sha-tag)'
+        value: ${{ jobs.build-push.outputs.image_ref }}
+      image_tag:
+        description: 'Just the sha-<short> tag portion of image_ref'
+        value: ${{ jobs.build-push.outputs.image_tag }}
 
-permissions:
-  contents: read
-  issues: write
-  pull-requests: read
+env:
+  REGISTRY: ghcr.io
+  OWNER: qwickapps
 
 jobs:
-  guard:
-    uses: qwickapps/ci-workflows/.github/workflows/main-push-guard-reusable.yml@main
-    secrets: inherit
+  # ---------------------------------------------------------------------------
+  # 0. Blue-green deploy contract guard
+  # ---------------------------------------------------------------------------
+  blue-green-deploy-contract:
+    name: Blue-Green Deploy Contract
+    if: inputs.enforce_blue_green_deploy_contract
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout ci-workflows guard script
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          path: .ci-workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute changed file range
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=50
+            BASE_SHA="$(git merge-base "origin/${{ github.base_ref }}" HEAD)"
+            HEAD_SHA="${{ github.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            BASE_SHA="HEAD^"
+            HEAD_SHA="HEAD"
+          else
+            BASE_SHA=""
+            HEAD_SHA="HEAD"
+          fi
+
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Blue-green guard range: ${BASE_SHA:-<initial>}..${HEAD_SHA}"
+
+      - name: Enforce reusable deploy workflow
+        env:
+          BASE_SHA: ${{ steps.diff.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.diff.outputs.head_sha }}
+        run: |
+          chmod +x .ci-workflows/scripts/blue-green-workflow-guard.sh
+          .ci-workflows/scripts/blue-green-workflow-guard.sh
+
+  # ---------------------------------------------------------------------------
+  # 1. Test (type-check + unit tests)
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - name: Prepare runner (per-job hygiene)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The self-hosted macOS runners re-degrade between jobs (pnpm store,
+          # docker keychain, stale git auth, temp dir). Neutralize the recurring
+          # failure modes deterministically BEFORE checkout so runs are reliable.
+          mkdir -p "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          git config --global --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.docker/config.json" ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore) | del(.credHelpers)' "$HOME/.docker/config.json" > "$tmp" 2>/dev/null \
+              && mv "$tmp" "$HOME/.docker/config.json" || rm -f "$tmp"
+          fi
+          command -v pnpm >/dev/null 2>&1 && pnpm store prune >/dev/null 2>&1 || true
+          echo "runner hygiene complete"
+
+      - uses: actions/checkout@v4
+        with:
+          # .ci-workflows is CI tooling, not app code. Skip persisting the auth
+          # header into the submodule — that step fails on the macOS self-hosted
+          # runner ("Unable to replace auth placeholder in .git/config"). The
+          # submodule is still fetched; build/test are read-only and don't push.
+          persist-credentials: false
+
+      - name: Reset and init ci-workflows submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .gitmodules ]; then
+            submodule_paths="$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' || true)"
+            while IFS= read -r submodule_path; do
+              [ -n "$submodule_path" ] || continue
+              if git -C "$submodule_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$submodule_path" checkout -- .
+              fi
+            done <<< "$submodule_paths"
+            git submodule update --init
+          fi
+
+      - name: Setup Node.js
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install pnpm
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        # --force overwrites stale pnpm/pnpx symlinks left in the reused node
+        # toolcache on the self-hosted runner (npm errors EEXIST otherwise).
+        run: npm install -g pnpm --force
+
+      - name: Install dependencies
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check + build
+        if: inputs.language == 'ts'
+        run: pnpm build
+
+      - name: Run tests
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        run: pnpm test
+
+  # ---------------------------------------------------------------------------
+  # 2. Build and push Docker image (tagged with commit SHA)
+  # ---------------------------------------------------------------------------
+  build-push:
+    name: Build and Push Docker Image
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    needs: [test]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_CONFIG: /tmp/docker-config-${{ github.run_id }}
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Prepare runner (per-job hygiene)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Same per-job hygiene as the Test job — see note there. Runs before
+          # checkout so the build job is reliable on the re-degrading runners.
+          mkdir -p "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          git config --global --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.docker/config.json" ]; then
+            tmp="$(mktemp)"
+            jq 'del(.credsStore) | del(.credstore) | del(.credHelpers)' "$HOME/.docker/config.json" > "$tmp" 2>/dev/null \
+              && mv "$tmp" "$HOME/.docker/config.json" || rm -f "$tmp"
+          fi
+          command -v pnpm >/dev/null 2>&1 && pnpm store prune >/dev/null 2>&1 || true
+          echo "runner hygiene complete"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # See note above: skip submodule credential-persist (fails on macOS
+          # self-hosted runner; submodule is still fetched, build is read-only).
+          persist-credentials: false
+
+      - name: Reset and init ci-workflows submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .gitmodules ]; then
+            submodule_paths="$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}' || true)"
+            while IFS= read -r submodule_path; do
+              [ -n "$submodule_path" ] || continue
+              if git -C "$submodule_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$submodule_path" checkout -- .
+              fi
+            done <<< "$submodule_paths"
+            git submodule update --init
+          fi
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA="${{ github.sha }}"
+          TAG="sha-${SHA:0:7}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ inputs.image_name }}:${TAG}"
+          echo "image_ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE}"
+
+      - name: Authenticate to GHCR (direct config write — no docker login/keychain)
+        # `docker login` (docker/login-action) invokes the osxkeychain helper on
+        # this self-hosted macOS runner regardless of credsStore, and it fails
+        # headless: "User interaction is not allowed (-25308)". Write the registry
+        # auth straight into the isolated DOCKER_CONFIG so buildx pushes with it
+        # and `docker login` is never called.
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          AUTH="$(printf '%s:%s' '${{ github.actor }}' "$GHCR_TOKEN" | base64 | tr -d '\n')"
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {"auths":{"${{ env.REGISTRY }}":{"auth":"$AUTH"}}}
+          EOF
+
+      - name: Build and push Docker image
+        # Build with plain docker (no buildx container needed — avoids "unexpected
+        # EOF" when Colima can't reliably start BuildKit containers). Push via
+        # docker push so the client passes $DOCKER_CONFIG auth to the daemon.
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ steps.meta.outputs.image_ref }}"
+          docker build \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t "$IMAGE_REF" \
+            -f "${{ inputs.dockerfile_path }}" \
+            .
+          docker push "$IMAGE_REF"
