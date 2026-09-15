@@ -624,12 +624,16 @@ jobs:
     permissions:
       packages: read
     env:
-      DOCKER_CONFIG: /tmp/docker-vp-${{ github.run_id }}
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-vp-${{ github.run_id }}
     steps:
       - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
+          # umask 077: this runner is shared (self-hosted, macmini) -- the
+          # default mode would leave config.json (containing a GHCR token)
+          # world/group-readable to every other job/user on the same box.
+          umask 077
           mkdir -p "$DOCKER_CONFIG/cli-plugins"
           # Symlink buildx so docker buildx works under the overridden DOCKER_CONFIG
           if [ -f "$HOME/.docker/cli-plugins/docker-buildx" ]; then
@@ -653,6 +657,9 @@ jobs:
             fi
             docker buildx imagetools inspect "$PRIOR_TAG" >/dev/null
           fi
+      - name: Remove GHCR credentials
+        if: always()
+        run: rm -rf "$DOCKER_CONFIG"
 
   # -- CapRover deployment --------------------------------------------
   deploy-caprover:
@@ -1113,10 +1120,15 @@ jobs:
     # which 401s against a private GHCR image (found 2026-09-15 -- this
     # job appears to have never actually succeeded before, since deploy
     # runs across the fleet almost never target stage=stable).
+    #
+    # contents: read is required too (unlike verify-provenance) -- this job
+    # runs actions/checkout to pull the repo's own scripts, which a
+    # packages-only permissions block would silently strip.
     permissions:
+      contents: read
       packages: read
     env:
-      DOCKER_CONFIG: /tmp/docker-stable-${{ github.run_id }}
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-stable-${{ github.run_id }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -1135,6 +1147,10 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
+          # umask 077: this runner is shared (self-hosted, macmini) -- the
+          # default mode would leave config.json (containing a GHCR token)
+          # world/group-readable to every other job/user on the same box.
+          umask 077
           mkdir -p "$DOCKER_CONFIG/cli-plugins"
           if [ -f "$HOME/.docker/cli-plugins/docker-buildx" ]; then
             ln -sf "$HOME/.docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
@@ -1279,3 +1295,7 @@ jobs:
           corepack install
           pnpm install --no-frozen-lockfile --store-dir .pnpm-store
           pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
+
+      - name: Remove GHCR credentials
+        if: always()
+        run: rm -rf "$DOCKER_CONFIG"
