@@ -14,9 +14,14 @@
 # correctly-scoped `permissions:` block: build (contents: read + packages:
 # write -- it checks out the repo AND pushes), verify-provenance (packages:
 # read only -- no checkout, pull-only), retag (packages: write -- no
-# checkout, writes a new manifest tag), deploy-stable (contents: read +
-# packages: read -- it checks out the repo's scripts AND pulls the stable
-# image, ci-workflows#183).
+# checkout, writes a new manifest tag).
+#
+# deploy-stable does NOT get a permissions block (mcp#392 / this PR):
+# now that it deploys via CapRover (deploy-from-ghcr.sh, which hands
+# CapRover a GHCR token as a plain script argument) instead of a local
+# `docker buildx imagetools inspect` + Docker-config login, it no longer
+# needs local GHCR package access at all -- same as deploy-caprover, which
+# has never had a permissions block for the same reason.
 #
 # A permissions: block on a job REPLACES the job's entire default
 # permission set, not adds to it -- this also checks that no OTHER job in
@@ -68,9 +73,6 @@ assert "verify-provenance job: permissions = {packages: read}" \
 assert "retag job: permissions = {packages: write}" \
   test "$(job_permissions_json retag)" = '{"packages": "write"}'
 
-assert "deploy-stable job: permissions = {contents: read, packages: read}" \
-  test "$(job_permissions_json deploy-stable)" = '{"contents": "read", "packages": "read"}'
-
 echo "== No workflow-level permissions block (per-job scoping only) =="
 TOPLEVEL=$(python3 -c "
 import yaml, json
@@ -82,7 +84,7 @@ assert "no workflow-level permissions: key (would broaden every other job too)" 
   test "$TOPLEVEL" = "null"
 
 echo "== Jobs without a GHCR-login step were not accidentally scoped =="
-for job in resolve-stage validate-env deploy-caprover scale-build-slot; do
+for job in resolve-stage validate-env deploy-caprover scale-build-slot deploy-stable; do
   assert "$job job: no permissions block added (keeps its actual defaults)" \
     test "$(job_permissions_json "$job")" = "null"
 done
