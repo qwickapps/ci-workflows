@@ -20,14 +20,25 @@
 #      an app that was promoted once, then had its stable slot deleted,
 #      still carries `release`/`stable` tag history in the registry.)
 #   3. Single-use-marker-absence: has a `blue-green/first-deploy-used`
-#      check run already been recorded for this app on the promoting
-#      commit? (Closes the gap that would remain even if 1 and 2 were both
+#      check run already been recorded for THIS app, on the promoting
+#      commit, by a legitimate ci-workflows deploy-app.yml run (not just
+#      any check run with a matching name -- see the binding verification
+#      below)? (Closes the gap that would remain even if 1 and 2 were both
 #      somehow cleared -- see create-blue-green-check-run.sh, which records
 #      this marker on a successful first-deploy.)
 #
 # A caller cannot claim "first deploy" by passing a flag -- every signal
 # here is queried directly from CapRover, GHCR, and GitHub, none of which a
 # workflow_dispatch input can fake.
+#
+# aos#193 review finding #5 (marker binding): the `blue-green/first-deploy-
+# used` check run is scoped by NAME to this exact app (`blue-green/first-
+# deploy-used/<app_name>`, not a bare shared name) so one app's marker on a
+# commit can never satisfy a different app's first-deploy check in a
+# multi-app repo, AND its embedded output.text payload (repo/app_name/sha/
+# workflow_ref) is verified here on read, not just checked for existence --
+# a check run whose payload doesn't match, or whose workflow_ref doesn't
+# point at THIS reusable workflow, is not counted as a valid marker.
 #
 # KNOWN LIMITATION (documented, not silently accepted): check 3 above is
 # scoped to the ONE commit sha this run is promoting (the exact sha
@@ -58,7 +69,10 @@
 #     --github-token      <token with packages:read, checks:read> \
 #     --owner             qwickapps \
 #     --repo              <owner>/<repo> \
-#     --image-name        img-<app> \
+#     --app-name          <app> \
+#     --image-name        <real GHCR package name from resolve-stage's
+#                          image_name output, NOT a string derived from
+#                          app_name -- see aos#193 review finding #3> \
 #     --commit-sha         <sha>
 #
 # Emits `first_deploy=true|false` to $GITHUB_OUTPUT if set, and always to
@@ -76,8 +90,18 @@ STABLE_APP_NAME=""
 GITHUB_TOKEN=""
 OWNER=""
 REPO=""
+APP_NAME=""
 IMAGE_NAME=""
 COMMIT_SHA=""
+
+# The one workflow this marker may legitimately be created by -- a
+# same-repo workflow with checks:write for some OTHER purpose cannot forge
+# a first-deploy-used marker for this app, because its own
+# github.workflow_ref will never match this prefix (aos#193 review finding
+# #5). Matched as a prefix, not an exact ref, so callers pinning
+# ci-workflows at different refs (@main, a tag, a sha) are all accepted --
+# only a DIFFERENT workflow file is rejected.
+EXPECTED_WORKFLOW_REF_PREFIX="qwickapps/ci-workflows/.github/workflows/deploy-app.yml@"
 
 usage() {
   cat >&2 <<'EOF'
@@ -85,7 +109,7 @@ Usage:
   check-first-deploy-proof.sh \
     --caprover-url <url> --caprover-password <pw> --stable-app-name <name> \
     --github-token <token> --owner <org> --repo <owner/repo> \
-    --image-name <img-app> --commit-sha <sha>
+    --app-name <app> --image-name <real-ghcr-package-name> --commit-sha <sha>
 EOF
 }
 
@@ -97,6 +121,7 @@ while [[ $# -gt 0 ]]; do
     --github-token)      GITHUB_TOKEN="$2"; shift 2 ;;
     --owner)              OWNER="$2"; shift 2 ;;
     --repo)               REPO="$2"; shift 2 ;;
+    --app-name)            APP_NAME="$2"; shift 2 ;;
     --image-name)         IMAGE_NAME="$2"; shift 2 ;;
     --commit-sha)         COMMIT_SHA="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -104,7 +129,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for var in CAPROVER_URL CAPROVER_PASSWORD STABLE_APP_NAME GITHUB_TOKEN OWNER REPO IMAGE_NAME COMMIT_SHA; do
+for var in CAPROVER_URL CAPROVER_PASSWORD STABLE_APP_NAME GITHUB_TOKEN OWNER REPO APP_NAME IMAGE_NAME COMMIT_SHA; do
   if [ -z "${!var}" ]; then
     flag="$(printf '%s' "$var" | tr '[:upper:]_' '[:lower:]-')"
     echo "::error::missing required argument: --$flag" >&2
@@ -123,13 +148,14 @@ if ! CAPROVER_TOKEN="$(caprover_login "$CAPROVER_URL" "$CAPROVER_PASSWORD")"; th
   exit 1
 fi
 
+# caprover_get_app_definitions itself now validates status==100 and an
+# actual array at .data.appDefinitions (aos#193 review finding #3) --
+# a CapRover HTTP-200 error envelope or a malformed/empty body is a hard
+# failure there, propagated as a non-zero return here, never silently
+# read as "no apps".
 CAPROVER_DEFS=""
 if ! CAPROVER_DEFS="$(caprover_get_app_definitions "$CAPROVER_URL" "$CAPROVER_TOKEN")"; then
   echo "::error::check-first-deploy-proof: CapRover appDefinitions query failed -- refusing to guess first-deploy status" >&2
-  exit 1
-fi
-if ! printf '%s' "$CAPROVER_DEFS" | jq -e . >/dev/null 2>&1; then
-  echo "::error::check-first-deploy-proof: CapRover returned non-JSON appDefinitions response" >&2
   exit 1
 fi
 
@@ -147,6 +173,20 @@ GHCR_RESPONSE=""
 GHCR_ERR_FILE="$(mktemp)"
 trap 'rm -f "$GHCR_ERR_FILE"' EXIT
 if GHCR_RESPONSE="$(gh api --paginate "orgs/${OWNER}/packages/container/${IMAGE_NAME}/versions?per_page=100" 2>"$GHCR_ERR_FILE")"; then
+  # aos#193 review finding #3: a non-JSON body or an EMPTY body (both
+  # possible on a 2xx response `gh api` happily passes through) must be a
+  # hard failure, never silently read as "no tag history". `jq -es .` on
+  # a genuinely empty string parses fine (slurp of zero inputs -> `[]`),
+  # so the empty-body case needs its own explicit check -- it is NOT
+  # caught by the JSON-parse check alone.
+  if [ -z "$GHCR_RESPONSE" ]; then
+    echo "::error::check-first-deploy-proof: GHCR package-versions response was empty -- refusing to guess first-deploy status" >&2
+    exit 1
+  fi
+  if ! printf '%s' "$GHCR_RESPONSE" | jq -es . >/dev/null 2>&1; then
+    echo "::error::check-first-deploy-proof: GHCR package-versions response is not valid JSON -- refusing to guess first-deploy status" >&2
+    exit 1
+  fi
   # `--paginate` prints one JSON array per page, concatenated (not merged
   # into a single array) -- `jq -s` (slurp) reads all of them as separate
   # inputs into one outer array, and `flatten` collapses that plus each
@@ -159,7 +199,17 @@ if GHCR_RESPONSE="$(gh api --paginate "orgs/${OWNER}/packages/container/${IMAGE_
     GHCR_TAG_HISTORY_FOUND="true"
   fi
 else
-  if grep -qi "HTTP 404" "$GHCR_ERR_FILE" || grep -qi "Package not found" "$GHCR_ERR_FILE"; then
+  # aos#193 review finding #3 (404 positive-evidence): a 404 counts as
+  # "package genuinely does not exist" ONLY when BOTH the HTTP status is
+  # 404 AND the response carries GitHub's own specific "Package not
+  # found." message -- requiring both (not either alone, which is what
+  # this used to do) means a 404 returned for a DIFFERENT reason (e.g. a
+  # private package this token cannot read, which GitHub APIs commonly
+  # also answer with a bare 404 rather than 403 to avoid confirming the
+  # resource's existence either way) does not carry that specific message
+  # and correctly falls through to the hard-failure branch below instead
+  # of being read as proof of absence.
+  if grep -qi "HTTP 404" "$GHCR_ERR_FILE" && grep -qi "Package not found" "$GHCR_ERR_FILE"; then
     echo "check-first-deploy-proof: GHCR package '${IMAGE_NAME}' does not exist -- no tag history (as expected for a genuinely new app)" >&2
     GHCR_TAG_HISTORY_FOUND="false"
   else
@@ -171,10 +221,12 @@ fi
 echo "check-first-deploy-proof: GHCR release/stable tag history found=${GHCR_TAG_HISTORY_FOUND}" >&2
 
 # ── Check 3: single-use marker absence (this commit only -- see limitation
-#    note above) ─────────────────────────────────────────────────────────
-echo "check-first-deploy-proof: checking for an existing blue-green/first-deploy-used marker on ${COMMIT_SHA}..." >&2
+#    note above), scoped and bound to THIS app + a legitimate creator ────
+MARKER_CHECK_NAME="blue-green/first-deploy-used/${APP_NAME}"
+MARKER_CHECK_NAME_ENCODED="$(jq -rn --arg n "$MARKER_CHECK_NAME" '$n | @uri')"
+echo "check-first-deploy-proof: checking for an existing '${MARKER_CHECK_NAME}' marker on ${COMMIT_SHA}..." >&2
 MARKER_RESPONSE=""
-if ! MARKER_RESPONSE="$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs?check_name=blue-green%2Ffirst-deploy-used" 2>&1)"; then
+if ! MARKER_RESPONSE="$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs?check_name=${MARKER_CHECK_NAME_ENCODED}" 2>&1)"; then
   echo "::error::check-first-deploy-proof: check-runs query failed unexpectedly -- refusing to guess first-deploy status" >&2
   echo "$MARKER_RESPONSE" >&2
   exit 1
@@ -184,9 +236,34 @@ if ! printf '%s' "$MARKER_RESPONSE" | jq -e . >/dev/null 2>&1; then
   exit 1
 fi
 
+# aos#193 review finding #5: existence of a same-named check run is not
+# enough -- verify each candidate's embedded output.text payload actually
+# binds repo+app_name+sha (redundant with the name scoping and the
+# per-sha API path, but cheap defense in depth) AND that it was created by
+# a legitimate ci-workflows deploy-app.yml run (workflow_ref prefix
+# match), not merely by some other same-repo workflow that also happens
+# to hold checks:write.
 MARKER_FOUND="false"
-if [ "$(printf '%s' "$MARKER_RESPONSE" | jq -r '.total_count // 0')" != "0" ]; then
-  MARKER_FOUND="true"
+MARKER_CANDIDATE_COUNT="$(printf '%s' "$MARKER_RESPONSE" | jq -r '.total_count // 0')"
+if [ "$MARKER_CANDIDATE_COUNT" != "0" ]; then
+  VALID_MARKER_COUNT="$(printf '%s' "$MARKER_RESPONSE" | jq -r \
+    --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$COMMIT_SHA" --arg wf_prefix "$EXPECTED_WORKFLOW_REF_PREFIX" '
+      [ .check_runs[]?
+        | (.output.text // "") as $t
+        | ($t | fromjson? // {}) as $p
+        | select(
+            ($p.repo // "") == $repo and
+            ($p.app_name // "") == $app and
+            ($p.sha // "") == $sha and
+            (($p.workflow_ref // "") | startswith($wf_prefix))
+          )
+      ] | length
+    ')"
+  if [ "${VALID_MARKER_COUNT:-0}" != "0" ]; then
+    MARKER_FOUND="true"
+  else
+    echo "::warning::check-first-deploy-proof: found ${MARKER_CANDIDATE_COUNT} check run(s) named '${MARKER_CHECK_NAME}' on ${COMMIT_SHA}, but none carried a valid, matching, legitimately-created payload -- not counted as a marker" >&2
+  fi
 fi
 echo "check-first-deploy-proof: first-deploy-used marker found=${MARKER_FOUND}" >&2
 
