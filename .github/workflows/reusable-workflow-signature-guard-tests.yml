@@ -1,0 +1,56 @@
+name: Reusable Workflow Signature Guard Tests
+
+# Regression gate for scripts/check-reusable-workflow-signatures.sh
+# (ci-workflows#175). That script exists because a PR silently changed
+# main-push-guard.yml's on.workflow_call inputs/secrets and broke 6
+# dependent repos for hours before anyone noticed. This workflow guards the
+# guard: it runs scripts/tests/check-reusable-workflow-signatures.test.sh,
+# which replays the incident's actual before/after commits
+# (28e9f941223e5ec54bfacd159bf3be0b86506376 ->
+# 90e0adf9226dcc426750a7785feba7301285d515) and asserts the script detects
+# it, checks the current repo state for false positives, and exercises a
+# synthetic key-rename case and a reformat-only (no-op) case.
+#
+# Tests:
+#   bash scripts/tests/check-reusable-workflow-signatures.test.sh
+#     - the real ci-workflows#175 incident is caught (FAIL)
+#     - the current repo state has no false positives (PASS)
+#     - a renamed input key in an otherwise-unchanged reusable workflow is
+#       caught (FAIL)
+#     - a purely cosmetic YAML reformat with identical key sets is not
+#       flagged (PASS)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/check-reusable-workflow-signatures.sh'
+      - 'scripts/tests/check-reusable-workflow-signatures.test.sh'
+      - '.github/workflows/reusable-workflow-signature-guard.yml'
+      - '.github/workflows/reusable-workflow-signature-guard-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/check-reusable-workflow-signatures.sh'
+      - 'scripts/tests/check-reusable-workflow-signatures.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  guard-tests:
+    name: check-reusable-workflow-signatures.sh behavior tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Run check-reusable-workflow-signatures.sh tests
+        run: bash scripts/tests/check-reusable-workflow-signatures.test.sh
