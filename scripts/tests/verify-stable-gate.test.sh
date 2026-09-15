@@ -317,6 +317,16 @@ write_valid_run_response
 set_response_one "success" "$MATCHING_PAYLOAD" "github-actions" "not-a-run-id"
 assert_refused "malformed external_id (cannot be parsed as <run_id>-<run_attempt>) -> refused" "missing_or_malformed_external_id"
 
+# aos#193 review finding B4b (round 6): check_run_binding_verify's own
+# regex must be canonical (no leading zeros), independent of
+# verify-stable-gate.sh's own dedup normalization -- this matters because
+# check-first-deploy-proof.sh's marker binding uses the SAME shared
+# function but has no equivalent run_id-dedup gate of its own to fall
+# back on.
+write_valid_run_response
+set_response_one "success" "$MATCHING_PAYLOAD" "github-actions" "0${EXTERNAL_ID}"
+assert_refused "non-canonical external_id with a leading zero on the run_id -> refused by check_run_binding_verify itself, not just by the caller's dedup logic" "missing_or_malformed_external_id"
+
 BAD_SHA_RUN="$(jq -nc --arg sha "ffffffffffffffffffffffffffffffffffffff" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: $wf}]}')"
 printf '%s' "$BAD_SHA_RUN" > "$RUN_RESPONSE_FILE"
 set_response_one "success" "$MATCHING_PAYLOAD"
@@ -499,46 +509,68 @@ assert_refused "jobs-lookup response is valid JSON but not an object -> could-no
 write_valid_jobs_response
 
 echo ""
-echo "== verify-stable-gate.sh: reruns create a second, equally legitimate record (aos#193 review finding M2, MEDIUM, round 4) =="
-echo "   Requiring uniqueness used to make a routine 'Re-run all jobs' on an"
-echo "   already-approved live run permanently refuse stable for that sha."
+echo "== verify-stable-gate.sh: reruns that get a genuinely NEW run_id still work (aos#193 review finding M2, MEDIUM, round 4) =="
+echo "   Requiring uniqueness used to make a routine full workflow re-dispatch"
+echo "   permanently refuse stable for that sha."
 
-# M2a: two check runs on the same sha, both fully legitimate, from a REAL
-# rerun -- which GitHub gives its own new run_attempt (a different
-# external_id: "${RUN_ID}-2" rather than "${RUN_ID}-1") -- must PASS,
-# deterministically selecting the newest (highest id). Using genuinely
-# distinct external_ids here is what makes this a real M2 rerun scenario
-# rather than the B4 forgery scenario below, which is distinguished
-# ONLY by both candidates naming the exact same external_id.
+# M2a: two check runs on the same sha, both fully legitimate, from a fresh
+# workflow DISPATCH (a genuinely different run_id, not just a different
+# attempt of the same run) -- must PASS, deterministically selecting the
+# newest (highest id). This is the only "rerun" shape that still passes
+# after round 6 -- see the round-6 section below for why a same-run-id
+# rerun (any attempt) no longer does.
 OLDER_ID=6000
 NEWER_ID=7000
-RERUN_EXTERNAL_ID="${RUN_ID}-2"
-set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$MATCHING_PAYLOAD" "$RERUN_EXTERNAL_ID"
-assert_passes "two check runs from a REAL rerun (distinct run_attempt each), BOTH fully legitimate -> PASS (does not refuse merely for existing twice)"
+FRESH_DISPATCH_EXTERNAL_ID="88776655-1"
+set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$MATCHING_PAYLOAD" "$FRESH_DISPATCH_EXTERNAL_ID"
+assert_passes "two check runs naming genuinely DIFFERENT run_ids (a fresh dispatch, not a rerun of the same run) -> PASS"
 
 echo ""
-echo "== verify-stable-gate.sh: duplicate record forgery (aos#193 review finding B4, BLOCKER, round 5) =="
-echo "   Newest-first selection alone let a forged record -- pointing"
-echo "   external_id at a genuine live run's run_id-attempt -- win over"
-echo "   the real approval, since binding only proves the NAMED run is"
-echo "   legitimate, never that it created THIS SPECIFIC check run."
+echo "== verify-stable-gate.sh: duplicate run_id forgery, canonical form (aos#193 review finding B4b, BLOCKER, round 6) =="
+echo "   Grouping by the raw external_id STRING (round 5) was evadable two"
+echo "   confirmed ways: a forged record naming a DIFFERENT ATTEMPT of a"
+echo "   genuine run ('Re-run failed jobs' copies its passed jobs forward),"
+echo "   and a forged record using a LEADING-ZERO external_id GitHub"
+echo "   resolves to the identical run/attempt as the genuine one."
 
-# B4: two check runs, BOTH naming the exact SAME external_id (the reviewer's
-# demonstrated scenario: a forged record with attacker payload pointing at
-# a genuine live run, newer than -- and about to shadow -- the real
-# approval). This must now be refused outright as ambiguous, before ever
-# reaching the binding check that would otherwise let the newer (forged)
-# one win.
 FORGED_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{
   repo: $repo, app_name: $app, sha: $sha, stage: "live", e2e_digest: "sha256:forged",
   directive_payload: "REPLAYED-FROM-OTHER-SHA", directive_signature: "forged-sig", directive_body: "forged body"
 }')"
+
+# B4b-1: two check runs, BOTH naming the exact SAME external_id (round 5's
+# original scenario) -- still refused.
 set_response_two "800" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "900" "$FORGED_PAYLOAD" "$EXTERNAL_ID"
-assert_refused "a forged record and the genuine approval both name the SAME external_id (same run_id-attempt) -> refused as ambiguous, never silently picks the newer/forged one" "ambiguous_duplicate_run_reference"
+assert_refused "a forged record and the genuine approval both name the SAME external_id -> refused as ambiguous" "ambiguous_duplicate_run_reference"
+
+# B4b-2: the reviewer's confirmed "Re-run failed jobs" scenario -- the
+# genuine record names "777-1", the forged record names "777-2" (a
+# DIFFERENT attempt of the exact SAME run_id 777, which copies the
+# already-passed deploy-caprover job forward into the new attempt). Round
+# 5's raw-string grouping treated these as different groups; round 6's
+# run_id-only grouping must not.
+set_response_two "800" "$MATCHING_PAYLOAD" "777-1" "900" "$FORGED_PAYLOAD" "777-2"
+assert_refused "genuine '777-1' and forged '777-2' name the SAME run_id (777), different attempts -> refused as ambiguous (this is the accepted rerun trade-off: get a fresh run)" "ambiguous_duplicate_run_reference"
+
+# B4b-3: leading zeros on the run_id component -- GitHub's API resolves
+# "actions/runs/0777" identically to "actions/runs/777" (confirmed live
+# against a real run), so a forged "0777-1" must be recognized as naming
+# the SAME run_id as a genuine "777-1", not a different one.
+set_response_two "800" "$MATCHING_PAYLOAD" "777-1" "900" "$FORGED_PAYLOAD" "0777-1"
+assert_refused "genuine '777-1' and forged '0777-1' (leading zero) name the SAME run_id -> refused as ambiguous" "ambiguous_duplicate_run_reference"
+
+# B4b-4: leading zeros on the attempt component -- ".../attempts/01/jobs"
+# resolves identically to ".../attempts/1/jobs". Since round 6 groups on
+# run_id ALONE (not the attempt), this was already covered by grouping on
+# run_id -- included anyway as an explicit, direct regression test for
+# the exact string pair the reviewer confirmed.
+set_response_two "800" "$MATCHING_PAYLOAD" "777-1" "900" "$FORGED_PAYLOAD" "777-01"
+assert_refused "genuine '777-1' and forged '777-01' (leading zero on the attempt) name the SAME run_id -> refused as ambiguous" "ambiguous_duplicate_run_reference"
 
 # Mutation-coverage proof: confirm the forged payload never actually
 # reaches aos when this refusal fires (i.e. this isn't just an incidental
 # early exit that still lets a later step leak the forged directive).
+# Re-uses the last (B4b-4) scenario's mocks.
 OUT="$TMPDIR/out-b4-forgery"
 rm -f "$AOS_CALLED_LOG"
 run_sut "$OUT" || true
