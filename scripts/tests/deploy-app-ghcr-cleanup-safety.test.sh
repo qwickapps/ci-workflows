@@ -153,6 +153,39 @@ for JOB in verify-provenance; do
 
   rm -rf "$AMBIENT_DIR"
 
+  # -- Scenario 4: RUNNER_TEMP is itself a symlink to a real directory
+  # (realistic on the actual macmini runner -- macOS's /tmp is a symlink
+  # to /private/tmp). The guard's `case "$TARGET" in "$RUNNER_TEMP"/*)` is
+  # a plain string-prefix match, not a filesystem resolution -- TARGET is
+  # built directly from $RUNNER_TEMP, so the prefix always matches
+  # regardless of whether $RUNNER_TEMP itself resolves through a symlink.
+  # `rm -rf "$TARGET"` then reaches the real target the normal way any
+  # shell command does: the OS transparently follows the symlink when the
+  # path is actually accessed. No special resolution logic is needed or
+  # present for this to work.
+  REAL_TEMP_DIR="$(mktemp -d)"
+  SYMLINK_TEMP_DIR="$(mktemp -u)"
+  ln -s "$REAL_TEMP_DIR" "$SYMLINK_TEMP_DIR"
+  REAL_TARGET="$REAL_TEMP_DIR/ghcr-docker-config-99999-$JOB"
+  mkdir -p "$REAL_TARGET"
+  echo '{"auths":{"ghcr.io":{"auth":"real-should-be-deleted-through-symlink"}}}' > "$REAL_TARGET/config.json"
+
+  set +e
+  RUNNER_TEMP="$SYMLINK_TEMP_DIR" \
+  GITHUB_RUN_ID="99999" \
+  GITHUB_JOB="$JOB" \
+    bash -c "$cleanup_script" >"$TEST_SCRATCH/cleanup_out_4.txt" 2>&1
+  cleanup_exit=$?
+  set -e
+
+  assert "$JOB: cleanup step exits 0 when RUNNER_TEMP is a symlink to a real dir" \
+    test "$cleanup_exit" -eq 0
+
+  assert "$JOB: real temp config dir is removed through the RUNNER_TEMP symlink" \
+    test ! -e "$REAL_TARGET"
+
+  rm -rf "$REAL_TEMP_DIR" "$SYMLINK_TEMP_DIR"
+
   echo ""
 done
 
