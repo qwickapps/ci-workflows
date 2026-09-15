@@ -101,6 +101,38 @@ elif env["PACKAGE_MANAGER"] != "${{ inputs.package_manager }}":
         "expected '${{ inputs.package_manager }}'"
     )
 
+# A step whose `if:` no longer matches exactly, or that gained
+# `continue-on-error: true`, lets Test go green without the validation
+# ever actually running or ever actually failing the job (round-2 LOW).
+expected_if = "inputs.language == 'ts' || inputs.language == 'js'"
+if str(step.get("if", "")) != expected_if:
+    errors.append(
+        f"the validation step's if: is {step.get('if')!r}, expected "
+        f"{expected_if!r} exactly -- a narrower condition would let it "
+        "silently not run for some ts/js callers"
+    )
+if step.get("continue-on-error"):
+    errors.append(
+        "the validation step has continue-on-error: true -- a failed "
+        "validation would no longer fail the job"
+    )
+
+# The platforms validation step (validate-platforms job) is the other half
+# of the same fix; hold it to the same no-interpolation standard.
+platforms_job = jobs.get("validate-platforms") or {}
+platforms_steps = platforms_job.get("steps") or []
+platforms_step = platforms_steps[0] if platforms_steps else {}
+platforms_run = platforms_step.get("run") or ""
+platforms_env = platforms_step.get("env") or {}
+if "${{" in platforms_run:
+    errors.append(
+        "validate-platforms's run: script still contains a raw '${{' "
+        "expression -- PLATFORMS must be passed through env:, never "
+        "interpolated directly into the shell"
+    )
+if "PLATFORMS" not in platforms_env:
+    errors.append("validate-platforms's step has no env.PLATFORMS")
+
 if errors:
     for e in errors:
         sys.stderr.write(f"FAIL: {e}\n")
@@ -111,7 +143,7 @@ with open(run_body_out, "w", encoding="utf-8") as fh:
 sys.exit(0)
 PY
 then
-  echo "  PASS: validation step is jobs.test's first step, no raw \${{ }} in its script, PACKAGE_MANAGER comes from env"
+  echo "  PASS: validation step is jobs.test's first step (exact if:, no continue-on-error), no raw \${{ }} in either validation step's script, both read from env"
   pass=$((pass + 1))
 else
   echo "  FAIL: validation step structure regressed (see errors above)"
