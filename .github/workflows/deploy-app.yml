@@ -740,18 +740,40 @@ jobs:
       needs.resolve-stage.outputs.caprover_required == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
-    # aos#193 Phase 1: this job's first-deploy proof (§2) needs
-    # packages: read to query GHCR release/stable tag history via the GH
-    # Packages API, and checks: write to query/create
-    # blue-green/first-deploy-used and blue-green/live-e2e-approved check
-    # runs. contents: read matches actions/checkout's existing implicit
-    # default (additive, not restrictive) -- see the build job's identical
-    # comment (ci-workflows#137) for why an explicit permissions block is
-    # needed at all once GITHUB_TOKEN's org default doesn't include these.
-    permissions:
-      contents: read
-      packages: read
-      checks: write
+    # aos#193 Phase 1 review (round 2): this job deliberately carries NO
+    # explicit `permissions:` block, exactly matching this job's state
+    # before aos#193 Phase 1 -- do not add one, including `checks:
+    # write`/`packages: read` for the first-deploy-proof feature below,
+    # without first landing the Phase 1b follow-up described here.
+    #
+    # Why: a reusable-workflow job's requested permissions must be a
+    # SUBSET of what the calling workflow itself grants, and GitHub
+    # validates this for the WHOLE workflow_call at dispatch time -- not
+    # lazily per job, and NOT skipped for a job whose `if:` would
+    # evaluate false. Confirmed empirically for this exact PR (not just
+    # from ci-workflows#138/qwickapps/forge#254's prior incident, itself
+    # about an unconditional job): a throwaway reusable-workflow probe
+    # with a second job carrying `permissions: {checks: write}` gated
+    # behind `if: ${{ inputs.enable_gated }}` (default false, never
+    # evaluating true) still produced `conclusion: startup_failure` with
+    # zero jobs created, from a caller granting only `contents: read`.
+    # None of the 14 org workflows that call deploy-app.yml currently
+    # grant `checks` at all, so adding it here -- even behind an `if:` --
+    # would break build/uat/live for every one of them the moment this
+    # merged, not just for callers that opt into
+    # require_live_approval_check.
+    #
+    # The first-deploy-proof step group below (gated behind
+    # require_live_approval_check == true, itself off by default and
+    # already documented as "cannot succeed in production today") needs
+    # packages: read and checks: write/read to do its job. Until the
+    # required Phase 1b follow-up lands `checks: write`/`packages: read`
+    # (or broader) in all 14 callers' own top-level permissions -- so this
+    # job can legally request them back down -- any caller that opts in
+    # early gets a clear, expected, fail-closed error from the
+    # checks-API-touching steps (create-blue-green-check-run.sh's
+    # --on-permission-denied, or check-first-deploy-proof.sh's own
+    # hard-failure-on-query-error path), never a silent bypass.
     concurrency:
       group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
@@ -858,17 +880,37 @@ jobs:
           exit 1
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
-        # Only meaningful for the live stage -- see the "Ensure stable slot
-        # is up" step below, which this feeds. Runs BEFORE the CapRover
-        # credential step's password is needed elsewhere, but AFTER it has
-        # already exported CAPROVER_URL/CAPROVER_PASSWORD into $GITHUB_ENV
-        # above, so both are available here as plain env vars.
+        # aos#193 review finding #2: gated behind require_live_approval_check
+        # == true (in addition to stage == 'live'), the SAME opt-in the rest
+        # of this Phase 1 feature already uses and that's already documented
+        # as "cannot succeed in production today, fails closed by design" --
+        # not just stage == 'live' alone. Every one of the 14 current
+        # callers never sets require_live_approval_check, so this step, the
+        # 3 API calls it makes, and the branch below that would otherwise
+        # skip the unconditional stable-health check are entirely unreached
+        # for them: their live deploy is byte-for-byte identical to before
+        # this feature existed.
+        #
+        # Runs BEFORE the CapRover credential step's password is needed
+        # elsewhere, but AFTER it has already exported
+        # CAPROVER_URL/CAPROVER_PASSWORD into $GITHUB_ENV above, so both are
+        # available here as plain env vars.
         id: first-deploy-proof
-        if: needs.resolve-stage.outputs.stage == 'live'
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # aos#193 review finding #3: the real GHCR package name comes
+          # from resolve-stage's own image_name output (already correctly
+          # resolved for every caller, including ones whose real image
+          # name differs from a derived "img-<app_name>" string, e.g.
+          # mcp's img-qwickapps-mcp-prod or secrets' img-secrets) -- never
+          # reconstructed here. image_name is the full "registry/owner/pkg"
+          # path; the GH Packages API wants just the trailing package-name
+          # segment.
+          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
+          GHCR_PACKAGE_NAME="${IMAGE_BASE##*/}"
           .ci-workflows/scripts/check-first-deploy-proof.sh \
             --caprover-url "$CAPROVER_URL" \
             --caprover-password "$CAPROVER_PASSWORD" \
@@ -876,20 +918,23 @@ jobs:
             --github-token "$GH_TOKEN" \
             --owner "${{ env.OWNER }}" \
             --repo "${{ github.repository }}" \
-            --image-name "img-${{ inputs.app_name }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --image-name "$GHCR_PACKAGE_NAME" \
             --commit-sha "${{ github.sha }}"
 
       - name: Ensure stable slot is up for live promotion
-        # aos#193 Phase 1 §2: a first-deploy claim is allowed ONLY when
+        # aos#193 Phase 1 §2: a first-deploy claim is allowed ONLY when the
+        # caller opted into require_live_approval_check AND
         # check-first-deploy-proof.sh found ALL THREE of
         # CapRover-app-absence, GHCR release/stable-tag-history-absence,
         # and first-deploy-used-marker-absence -- every one of those is
         # queried directly from CapRover/GHCR/GitHub above, not asserted by
-        # any input. When even one indicates "already deployed before",
-        # this falls through to the exact same unconditional health check
-        # that ran here unconditionally before this change -- nothing about
-        # today's non-first-deploy behavior is altered.
-        if: needs.resolve-stage.outputs.stage == 'live' && steps.first-deploy-proof.outputs.first_deploy != 'true'
+        # any input. When the opt-in is off (today's default for all 14
+        # callers) or even one signal indicates "already deployed before",
+        # this runs the exact same unconditional health check that ran here
+        # unconditionally before this feature existed -- nothing about
+        # today's non-opted-in behavior is altered.
+        if: needs.resolve-stage.outputs.stage == 'live' && (inputs.require_live_approval_check != true || steps.first-deploy-proof.outputs.first_deploy != 'true')
         run: |
           set -euo pipefail
           STABLE_URL="${{ needs.resolve-stage.outputs.stable_app_url }}"
@@ -909,7 +954,7 @@ jobs:
           exit 1
 
       - name: First deploy allowed (no stable slot to check yet)
-        if: needs.resolve-stage.outputs.stage == 'live' && steps.first-deploy-proof.outputs.first_deploy == 'true'
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true && steps.first-deploy-proof.outputs.first_deploy == 'true'
         run: |
           echo "First-deploy proof satisfied (CapRover app absent, no GHCR release/stable tag history, no first-deploy-used marker) -- skipping the stable-health precondition for this app's very first live promotion (aos#193 Phase 1 §2)."
 
@@ -1058,6 +1103,17 @@ jobs:
           IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
           APP_NAME: ${{ inputs.app_name }}
           ENV_LABEL: ${{ needs.resolve-stage.outputs.env_label }}
+          # aos#193 review finding #5 (LOW): read via an env var for the
+          # digest computation below, never re-interpolated a second time
+          # via ${{ inputs.e2e_command }} inside a double-quoted printf
+          # argument -- a command string containing a literal `"` would
+          # break that line's quoting (after e2e already passed, so it's a
+          # real footgun: a green e2e run followed by a broken digest
+          # step). The FIRST use of inputs.e2e_command below (as the
+          # literal command executed) is unaffected -- it is meant to be
+          # interpolated as raw shell, same as smoke_test_command already
+          # is elsewhere in this file.
+          E2E_COMMAND: ${{ inputs.e2e_command }}
         run: |
           set -euo pipefail
           ${{ inputs.e2e_command }}
@@ -1065,7 +1121,7 @@ jobs:
           # e2e run that actually happened, not just to a claim that
           # something ran -- sha256 of what was validated (command +
           # image_ref + the commit it ran against), not of secret output.
-          E2E_DIGEST="$(printf '%s' "${{ inputs.e2e_command }}|${{ needs.resolve-stage.outputs.image_ref }}|${{ github.sha }}" | sha256sum | awk '{print $1}')"
+          E2E_DIGEST="$(printf '%s' "${E2E_COMMAND}|${IMAGE_REF}|${{ github.sha }}" | sha256sum | awk '{print $1}')"
           echo "e2e_digest=sha256:${E2E_DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Create live-e2e-approved check run (aos#193 Phase 1 §1)
@@ -1086,6 +1142,20 @@ jobs:
         # signature (refuses closed), so require_live_approval_check: true
         # cannot pass the stable gate until that bridge lands, by
         # construction.
+        #
+        # aos#193 review finding #5: the check run's NAME is scoped to
+        # this app (blue-green/live-e2e-approved/<app_name>, not a bare
+        # shared name) so one app's approval on a commit can never satisfy
+        # a different app's stable gate in a multi-app repo; app_name and
+        # workflow_ref are also embedded in output.text and re-verified by
+        # verify-stable-gate.sh on read, binding this record to
+        # {repo, app_name, sha, creating workflow run identity} in full,
+        # not just repo+sha. --on-permission-denied skip: see finding #1's
+        # comment on create-blue-green-check-run.sh -- deploy-caprover has
+        # no checks:write today by design (Phase 1b follow-up); a 403 here
+        # must not fail a live deploy that already passed real e2e/health
+        # checks, only skip recording the approval (verify-stable-gate.sh
+        # then correctly refuses closed on the missing record).
         if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true && inputs.e2e_command != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1093,14 +1163,18 @@ jobs:
           set -euo pipefail
           OUTPUT_JSON="$(jq -nc \
             --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
             --arg sha "${{ github.sha }}" \
             --arg stage "live" \
             --arg e2e_digest "${{ steps.e2e-command.outputs.e2e_digest }}" \
+            --arg workflow_ref "${{ github.workflow_ref }}" \
             '{
               repo: $repo,
+              app_name: $app,
               sha: $sha,
               stage: $stage,
               e2e_digest: $e2e_digest,
+              workflow_ref: $workflow_ref,
               directive_payload: null,
               directive_signature: null,
               directive_body: null
@@ -1109,18 +1183,33 @@ jobs:
             --github-token "$GH_TOKEN" \
             --repo "${{ github.repository }}" \
             --sha "${{ github.sha }}" \
-            --name "blue-green/live-e2e-approved" \
+            --name "blue-green/live-e2e-approved/${{ inputs.app_name }}" \
             --title "Live e2e validated (aos#193 Phase 1)" \
             --summary "e2e_command passed for ${{ inputs.app_name }} at ${{ needs.resolve-stage.outputs.image_ref }}. directive_payload/signature are null pending aos#193 §1's signing bridge -- deploy-stable's gate refuses closed on this until that bridge is wired." \
-            --output-json "$OUTPUT_JSON"
+            --output-json "$OUTPUT_JSON" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied skip
 
       - name: Mark first-deploy-used (aos#193 Phase 1 §2)
         # Recorded only once the live promotion above has actually
         # succeeded (this step runs after "Validate target slot health"
         # and "Deep subsystem health check", both of which fail the job on
         # any problem) -- so a first-deploy claim that never actually went
-        # healthy never burns the single-use marker.
-        if: needs.resolve-stage.outputs.stage == 'live' && steps.first-deploy-proof.outputs.first_deploy == 'true'
+        # healthy never burns the single-use marker. Gated on
+        # require_live_approval_check == true too (aos#193 review finding
+        # #2): first-deploy-proof.outputs.first_deploy can only be 'true'
+        # when that step ran at all, which itself now requires the same
+        # opt-in, but the explicit condition here keeps this step's
+        # gating self-evident without relying on that transitively.
+        #
+        # aos#193 review finding #5: same app-scoped name + embedded
+        # app_name/workflow_ref binding as the live-e2e-approved check run
+        # above, and the identical --on-permission-denied skip reasoning
+        # (a missing marker here just means a LATER run's check 3 can't
+        # see it -- checks 1/2 in check-first-deploy-proof.sh, which don't
+        # depend on this marker, remain the primary proof; see that
+        # script's own documented limitation).
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true && steps.first-deploy-proof.outputs.first_deploy == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1129,10 +1218,18 @@ jobs:
             --github-token "$GH_TOKEN" \
             --repo "${{ github.repository }}" \
             --sha "${{ github.sha }}" \
-            --name "blue-green/first-deploy-used" \
+            --name "blue-green/first-deploy-used/${{ inputs.app_name }}" \
             --title "First-deploy proof consumed (aos#193 Phase 1)" \
             --summary "${{ inputs.app_name }} live promotion at ${{ needs.resolve-stage.outputs.image_ref }} used the first-deploy allowance -- a second first-deploy claim for this app on this commit is now refused by check-first-deploy-proof.sh regardless of CapRover/GHCR state." \
-            --output-json "$(jq -nc --arg app "${{ inputs.app_name }}" --arg image "${{ needs.resolve-stage.outputs.image_ref }}" '{app_name: $app, image_ref: $image}')"
+            --output-json "$(jq -nc \
+              --arg repo "${{ github.repository }}" \
+              --arg app "${{ inputs.app_name }}" \
+              --arg sha "${{ github.sha }}" \
+              --arg image "${{ needs.resolve-stage.outputs.image_ref }}" \
+              --arg workflow_ref "${{ github.workflow_ref }}" \
+              '{repo: $repo, app_name: $app, sha: $sha, image_ref: $image, workflow_ref: $workflow_ref}')" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied skip
 
       - name: Route qwickway to ordered live/stable for live stage
         if: needs.resolve-stage.outputs.stage == 'live'
@@ -1339,13 +1436,16 @@ jobs:
       needs.verify-provenance.result == 'success' &&
       needs.resolve-stage.outputs.stage == 'stable'
     runs-on: [self-hosted, macmini]
-    # aos#193 Phase 1: checks: read is only needed when the caller opts
-    # into require_live_approval_check (the gate step below reads, never
-    # writes, a check run). contents: read matches actions/checkout's
-    # existing implicit default.
-    permissions:
-      contents: read
-      checks: read
+    # aos#193 Phase 1 review (round 2): no explicit `permissions:` block
+    # here either, for the identical reason given on deploy-caprover
+    # above (empirically confirmed: a job's elevated permissions trip
+    # reusable-workflow startup_failure validation for the WHOLE workflow
+    # regardless of that job's own `if:`). The gate step below
+    # (require_live_approval_check == true only) needs checks: read to
+    # query the live-e2e-approved check run; until the Phase 1b follow-up
+    # lands that permission in the 14 callers' own top-level grants, an
+    # early opt-in gets a clear, fail-closed refusal (never a bypass) from
+    # verify-stable-gate.sh's existing check_runs_query_failed path.
     concurrency:
       group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
@@ -1376,22 +1476,66 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x .ci-workflows/scripts/*.sh
-          if ! command -v aos >/dev/null 2>&1; then
-            echo "::group::Installing aos CLI (qwickapps/aos@41f0a59, aos#123/#125 directive verify)"
-            # Pinned to the exact reviewed/merged commit the aos#193 design
-            # doc built this contract against (round-6 review, 197 tests
-            # passing), not @main -- bump this deliberately, not silently,
-            # when aos ships a directive-verify-relevant change.
-            python3 -m pip install --user --quiet \
-              "git+https://github.com/qwickapps/aos.git@41f0a59ec3990e6aad8649ff79e341d3e6ea25a3"
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "PATH=$HOME/.local/bin:$PATH" >> "$GITHUB_ENV"
-            echo "::endgroup::"
+
+          AOS_PIN_COMMIT="41f0a59ec3990e6aad8649ff79e341d3e6ea25a3"
+          AOS_VENV="${RUNNER_TEMP}/aos-venv-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          # aos#193 review finding #4: ALWAYS install into a fresh per-job
+          # venv under $RUNNER_TEMP -- never conditionally skip based on
+          # `command -v aos`. This runner is shared (self-hosted, macmini,
+          # the same fleet aos itself runs on); a stand-in `aos` earlier on
+          # PATH, or a stale ~/.local/bin install from an unrelated job on
+          # the same box, would otherwise silently decide pass/fail for
+          # this gate (reviewer-demonstrated real repro: a no-op `aos` that
+          # just exits 0 makes this step report PASS regardless of the
+          # real directive).
+          echo "::group::Installing pinned aos CLI (qwickapps/aos@41f0a59, aos#123/#125 directive verify) into a fresh per-job venv"
+          # Pinned to the exact reviewed/merged commit the aos#193 design
+          # doc built this contract against (round-6 review, 197 tests
+          # passing), not @main -- bump this deliberately, not silently,
+          # when aos ships a directive-verify-relevant change.
+          python3 -m venv "$AOS_VENV"
+          "$AOS_VENV/bin/pip" install --quiet "git+https://github.com/qwickapps/aos.git@${AOS_PIN_COMMIT}"
+
+          # Verify the installed binary's commit matches the pin exactly,
+          # from pip's own PEP 610 install-source record -- never just
+          # trust that the install command we ran is the code that landed.
+          DIST_INFO_DIR="$(find "$AOS_VENV" -maxdepth 4 -iname 'aos-*.dist-info' -print -quit)"
+          if [ -z "$DIST_INFO_DIR" ] || [ ! -f "$DIST_INFO_DIR/direct_url.json" ]; then
+            echo "::error::verify-stable-gate: could not locate aos dist-info/direct_url.json after install -- cannot confirm the pinned commit was actually installed" >&2
+            exit 1
           fi
+          INSTALLED_COMMIT="$(jq -r '.vcs_info.commit_id // empty' "$DIST_INFO_DIR/direct_url.json")"
+          if [ "$INSTALLED_COMMIT" != "$AOS_PIN_COMMIT" ]; then
+            echo "::error::verify-stable-gate: installed aos commit '${INSTALLED_COMMIT:-<none>}' does not match the pinned commit '${AOS_PIN_COMMIT}'" >&2
+            exit 1
+          fi
+          echo "Confirmed installed aos matches pinned commit ${AOS_PIN_COMMIT}"
+          echo "::endgroup::"
+
+          AOS_BIN="$AOS_VENV/bin/aos"
+          if [ ! -x "$AOS_BIN" ]; then
+            echo "::error::verify-stable-gate: pinned aos binary not found at $AOS_BIN after install" >&2
+            exit 1
+          fi
+
+          # A fresh, job-scoped, empty environment root -- never the shared
+          # macmini runner's ambient $AOS_ENVIRONMENT_ROOT, if any is set.
+          # verify-stable-gate.sh itself explicitly unsets $AOS_MANIFEST
+          # (never inherited) for the aos call, so manifest resolution
+          # always falls back to this pinned venv's own bundled default
+          # manifest -- see that script's header comment for why that is
+          # now a designed-in fail-closed guarantee, not an accident.
+          AOS_ENV_ROOT="${RUNNER_TEMP}/aos-stable-gate-env-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$AOS_ENV_ROOT"
+
           .ci-workflows/scripts/verify-stable-gate.sh \
             --github-token "${{ github.token }}" \
             --repo "${{ github.repository }}" \
-            --sha "${{ github.sha }}"
+            --app-name "${{ inputs.app_name }}" \
+            --sha "${{ github.sha }}" \
+            --aos-bin "$AOS_BIN" \
+            --aos-environment-root "$AOS_ENV_ROOT"
 
       - name: Resolve CapRover credentials
         run: |
