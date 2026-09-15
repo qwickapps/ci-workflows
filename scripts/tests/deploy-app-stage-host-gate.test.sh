@@ -4,8 +4,11 @@
 # implemented in the resolve-stage job's embedded script in deploy-app.yml:
 #
 #   Check 1 (stage/host agreement): a caller deploying stage=build to
-#   anything but oci-dev (captain.dev.qwickforge.com), or stage=uat/live to
-#   anything but oci-main (captain.app.qwickforge.com), is refused.
+#   anything but oci-dev (captain.dev.qwickforge.com), or
+#   stage=uat/live/stable to anything but oci-main
+#   (captain.app.qwickforge.com), is refused. `stable` was exempted from
+#   this check until ci-workflows#187 closed the gap left once deploy-stable
+#   started deploying through CapRover (mcp#392, ci-workflows#186).
 #
 #   Check 2 (no per-environment build slots): a computed CapRover app name
 #   matching -(uat|live|stable)-build$ is refused outright.
@@ -148,11 +151,21 @@ IN_STAGE=live IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
 IN_STAGE=live IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_succeeds "live stage targeting oci-main host succeeds"
 
-# GREEN: stable stage is exempt from check 1 (never goes through CapRover)
-# regardless of caprover_host value -- required input, but unchecked here.
+# RED: ci-workflows#187 -- stable stage pointed at oci-dev must now be
+# refused too. Before #187's fix, stable was exempt from check 1 entirely
+# (it deployed through Coolify, never through deploy-caprover's gate); now
+# that deploy-stable deploys through CapRover using the caller's own
+# caprover_host (mcp#392, ci-workflows#186), the same faabzi-uat-build-shaped
+# mistake is possible for stable too if it stays exempt.
 IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
   IN_GATEWAY_STABLE_URL=http://demo-stable.taile324e7.ts.net:8080 \
-  assert_succeeds "stable stage is exempt from the host check"
+  assert_fails_with "ci-workflows#187: stable stage targeting oci-dev host is refused" \
+  "stage 'stable' must deploy to 'captain.app.qwickforge.com'"
+
+# GREEN: stable stage, correct oci-main host.
+IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  IN_GATEWAY_STABLE_URL=http://demo-stable.taile324e7.ts.net:8080 \
+  assert_succeeds "ci-workflows#187: stable stage targeting oci-main host succeeds"
 
 echo ""
 echo "== Check 2: no per-environment build slots =="

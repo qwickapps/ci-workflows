@@ -130,8 +130,38 @@ caprover_get_app_definitions() {
 
   caprover_populate_curl_args "$caprover_url" curl_args
 
-  curl "${curl_args[@]}" -X GET "${caprover_url}/api/v2/user/apps/appDefinitions" \
-    -H "x-captain-auth: ${token}"
+  local response status
+  response=$(curl "${curl_args[@]}" -X GET "${caprover_url}/api/v2/user/apps/appDefinitions" \
+    -H "x-captain-auth: ${token}")
+
+  if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    echo "Error: CapRover appDefinitions returned non-JSON response" >&2
+    echo "$response" | sed -n '1,10p' >&2
+    return 1
+  fi
+
+  # aos#193 review finding #3: CapRover returns errors as HTTP 200 with a
+  # status code in the body (e.g. {"status":1106,"description":"Auth token
+  # corrupted"}), which is valid JSON. A caller that only checked "is this
+  # JSON" (or that queried .data.appDefinitions[]? with the `?` silently
+  # swallowing the absent path) would read that error envelope's absent
+  # .data.appDefinitions as "no apps" / "app doesn't exist" -- not "the
+  # query failed". That let a CapRover auth/error response masquerade as
+  # first-deploy proof for an already-established app
+  # (check-first-deploy-proof.sh's check 1). status 100 is CapRover's own
+  # "OK" code; requiring it AND an actual array at .data.appDefinitions
+  # (not either alone) also catches a status:100 body with no data key at
+  # all, or a non-array .data.appDefinitions, as a hard failure rather
+  # than silently treating it as an empty app list.
+  status=$(echo "$response" | jq -r '.status // "null"')
+  if [ "$status" != "100" ] || ! echo "$response" | jq -e '(.data.appDefinitions // null) | type == "array"' >/dev/null 2>&1; then
+    local desc
+    desc=$(echo "$response" | jq -r '.description // ""' 2>/dev/null || echo "")
+    echo "Error: CapRover appDefinitions query did not return a valid app list (status=${status}${desc:+, description: $desc}) -- treating as a hard failure, never as app-absence" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$response"
 }
 
 # Upsert GHCR registry credentials on the target CapRover instance.

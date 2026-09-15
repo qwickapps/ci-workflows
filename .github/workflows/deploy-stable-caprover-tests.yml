@@ -14,12 +14,14 @@ on:
   pull_request:
     paths:
       - '.github/workflows/deploy-app.yml'
+      - 'scripts/aos-manifest/prime-manifest.yaml'
       - '.github/workflows/deploy-stable-caprover-tests.yml'
       - 'scripts/tests/deploy-stable-caprover.test.sh'
   push:
     branches: [main, dev]
     paths:
       - '.github/workflows/deploy-app.yml'
+      - 'scripts/aos-manifest/prime-manifest.yaml'
       - 'scripts/tests/deploy-stable-caprover.test.sh'
 
 permissions:

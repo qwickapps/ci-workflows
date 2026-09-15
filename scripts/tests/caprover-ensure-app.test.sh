@@ -47,7 +47,10 @@ mock_curl() {
   fi
 
   if [[ "$url" == *"/appDefinitions" && "$method" == "GET" ]]; then
-    printf '{"data":{"appDefinitions":[{"appName":"%s","hasPersistentData":%s}]}}\n' \
+    # status:100 required -- caprover_get_app_definitions (aos#193 review
+    # finding #3) now hard-fails without it, matching real CapRover's own
+    # response shape (status is always present on a real response).
+    printf '{"status":100,"data":{"appDefinitions":[{"appName":"%s","hasPersistentData":%s}]}}\n' \
       "${MOCK_APP_NAME:-testapp}" "${MOCK_EXISTING_PERSISTENT:-false}"
     return 0
   fi

@@ -144,6 +144,35 @@ on:
         type: string
         default: ''
 
+      # -- aos#193 Phase 1: blue-green SOP enforcement (additive) ----------
+      e2e_command:
+        description: >-
+          Optional real end-to-end test command (login works, MCP/API calls
+          return correct data -- HTTP 200 alone does NOT satisfy this, per
+          the blue-green SOP) run against build/uat/live after a successful
+          deploy, with the same env-var-injection pattern as
+          smoke_test_command: APP_URL, HEALTH_PATH, IMAGE_REF, APP_NAME,
+          ENV_LABEL. Unset = skipped, identical to today's behavior
+          (aos#193 Phase 1 is purely additive; nothing runs unless a caller
+          opts in).
+        type: string
+        default: ''
+
+      require_live_approval_check:
+        description: >-
+          When true, deploy-stable requires exactly one
+          blue-green/live-e2e-approved check run on the exact commit sha
+          about to deploy, conclusion==success, plus a passing `aos
+          directive verify` result over its embedded payload (aos#193
+          Phase 1 §5). Default false preserves today's deploy-stable
+          behavior exactly. NOTE: the signing bridge that would let a real
+          directive get attached to that check run is not built yet
+          (aos#193, latest comment) -- setting this true cannot succeed in
+          production today and is not yet meant to be used there; it fails
+          closed by design, not by omission.
+        type: boolean
+        default: false
+
 env:
   REGISTRY: ghcr.io
   OWNER: qwickapps
@@ -217,58 +246,64 @@ jobs:
           esac
 
           # ci-workflows#153 check 1: stage/host agreement. `<app>-build`
-          # must deploy to oci-dev; `<app>-uat`/`<app>-live` must deploy to
-          # oci-main. This is a caller-input check, not derived from STAGE
-          # alone: TARGET_APP_URL below is computed unconditionally from the
-          # canonical dev/app.qwickforge.com pattern for informational
-          # (health-check) purposes, but the actual CapRover deploy target
-          # is caprover_url/caprover_host, both caller-supplied -- nothing
-          # upstream of this point validated those against stage, which is
-          # exactly how faabzi-uat-build ended up on oci-main. `stable` is
-          # exempt from THIS check specifically (this check exists to catch
-          # deploy-caprover being misrouted): stable deploys through its own
-          # deploy-stable job, gated purely on stage=='stable', never through
-          # deploy-caprover's caprover_required gate (still forced false for
-          # stable below) -- deploy-stable now does deploy via CapRover too
-          # (mcp#392), it just isn't reachable through this particular gate.
-          if [ "$STAGE_INPUT" != "stable" ]; then
-            CANONICAL_DEV_HOST="captain.dev.qwickforge.com"
-            CANONICAL_MAIN_HOST="captain.app.qwickforge.com"
-            normalize_host() {
-              # DNS hostnames are case-insensitive; lowercase so a caller
-              # passing e.g. Captain.App.QwickForge.Com still matches the
-              # canonical lowercase host below.
-              printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#[:/].*$##' | tr '[:upper:]' '[:lower:]'
-            }
-            RESOLVED_HOST=""
-            if [ -n "${{ inputs.caprover_url }}" ]; then
-              RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_url }}")"
-            elif [ -n "${{ inputs.caprover_host }}" ]; then
-              RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_host }}")"
-            fi
-            case "$STAGE_INPUT" in
-              build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
-              uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
-              # Unreachable today -- STAGE_INPUT is validated to be one of
-              # build|uat|live|stable above, and stable is exempted before
-              # this case block runs. Kept as an explicit fail-closed arm so
-              # that if a stage is ever added to that allow-list without also
-              # updating this mapping, the script dies with a clear
-              # diagnostic instead of an "unbound variable" error from
-              # set -u when $EXPECTED_HOST is referenced below unset.
-              *)
-                echo "ERROR: no canonical host mapping for stage '$STAGE_INPUT'"
-                exit 1
-                ;;
-            esac
-            if [ -z "$RESOLVED_HOST" ]; then
-              echo "ERROR: stage '$STAGE_INPUT' requires caprover_host or caprover_url"
+          # must deploy to oci-dev; `<app>-uat`/`<app>-live`/`<app>-stable`
+          # must deploy to oci-main. This is a caller-input check, not
+          # derived from STAGE alone: TARGET_APP_URL below is computed
+          # unconditionally from the canonical dev/app.qwickforge.com
+          # pattern for informational (health-check) purposes, but the
+          # actual CapRover deploy target is caprover_url/caprover_host,
+          # both caller-supplied -- nothing upstream of this point validated
+          # those against stage, which is exactly how faabzi-uat-build ended
+          # up on oci-main.
+          #
+          # ci-workflows#187: `stable` used to be exempt from this check
+          # entirely, on the reasoning that stable deployed through a
+          # different, non-CapRover orchestrator (see deploy-stable job's
+          # own header comment for that history), never through
+          # deploy-caprover's caprover_required gate. That reasoning no
+          # longer holds: deploy-stable now deploys through
+          # CapRover using the caller's own caprover_host (mcp#392,
+          # ci-workflows#186), so a caller passing a dev host for a stable
+          # dispatch would send the stable slot to oci-dev with
+          # OCI_DEV_CAPROVER_PASSWORD -- the exact failure mode this check
+          # exists to prevent, just for a different stage. `stable` is now
+          # mapped to the same canonical oci-main host uat/live already use,
+          # instead of being exempted.
+          CANONICAL_DEV_HOST="captain.dev.qwickforge.com"
+          CANONICAL_MAIN_HOST="captain.app.qwickforge.com"
+          normalize_host() {
+            # DNS hostnames are case-insensitive; lowercase so a caller
+            # passing e.g. Captain.App.QwickForge.Com still matches the
+            # canonical lowercase host below.
+            printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://##' | sed -E 's#[:/].*$##' | tr '[:upper:]' '[:lower:]'
+          }
+          RESOLVED_HOST=""
+          if [ -n "${{ inputs.caprover_url }}" ]; then
+            RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_url }}")"
+          elif [ -n "${{ inputs.caprover_host }}" ]; then
+            RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_host }}")"
+          fi
+          case "$STAGE_INPUT" in
+            build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
+            uat|live|stable) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+            # Unreachable today -- STAGE_INPUT is validated to be one of
+            # build|uat|live|stable above. Kept as an explicit fail-closed
+            # arm so that if a stage is ever added to that allow-list
+            # without also updating this mapping, the script dies with a
+            # clear diagnostic instead of an "unbound variable" error from
+            # set -u when $EXPECTED_HOST is referenced below unset.
+            *)
+              echo "ERROR: no canonical host mapping for stage '$STAGE_INPUT'"
               exit 1
-            fi
-            if [ "$RESOLVED_HOST" != "$EXPECTED_HOST" ]; then
-              echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153: build->oci-dev, uat/live->oci-main), but resolved host is '$RESOLVED_HOST'"
-              exit 1
-            fi
+              ;;
+          esac
+          if [ -z "$RESOLVED_HOST" ]; then
+            echo "ERROR: stage '$STAGE_INPUT' requires caprover_host or caprover_url"
+            exit 1
+          fi
+          if [ "$RESOLVED_HOST" != "$EXPECTED_HOST" ]; then
+            echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
+            exit 1
           fi
 
           if [ -n "$INPUT_IMAGE" ]; then
@@ -705,6 +740,40 @@ jobs:
       needs.resolve-stage.outputs.caprover_required == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
+    # aos#193 Phase 1 review (round 2): this job deliberately carries NO
+    # explicit `permissions:` block, exactly matching this job's state
+    # before aos#193 Phase 1 -- do not add one, including `checks:
+    # write`/`packages: read` for the first-deploy-proof feature below,
+    # without first landing the Phase 1b follow-up described here.
+    #
+    # Why: a reusable-workflow job's requested permissions must be a
+    # SUBSET of what the calling workflow itself grants, and GitHub
+    # validates this for the WHOLE workflow_call at dispatch time -- not
+    # lazily per job, and NOT skipped for a job whose `if:` would
+    # evaluate false. Confirmed empirically for this exact PR (not just
+    # from ci-workflows#138/qwickapps/forge#254's prior incident, itself
+    # about an unconditional job): a throwaway reusable-workflow probe
+    # with a second job carrying `permissions: {checks: write}` gated
+    # behind `if: ${{ inputs.enable_gated }}` (default false, never
+    # evaluating true) still produced `conclusion: startup_failure` with
+    # zero jobs created, from a caller granting only `contents: read`.
+    # None of the 14 org workflows that call deploy-app.yml currently
+    # grant `checks` at all, so adding it here -- even behind an `if:` --
+    # would break build/uat/live for every one of them the moment this
+    # merged, not just for callers that opt into
+    # require_live_approval_check.
+    #
+    # The first-deploy-proof step group below (gated behind
+    # require_live_approval_check == true, itself off by default and
+    # already documented as "cannot succeed in production today") needs
+    # packages: read and checks: write/read to do its job. Until the
+    # required Phase 1b follow-up lands `checks: write`/`packages: read`
+    # (or broader) in all 14 callers' own top-level permissions -- so this
+    # job can legally request them back down -- any caller that opts in
+    # early gets a clear, expected, fail-closed error from the
+    # checks-API-touching steps (create-blue-green-check-run.sh's
+    # --on-permission-denied, or check-first-deploy-proof.sh's own
+    # hard-failure-on-query-error path), never a silent bypass.
     concurrency:
       group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
@@ -810,8 +879,62 @@ jobs:
           echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
           exit 1
 
+      - name: Check first-deploy proof (aos#193 Phase 1 §2)
+        # aos#193 review finding #2: gated behind require_live_approval_check
+        # == true (in addition to stage == 'live'), the SAME opt-in the rest
+        # of this Phase 1 feature already uses and that's already documented
+        # as "cannot succeed in production today, fails closed by design" --
+        # not just stage == 'live' alone. Every one of the 14 current
+        # callers never sets require_live_approval_check, so this step, the
+        # 3 API calls it makes, and the branch below that would otherwise
+        # skip the unconditional stable-health check are entirely unreached
+        # for them: their live deploy is byte-for-byte identical to before
+        # this feature existed.
+        #
+        # Runs BEFORE the CapRover credential step's password is needed
+        # elsewhere, but AFTER it has already exported
+        # CAPROVER_URL/CAPROVER_PASSWORD into $GITHUB_ENV above, so both are
+        # available here as plain env vars.
+        id: first-deploy-proof
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # aos#193 review finding #3: the real GHCR package name comes
+          # from resolve-stage's own image_name output (already correctly
+          # resolved for every caller, including ones whose real image
+          # name differs from a derived "img-<app_name>" string, e.g.
+          # mcp's img-qwickapps-mcp-prod or secrets' img-secrets) -- never
+          # reconstructed here. image_name is the full "registry/owner/pkg"
+          # path; the GH Packages API wants just the trailing package-name
+          # segment.
+          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
+          GHCR_PACKAGE_NAME="${IMAGE_BASE##*/}"
+          .ci-workflows/scripts/check-first-deploy-proof.sh \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --stable-app-name "${{ inputs.app_name }}-stable" \
+            --github-token "$GH_TOKEN" \
+            --owner "${{ env.OWNER }}" \
+            --repo "${{ github.repository }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --image-name "$GHCR_PACKAGE_NAME" \
+            --commit-sha "${{ github.sha }}"
+
       - name: Ensure stable slot is up for live promotion
-        if: needs.resolve-stage.outputs.stage == 'live'
+        # aos#193 Phase 1 §2: a first-deploy claim is allowed ONLY when the
+        # caller opted into require_live_approval_check AND
+        # check-first-deploy-proof.sh found ALL THREE of
+        # CapRover-app-absence, GHCR release/stable-tag-history-absence,
+        # and first-deploy-used-marker-absence -- every one of those is
+        # queried directly from CapRover/GHCR/GitHub above, not asserted by
+        # any input. When the opt-in is off (today's default for all 14
+        # callers) or even one signal indicates "already deployed before",
+        # this runs the exact same unconditional health check that ran here
+        # unconditionally before this feature existed -- nothing about
+        # today's non-opted-in behavior is altered.
+        if: needs.resolve-stage.outputs.stage == 'live' && (inputs.require_live_approval_check != true || steps.first-deploy-proof.outputs.first_deploy != 'true')
         run: |
           set -euo pipefail
           STABLE_URL="${{ needs.resolve-stage.outputs.stable_app_url }}"
@@ -829,6 +952,11 @@ jobs:
           done
           echo "ERROR: stable slot not healthy at ${STABLE_URL}"
           exit 1
+
+      - name: First deploy allowed (no stable slot to check yet)
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true && steps.first-deploy-proof.outputs.first_deploy == 'true'
+        run: |
+          echo "First-deploy proof satisfied (CapRover app absent, no GHCR release/stable tag history, no first-deploy-used marker) -- skipping the stable-health precondition for this app's very first live promotion (aos#193 Phase 1 §2)."
 
       - name: Configure target slot (atomic env + config)
         run: |
@@ -958,6 +1086,161 @@ jobs:
           corepack install
           pnpm install --no-frozen-lockfile --store-dir .pnpm-store
           pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
+
+      - name: Real E2E command (aos#193 Phase 1 §3)
+        # Distinct from smoke_test_command/run_e2e above: the SOP is
+        # explicit that HTTP 200 / "landing page loads" does not count --
+        # e2e_command is meant for a real functional suite (login works,
+        # MCP/API calls return correct data). Runs whenever the caller sets
+        # e2e_command, at every stage this job handles (build/uat/live),
+        # same as smoke_test_command already does -- unset (today's
+        # default for every current caller) skips this entirely.
+        id: e2e-command
+        if: inputs.e2e_command != ''
+        env:
+          APP_URL: ${{ needs.resolve-stage.outputs.target_app_url }}
+          HEALTH_PATH: ${{ inputs.health_path }}
+          IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
+          APP_NAME: ${{ inputs.app_name }}
+          ENV_LABEL: ${{ needs.resolve-stage.outputs.env_label }}
+          # aos#193 review finding #5 (LOW): read via an env var for the
+          # digest computation below, never re-interpolated a second time
+          # via ${{ inputs.e2e_command }} inside a double-quoted printf
+          # argument -- a command string containing a literal `"` would
+          # break that line's quoting (after e2e already passed, so it's a
+          # real footgun: a green e2e run followed by a broken digest
+          # step). The FIRST use of inputs.e2e_command below (as the
+          # literal command executed) is unaffected -- it is meant to be
+          # interpolated as raw shell, same as smoke_test_command already
+          # is elsewhere in this file.
+          E2E_COMMAND: ${{ inputs.e2e_command }}
+        run: |
+          set -euo pipefail
+          ${{ inputs.e2e_command }}
+          # e2e_digest binds the live-e2e-approved record (below) to the
+          # e2e run that actually happened, not just to a claim that
+          # something ran -- sha256 of what was validated (command +
+          # image_ref + the commit it ran against), not of secret output.
+          E2E_DIGEST="$(printf '%s' "${E2E_COMMAND}|${IMAGE_REF}|${{ github.sha }}" | sha256sum | awk '{print $1}')"
+          echo "e2e_digest=sha256:${E2E_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Create live-e2e-approved check run (aos#193 Phase 1 §1)
+        # Only created when the caller has opted into
+        # require_live_approval_check AND actually ran a real e2e_command
+        # for this live promotion -- require_live_approval_check=true with
+        # no e2e_command set creates nothing here, so deploy-stable's gate
+        # (verify-stable-gate.sh) finds zero matching check runs and
+        # refuses closed, rather than this step quietly self-approving an
+        # unvalidated promotion.
+        #
+        # directive_payload/directive_signature/directive_body are
+        # recorded as null here: the CI-invocation bridge that would let a
+        # prime-signed directive be attached (aos#193 §1's get_approval
+        # round-trip, not yet built) does not exist yet. This is
+        # deliberate, not a placeholder to "fill in later and forget" --
+        # verify-stable-gate.sh treats null exactly like an invalid
+        # signature (refuses closed), so require_live_approval_check: true
+        # cannot pass the stable gate until that bridge lands, by
+        # construction.
+        #
+        # aos#193 review finding #5: the check run's NAME is scoped to
+        # this app (blue-green/live-e2e-approved/<app_name>, not a bare
+        # shared name) so one app's approval on a commit can never satisfy
+        # a different app's stable gate in a multi-app repo; app_name is
+        # also embedded in output.text and re-verified by
+        # verify-stable-gate.sh on read. The creating run's identity
+        # itself (repo, sha, and proof it actually executed
+        # deploy-app.yml) is bound via --external-id below plus
+        # verify-stable-gate.sh's GitHub-Actions-API check -- see aos#193
+        # review finding #1 (round 2) and scripts/lib/check-run-binding.sh,
+        # never a self-reported workflow_ref text field.
+        # --on-permission-denied skip: see finding #1's
+        # comment on create-blue-green-check-run.sh -- deploy-caprover has
+        # no checks:write today by design (Phase 1b follow-up); a 403 here
+        # must not fail a live deploy that already passed real e2e/health
+        # checks, only skip recording the approval (verify-stable-gate.sh
+        # then correctly refuses closed on the missing record).
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true && inputs.e2e_command != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # aos#193 review finding #1 (BLOCKER, round 2): no workflow_ref
+          # field is recorded here -- inside a reusable workflow,
+          # github.workflow_ref names the CALLER's workflow, never
+          # deploy-app.yml itself, and a self-reported text field is
+          # trivially forgeable anyway. The read side (verify-stable-gate.sh)
+          # instead independently verifies, via the GitHub Actions API,
+          # that THIS run (named below by --external-id) actually executed
+          # deploy-app.yml -- see scripts/lib/check-run-binding.sh.
+          OUTPUT_JSON="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg stage "live" \
+            --arg e2e_digest "${{ steps.e2e-command.outputs.e2e_digest }}" \
+            '{
+              repo: $repo,
+              app_name: $app,
+              sha: $sha,
+              stage: $stage,
+              e2e_digest: $e2e_digest,
+              directive_payload: null,
+              directive_signature: null,
+              directive_body: null
+            }')"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/live-e2e-approved/${{ inputs.app_name }}" \
+            --title "Live e2e validated (aos#193 Phase 1)" \
+            --summary "e2e_command passed for ${{ inputs.app_name }} at ${{ needs.resolve-stage.outputs.image_ref }}. directive_payload/signature are null pending aos#193 §1's signing bridge -- deploy-stable's gate refuses closed on this until that bridge is wired." \
+            --output-json "$OUTPUT_JSON" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied skip
+
+      - name: Mark first-deploy-used (aos#193 Phase 1 §2)
+        # Recorded only once the live promotion above has actually
+        # succeeded (this step runs after "Validate target slot health"
+        # and "Deep subsystem health check", both of which fail the job on
+        # any problem) -- so a first-deploy claim that never actually went
+        # healthy never burns the single-use marker. Gated on
+        # require_live_approval_check == true too (aos#193 review finding
+        # #2): first-deploy-proof.outputs.first_deploy can only be 'true'
+        # when that step ran at all, which itself now requires the same
+        # opt-in, but the explicit condition here keeps this step's
+        # gating self-evident without relying on that transitively.
+        #
+        # aos#193 review finding #5: same app-scoped name + embedded
+        # app_name binding (plus the GitHub-Actions-API run binding via
+        # --external-id, aos#193 review finding #1) as the live-e2e-approved
+        # check run above, and the identical --on-permission-denied skip
+        # reasoning
+        # (a missing marker here just means a LATER run's check 3 can't
+        # see it -- checks 1/2 in check-first-deploy-proof.sh, which don't
+        # depend on this marker, remain the primary proof; see that
+        # script's own documented limitation).
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.require_live_approval_check == true && steps.first-deploy-proof.outputs.first_deploy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-deploy-used/${{ inputs.app_name }}" \
+            --title "First-deploy proof consumed (aos#193 Phase 1)" \
+            --summary "${{ inputs.app_name }} live promotion at ${{ needs.resolve-stage.outputs.image_ref }} used the first-deploy allowance -- a second first-deploy claim for this app on this commit is now refused by check-first-deploy-proof.sh regardless of CapRover/GHCR state." \
+            --output-json "$(jq -nc \
+              --arg repo "${{ github.repository }}" \
+              --arg app "${{ inputs.app_name }}" \
+              --arg sha "${{ github.sha }}" \
+              --arg image "${{ needs.resolve-stage.outputs.image_ref }}" \
+              '{repo: $repo, app_name: $app, sha: $sha, image_ref: $image}')" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied skip
 
       - name: Route qwickway to ordered live/stable for live stage
         if: needs.resolve-stage.outputs.stage == 'live'
@@ -1164,6 +1447,16 @@ jobs:
       needs.verify-provenance.result == 'success' &&
       needs.resolve-stage.outputs.stage == 'stable'
     runs-on: [self-hosted, macmini]
+    # aos#193 Phase 1 review (round 2): no explicit `permissions:` block
+    # here either, for the identical reason given on deploy-caprover
+    # above (empirically confirmed: a job's elevated permissions trip
+    # reusable-workflow startup_failure validation for the WHOLE workflow
+    # regardless of that job's own `if:`). The gate step below
+    # (require_live_approval_check == true only) needs checks: read to
+    # query the live-e2e-approved check run; until the Phase 1b follow-up
+    # lands that permission in the 14 callers' own top-level grants, an
+    # early opt-in gets a clear, fail-closed refusal (never a bypass) from
+    # verify-stable-gate.sh's existing check_runs_query_failed path.
     concurrency:
       group: caprover-deploy-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
@@ -1180,6 +1473,181 @@ jobs:
           sparse-checkout: |
             scripts
           sparse-checkout-cone-mode: false
+
+      - name: Verify live-e2e-approved + directive signature (aos#193 Phase 1 §1/§5)
+        # Runs BEFORE any CapRover credential resolution or deploy step
+        # below -- a failing gate must block the stable deploy outright,
+        # not just annotate it after the fact. Only active when the
+        # caller's OWN require_live_approval_check input (on this stable
+        # dispatch specifically -- stage runs are independently dispatched,
+        # so this is not inherited from the live run) is true; false
+        # (default) reproduces today's deploy-stable behavior exactly, with
+        # no gate at all.
+        if: inputs.require_live_approval_check == true
+        env:
+          # aos#193 review finding L2 (round 3): every other call site in
+          # this workflow passes its GitHub token via `env: GH_TOKEN` and
+          # references "$GH_TOKEN" in the script body -- this step was the
+          # one exception, passing "${{ github.token }}" directly as a
+          # `--github-token` argv value, which is visible to any other
+          # process on the shared macmini runner via `ps`. Match the
+          # existing convention.
+          GH_TOKEN: ${{ github.token }}
+          STABLE_GATE_REPO: ${{ github.repository }}
+          STABLE_GATE_APP_NAME: ${{ inputs.app_name }}
+          STABLE_GATE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          chmod +x .ci-workflows/scripts/*.sh
+
+          AOS_PIN_COMMIT="41f0a59ec3990e6aad8649ff79e341d3e6ea25a3"
+          AOS_VENV="${RUNNER_TEMP}/aos-venv-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          # aos#193 review finding #4: ALWAYS install into a fresh per-job
+          # venv under $RUNNER_TEMP -- never conditionally skip based on
+          # `command -v aos`. This runner is shared (self-hosted, macmini,
+          # the same fleet aos itself runs on); a stand-in `aos` earlier on
+          # PATH, or a stale ~/.local/bin install from an unrelated job on
+          # the same box, would otherwise silently decide pass/fail for
+          # this gate (reviewer-demonstrated real repro: a no-op `aos` that
+          # just exits 0 makes this step report PASS regardless of the
+          # real directive).
+          echo "::group::Installing pinned aos CLI (qwickapps/aos@41f0a59, aos#123/#125 directive verify) into a fresh per-job venv"
+
+          # aos#193 review finding #3 (LOW-but-required, round 2): resolve
+          # python3 to an absolute path ONCE, explicitly, and use that
+          # captured absolute path for every step that builds/verifies
+          # this venv -- never a bare `python3` re-resolved from PATH at
+          # each call site. This runner is shared; a stub `python3`
+          # earlier on PATH (or a stale leftover from an unrelated job on
+          # the same box) could otherwise fake the ENTIRE venv --
+          # including a forged dist-info/direct_url.json carrying the
+          # pinned commit -- defeating the commit-pin check below at its
+          # root, since everything downstream (pip, the aos binary itself)
+          # would then also be whatever that stub planted, not real
+          # venv-created binaries. Requiring the resolved path to actually
+          # be absolute (not just "command -v succeeded") is the concrete,
+          # auditable check: it is logged here so a suspicious resolution
+          # is visible in the job log, not silently trusted.
+          #
+          # aos#193 review finding (LOW, round 3): `command -v python3`
+          # was not actually a fix -- it returns an absolute path for a
+          # STUB `python3` too, as long as the stub sits somewhere earlier
+          # on PATH (for example /tmp/x/python3). "Is the resolved path
+          # absolute" proves nothing about which binary it is. Pin to a
+          # single, fixed, well-known path instead of resolving from PATH
+          # at all.
+          #
+          # aos#193 review finding B3 (BLOCKER, round 4): round 3's fixed
+          # path, /usr/bin/python3, IS the macOS Xcode Command Line Tools
+          # shim -- and on the actual runner host (macmini-dev.local, which
+          # hosts critical-macmini/macmini-qwickapps-*/macmini-agent-3) it
+          # reports Python 3.9.6. qwickapps/aos@41f0a59's pyproject.toml
+          # requires ">=3.11", so `pip install` failed outright
+          # ("Package 'aos' requires a different Python: 3.9.6 not in
+          # '>=3.11'") -- every opted-in deploy-stable run broke at install,
+          # before any gate logic ever ran. Pin to the real 3.11+
+          # interpreter confirmed present on that same host instead
+          # (Homebrew's /opt/homebrew/bin/python3.11, confirmed 3.11.14),
+          # and don't just trust the path -- assert the ACTUAL running
+          # interpreter's version before ever creating the venv, so a
+          # future runner-image change that removes or downgrades this
+          # binary fails loudly here instead of at a confusing pip error
+          # three steps later.
+          PYTHON3_BIN="/opt/homebrew/bin/python3.11"
+          if [ ! -x "$PYTHON3_BIN" ]; then
+            echo "::error::verify-stable-gate: fixed interpreter '$PYTHON3_BIN' is missing or not executable on this runner -- refusing to build the aos venv (this is deliberately NOT a PATH-based lookup, see the comment above)" >&2
+            exit 1
+          fi
+          if ! "$PYTHON3_BIN" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+            echo "::error::verify-stable-gate: fixed interpreter '$PYTHON3_BIN' reports $("$PYTHON3_BIN" --version 2>&1), which is older than the 3.11+ qwickapps/aos@${AOS_PIN_COMMIT} requires -- refusing to build the aos venv with an interpreter the install would just fail against anyway" >&2
+            exit 1
+          fi
+          echo "Using fixed python3.11+ interpreter: $PYTHON3_BIN ($("$PYTHON3_BIN" --version 2>&1))"
+
+          # Pinned to the exact reviewed/merged commit the aos#193 design
+          # doc built this contract against (round-6 review, 197 tests
+          # passing), not @main -- bump this deliberately, not silently,
+          # when aos ships a directive-verify-relevant change.
+          "$PYTHON3_BIN" -m venv "$AOS_VENV"
+          "$AOS_VENV/bin/pip" install --quiet "git+https://github.com/qwickapps/aos.git@${AOS_PIN_COMMIT}"
+
+          # Verify the installed binary's commit matches the pin exactly,
+          # from pip's own PEP 610 install-source record -- never just
+          # trust that the install command we ran is the code that landed.
+          DIST_INFO_DIR="$(find "$AOS_VENV" -maxdepth 4 -iname 'aos-*.dist-info' -print -quit)"
+          if [ -z "$DIST_INFO_DIR" ] || [ ! -f "$DIST_INFO_DIR/direct_url.json" ]; then
+            echo "::error::verify-stable-gate: could not locate aos dist-info/direct_url.json after install -- cannot confirm the pinned commit was actually installed" >&2
+            exit 1
+          fi
+          INSTALLED_COMMIT="$(jq -r '.vcs_info.commit_id // empty' "$DIST_INFO_DIR/direct_url.json")"
+          if [ "$INSTALLED_COMMIT" != "$AOS_PIN_COMMIT" ]; then
+            echo "::error::verify-stable-gate: installed aos commit '${INSTALLED_COMMIT:-<none>}' does not match the pinned commit '${AOS_PIN_COMMIT}'" >&2
+            exit 1
+          fi
+          echo "Confirmed installed aos matches pinned commit ${AOS_PIN_COMMIT}"
+
+          # Defense in depth beyond the dist-info file check above: ask
+          # the VENV'S OWN python3 (absolute path, never bare `python3`)
+          # to actually import the installed package and report where it
+          # resolved from -- it must live inside this venv, not be
+          # satisfied by some other aos install a stub PATH entry could
+          # have smuggled in ahead of the venv's site-packages.
+          AOS_MODULE_FILE="$("$AOS_VENV/bin/python3" -c 'import aos, sys; sys.stdout.write(aos.__file__)')"
+          case "$AOS_MODULE_FILE" in
+            "$AOS_VENV"/*) ;;
+            *)
+              echo "::error::verify-stable-gate: the venv's own python3 resolved the 'aos' package to '${AOS_MODULE_FILE}', which is NOT inside ${AOS_VENV} -- refusing" >&2
+              exit 1
+              ;;
+          esac
+          echo "Confirmed the venv's own python3 imports aos from inside the venv: ${AOS_MODULE_FILE}"
+          echo "::endgroup::"
+
+          AOS_BIN="$AOS_VENV/bin/aos"
+          if [ ! -x "$AOS_BIN" ]; then
+            echo "::error::verify-stable-gate: pinned aos binary not found at $AOS_BIN after install" >&2
+            exit 1
+          fi
+
+          # aos#193 review finding #4 (HIGH, round 2): pass a REAL,
+          # committed, checksum-verified manifest via --aos-manifest --
+          # never merely unset $AOS_MANIFEST and hope for a bundled
+          # default (aos@41f0a59 ships no manifest in its wheel at all;
+          # see verify-stable-gate.sh's header comment for the full
+          # correction of this script's previous, factually-wrong claim
+          # about a "bundled default manifest"). The checksum is a literal
+          # value recorded in THIS file's git history, independent of
+          # whatever the runner's filesystem currently holds -- so a
+          # compromised runner cannot silently swap the manifest's
+          # contents without this check catching it.
+          AOS_MANIFEST_PATH=".ci-workflows/scripts/aos-manifest/prime-manifest.yaml"
+          AOS_MANIFEST_EXPECTED_SHA256="86131c696dda7edb197a4814210ae9f566b8ae00953f5d5d62a7cd9dc09edbc7"
+          if [ ! -f "$AOS_MANIFEST_PATH" ]; then
+            echo "::error::verify-stable-gate: pinned manifest not found at ${AOS_MANIFEST_PATH} (expected from the ci-workflows checkout above)" >&2
+            exit 1
+          fi
+          AOS_MANIFEST_ACTUAL_SHA256="$(sha256sum "$AOS_MANIFEST_PATH" | awk '{print $1}')"
+          if [ "$AOS_MANIFEST_ACTUAL_SHA256" != "$AOS_MANIFEST_EXPECTED_SHA256" ]; then
+            echo "::error::verify-stable-gate: pinned manifest checksum mismatch -- ${AOS_MANIFEST_PATH} sha256='${AOS_MANIFEST_ACTUAL_SHA256}', expected '${AOS_MANIFEST_EXPECTED_SHA256}'. Refusing: this manifest must match exactly what this workflow file's own git history pins, never a runner-local substitute." >&2
+            exit 1
+          fi
+          AOS_MANIFEST_ABS_PATH="$(cd "$(dirname "$AOS_MANIFEST_PATH")" && pwd)/$(basename "$AOS_MANIFEST_PATH")"
+          echo "Confirmed pinned manifest checksum: ${AOS_MANIFEST_PATH} sha256=${AOS_MANIFEST_ACTUAL_SHA256}"
+
+          # A fresh, job-scoped, empty environment root -- never the shared
+          # macmini runner's ambient $AOS_ENVIRONMENT_ROOT, if any is set.
+          AOS_ENV_ROOT="${RUNNER_TEMP}/aos-stable-gate-env-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$AOS_ENV_ROOT"
+
+          .ci-workflows/scripts/verify-stable-gate.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "$STABLE_GATE_REPO" \
+            --app-name "$STABLE_GATE_APP_NAME" \
+            --sha "$STABLE_GATE_SHA" \
+            --aos-bin "$AOS_BIN" \
+            --aos-environment-root "$AOS_ENV_ROOT" \
+            --aos-manifest "$AOS_MANIFEST_ABS_PATH"
 
       - name: Resolve CapRover credentials
         run: |
