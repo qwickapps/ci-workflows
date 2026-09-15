@@ -1,0 +1,42 @@
+name: Deploy App GHCR Cleanup Safety Tests
+
+# Regression gate for ci-workflows#183 round 3: the "Remove GHCR
+# credentials" cleanup step in verify-provenance and deploy-stable must
+# never delete anything outside its own deterministic RUNNER_TEMP path, no
+# matter what $DOCKER_CONFIG happens to hold when it runs.
+# actions-runner-critical-macmini's own .env sets a persistent, ambient
+# DOCKER_CONFIG for that runner -- a cleanup step that trusted
+# $DOCKER_CONFIG naively (instead of recomputing its own path
+# independently) would delete the runner's real Docker config on every
+# job run if the credential step ever failed before its GITHUB_ENV export.
+# This gate exists so a future edit that goes back to reading
+# $DOCKER_CONFIG directly in the cleanup step fails the PR instead of
+# silently reintroducing that blast radius.
+#
+# Test: bash scripts/tests/deploy-app-ghcr-cleanup-safety.test.sh
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-ghcr-cleanup-safety-tests.yml'
+      - 'scripts/tests/deploy-app-ghcr-cleanup-safety.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-ghcr-cleanup-safety.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml GHCR cleanup safety tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run GHCR cleanup safety test
+        run: bash scripts/tests/deploy-app-ghcr-cleanup-safety.test.sh

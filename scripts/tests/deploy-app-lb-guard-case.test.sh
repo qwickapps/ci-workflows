@@ -24,26 +24,40 @@ WORKFLOW="$ROOT_DIR/.github/workflows/deploy-app.yml"
 pass=0
 fail=0
 
-# extract_gate2 JOB STEP_INDEX OUTPUT_REF -- pulls the run script for that
-# step (a real YAML parse), substitutes the one output reference it needs,
-# and truncates at the gate's own closing "fi" (its own `if` block's first
+# extract_gate2 JOB STEP_NAME OUTPUT_REF -- pulls the run script for the
+# step matching that name (a real YAML parse, looked up by name rather than
+# array index -- an inserted/removed step earlier in the job's list shifts
+# every later index, which silently pointed this test at the wrong step
+# after ci-workflows#183 added a step to deploy-stable; a name lookup is
+# immune to that), substitutes the one output reference it needs, and
+# truncates at the gate's own closing "fi" (its own `if` block's first
 # match) -- everything after that point makes real network/secrets calls
 # this test doesn't need or want to exercise.
 extract_gate2() {
-  local job="$1" idx="$2" output_ref="$3"
+  local job="$1" step_name="$2" output_ref="$3"
   python3 -c "
-import yaml
+import sys, yaml
 with open('$WORKFLOW') as f:
     doc = yaml.safe_load(f)
-print(doc['jobs']['$job']['steps'][$idx]['run'])
+steps = doc['jobs']['$job']['steps']
+matches = [s for s in steps if s.get('name') == '''$step_name''']
+if not matches:
+    sys.exit(f\"no step named '$step_name' in job '$job'\")
+if len(matches) > 1:
+    sys.exit(f\"step name '$step_name' is ambiguous in job '$job' ({len(matches)} matches)\")
+print(matches[0]['run'])
 " | sed -E "s/\\\$\\{\\{ needs\\.resolve-stage\\.outputs\\.$output_ref \\}\\}/\$IN_URL/g" \
   | sed -n '1,/^fi$/p'
 }
 
 run_gate() {
-  local job="$1" idx="$2" output_ref="$3" url="$4"
+  local job="$1" step_name="$2" output_ref="$3" url="$4"
   local out
-  out="$(extract_gate2 "$job" "$idx" "$output_ref")"
+  if ! out="$(extract_gate2 "$job" "$step_name" "$output_ref")"; then
+    echo "EXTRACTION_ERROR: step lookup failed for job='$job' step='$step_name'" >&2
+    echo "$out" >&2
+    return 2
+  fi
   if grep -q '\${{' <<<"$out"; then
     echo "EXTRACTION_ERROR: unsubstituted \${{ }} remain" >&2
     echo "$out" >&2
@@ -53,9 +67,9 @@ run_gate() {
 }
 
 assert_skips() {
-  local desc="$1" job="$2" idx="$3" output_ref="$4" url="$5"
+  local desc="$1" job="$2" step_name="$3" output_ref="$4" url="$5"
   local out
-  out="$(run_gate "$job" "$idx" "$output_ref" "$url")"
+  out="$(run_gate "$job" "$step_name" "$output_ref" "$url")"
   if grep -qF "is not a Tailscale hostname" <<<"$out"; then
     echo "  PASS (skips, as expected): $desc"
     pass=$((pass + 1))
@@ -67,9 +81,9 @@ assert_skips() {
 }
 
 assert_proceeds() {
-  local desc="$1" job="$2" idx="$3" output_ref="$4" url="$5"
+  local desc="$1" job="$2" step_name="$3" output_ref="$4" url="$5"
   local out
-  out="$(run_gate "$job" "$idx" "$output_ref" "$url")"
+  out="$(run_gate "$job" "$step_name" "$output_ref" "$url")"
   if grep -qF "is not a Tailscale hostname" <<<"$out"; then
     echo "  FAIL (expected proceed past the gate, but it skipped): $desc"
     echo "    output: $out"
@@ -80,28 +94,30 @@ assert_proceeds() {
   fi
 }
 
+GUARD_STEP="Verify LB target resolves to the node just deployed (infra#101 guard)"
+
 echo "== deploy-caprover job's LB guard (stable_app_url) =="
 
 assert_proceeds "lowercase .ts.net hostname proceeds (baseline, already worked)" \
-  deploy-caprover 17 stable_app_url "https://myapp.mytailnet.ts.net"
+  deploy-caprover "$GUARD_STEP" stable_app_url "https://myapp.mytailnet.ts.net"
 
 assert_proceeds "MIXED-CASE .TS.NET hostname proceeds, does not fail open (ci-workflows#163)" \
-  deploy-caprover 17 stable_app_url "https://myapp.mytailnet.TS.NET"
+  deploy-caprover "$GUARD_STEP" stable_app_url "https://myapp.mytailnet.TS.NET"
 
 assert_skips "a genuinely non-Tailscale URL still correctly skips" \
-  deploy-caprover 17 stable_app_url "https://myapp.app.qwickforge.com"
+  deploy-caprover "$GUARD_STEP" stable_app_url "https://myapp.app.qwickforge.com"
 
 echo ""
 echo "== deploy-stable job's LB guard (target_app_url) =="
 
 assert_proceeds "lowercase .ts.net hostname proceeds (baseline, already worked)" \
-  deploy-stable 8 target_app_url "https://myapp.mytailnet.ts.net"
+  deploy-stable "$GUARD_STEP" target_app_url "https://myapp.mytailnet.ts.net"
 
 assert_proceeds "MIXED-CASE .TS.NET hostname proceeds, does not fail open (ci-workflows#163)" \
-  deploy-stable 8 target_app_url "https://myapp.mytailnet.TS.NET"
+  deploy-stable "$GUARD_STEP" target_app_url "https://myapp.mytailnet.TS.NET"
 
 assert_skips "a genuinely non-Tailscale URL still correctly skips" \
-  deploy-stable 8 target_app_url "https://myapp.app.qwickforge.com"
+  deploy-stable "$GUARD_STEP" target_app_url "https://myapp.app.qwickforge.com"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

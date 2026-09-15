@@ -10,11 +10,13 @@
 # hours despite merging clean (confirmed live: forge's Deploy Forge run
 # 33375610744, `docker login ghcr.io` denied even with the #136 fallback).
 #
-# Verifies the three jobs with a GHCR-login step each declare an explicit,
+# Verifies the jobs with a GHCR-login step each declare an explicit,
 # correctly-scoped `permissions:` block: build (contents: read + packages:
 # write -- it checks out the repo AND pushes), verify-provenance (packages:
 # read only -- no checkout, pull-only), retag (packages: write -- no
-# checkout, writes a new manifest tag).
+# checkout, writes a new manifest tag), deploy-stable (contents: read +
+# packages: read -- it checks out the repo's scripts AND pulls the stable
+# image, ci-workflows#183).
 #
 # A permissions: block on a job REPLACES the job's entire default
 # permission set, not adds to it -- this also checks that no OTHER job in
@@ -66,6 +68,9 @@ assert "verify-provenance job: permissions = {packages: read}" \
 assert "retag job: permissions = {packages: write}" \
   test "$(job_permissions_json retag)" = '{"packages": "write"}'
 
+assert "deploy-stable job: permissions = {contents: read, packages: read}" \
+  test "$(job_permissions_json deploy-stable)" = '{"contents": "read", "packages": "read"}'
+
 echo "== No workflow-level permissions block (per-job scoping only) =="
 TOPLEVEL=$(python3 -c "
 import yaml, json
@@ -77,7 +82,7 @@ assert "no workflow-level permissions: key (would broaden every other job too)" 
   test "$TOPLEVEL" = "null"
 
 echo "== Jobs without a GHCR-login step were not accidentally scoped =="
-for job in resolve-stage validate-env deploy-caprover scale-build-slot deploy-stable; do
+for job in resolve-stage validate-env deploy-caprover scale-build-slot; do
   assert "$job job: no permissions block added (keeps its actual defaults)" \
     test "$(job_permissions_json "$job")" = "null"
 done
