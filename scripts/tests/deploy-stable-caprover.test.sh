@@ -63,7 +63,13 @@ result = {
     'has_caprover_credentials_step': any('caprover credentials' in (s.get('name','') or '').lower() for s in steps),
     'uses_resolved_target_app': 'needs.resolve-stage.outputs.target_app' in all_text,
     'no_hardcoded_app_stable_suffix': (\"inputs.app_name }}-stable\" not in all_text) and (\"inputs.app_name}}-stable\" not in all_text),
-    'no_permissions_block': job.get('permissions') is None,
+    # aos#193 Phase 1: deploy-stable now DOES carry a permissions block --
+    # checks: read, so its own optional gate (verify-stable-gate.sh) can
+    # query the live-e2e-approved check run when require_live_approval_check
+    # is true. See deploy-app-ghcr-permissions.test.sh for the exact
+    # expected shape; this test only checks it's the minimal, expected one
+    # (no packages: * grant snuck back in here).
+    'permissions_block': job.get('permissions'),
 }
 
 # Confirm no OTHER job in the file references Coolify either -- the
@@ -118,8 +124,8 @@ assert "deploy-stable: resolves its target app name via resolve-stage's target_a
 assert "deploy-stable: no duplicated/hardcoded '\${{ inputs.app_name }}-stable' app-name construction" \
   test "$(get no_hardcoded_app_stable_suffix)" = "True"
 
-assert "deploy-stable: no local permissions block (no local GHCR access needed, same as deploy-caprover)" \
-  test "$(get no_permissions_block)" = "True"
+assert "deploy-stable: permissions block is exactly {contents: read, checks: read} (aos#193 Phase 1 -- no packages:* grant, no local GHCR access needed)" \
+  test "$(get permissions_block)" = "{'contents': 'read', 'checks': 'read'}"
 
 OTHER_COOLIFY_JOBS="$(get other_jobs_coolify)"
 assert "no other job in deploy-app.yml still mentions coolify" \

@@ -1,0 +1,43 @@
+name: Check First-Deploy-Proof Tests
+
+# Regression gate for aos#193 Phase 1 §2 (first-deploy proof, strengthened):
+# scripts/check-first-deploy-proof.sh's 3-way verdict logic
+# (CapRover-app-absence AND GHCR release/stable-tag-history-absence AND
+# first-deploy-used-marker-absence => first_deploy=true; any one present
+# => false), including that a hard API failure never guesses a verdict.
+#
+# Tests:
+#   bash scripts/tests/check-first-deploy-proof.test.sh
+#     - invokes the real script as a subprocess with curl/gh replaced by
+#       mocks first on PATH.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/check-first-deploy-proof.sh'
+      - 'scripts/lib/caprover-api.sh'
+      - '.github/workflows/check-first-deploy-proof-tests.yml'
+      - 'scripts/tests/check-first-deploy-proof.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/check-first-deploy-proof.sh'
+      - 'scripts/lib/caprover-api.sh'
+      - 'scripts/tests/check-first-deploy-proof.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: check-first-deploy-proof.sh tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: see the sibling comment in
+    # deploy-app-stage-host-gate-tests.yml for why this guard is needed.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run check-first-deploy-proof.sh tests
+        run: bash scripts/tests/check-first-deploy-proof.test.sh

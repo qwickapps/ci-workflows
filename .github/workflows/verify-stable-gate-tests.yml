@@ -1,0 +1,44 @@
+name: Verify Stable Gate Tests
+
+# Regression gate for aos#193 Phase 1 §1/§5: deploy-stable's own gate
+# (scripts/verify-stable-gate.sh), active only when a caller passes
+# require_live_approval_check: true. Proves the fail-closed decision tree:
+# check-run count/conclusion, embedded-payload cross-checks, and that a
+# missing directive signature refuses closed WITHOUT ever invoking `aos`
+# (today's expected state -- the aos#193 §1 signing bridge isn't built
+# yet), plus the real `aos directive verify` CLI contract with a mocked
+# result.
+#
+# Tests:
+#   bash scripts/tests/verify-stable-gate.test.sh
+#     - invokes the real script as a subprocess with gh/aos replaced by
+#       mocks first on PATH.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/verify-stable-gate.sh'
+      - '.github/workflows/verify-stable-gate-tests.yml'
+      - 'scripts/tests/verify-stable-gate.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/verify-stable-gate.sh'
+      - 'scripts/tests/verify-stable-gate.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: verify-stable-gate.sh tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: see the sibling comment in
+    # deploy-app-stage-host-gate-tests.yml for why this guard is needed.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run verify-stable-gate.sh tests
+        run: bash scripts/tests/verify-stable-gate.test.sh

@@ -1,0 +1,48 @@
+name: Deploy App No-Bypass-Inputs Tests
+
+# Regression gate for aos#193 (blue-green SOP epic): deploy-app.yml's
+# workflow_call inputs must never gain a force_*/skip/bypass-style input
+# that lets a caller route around a check -- the epic's whole point is that
+# these become structurally impossible to skip, not just discouraged.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-no-bypass-inputs.test.sh
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-no-bypass-inputs-tests.yml'
+      - 'scripts/tests/deploy-app-no-bypass-inputs.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-no-bypass-inputs.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml no-bypass-inputs tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Run no-bypass-inputs contract test
+        run: bash scripts/tests/deploy-app-no-bypass-inputs.test.sh
