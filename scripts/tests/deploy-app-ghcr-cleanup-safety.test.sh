@@ -24,9 +24,11 @@
 #
 # The fix: the cleanup step recomputes the same deterministic path
 # ("$RUNNER_TEMP/ghcr-docker-config-$GITHUB_RUN_ID-$GITHUB_JOB")
-# independently -- it never reads $DOCKER_CONFIG at all -- plus a case
-# guard that refuses to delete anything outside $RUNNER_TEMP as a second,
-# independent line of defense.
+# independently -- it never reads $DOCKER_CONFIG at all -- plus (round 4)
+# resolves both RUNNER_TEMP and the target's parent with `cd -P ... && pwd`
+# and compares the resolved paths, instead of a plain string prefix match,
+# as a second, independent line of defense against `..` traversal or a
+# symlinked RUNNER_TEMP.
 
 set -euo pipefail
 
@@ -152,6 +154,33 @@ for JOB in verify-provenance; do
     test -f "$AMBIENT_DIR/config.json"
 
   rm -rf "$AMBIENT_DIR"
+
+  # -- Scenario 4: RUNNER_TEMP is itself a symlink to a real directory
+  # (realistic on the actual macmini runner -- macOS's /tmp is a symlink
+  # to /private/tmp). The `cd -P ... && pwd` resolution must still find
+  # and delete the real target through the symlink, not silently no-op.
+  REAL_TEMP_DIR="$(mktemp -d)"
+  SYMLINK_TEMP_DIR="$(mktemp -u)"
+  ln -s "$REAL_TEMP_DIR" "$SYMLINK_TEMP_DIR"
+  REAL_TARGET="$REAL_TEMP_DIR/ghcr-docker-config-99999-$JOB"
+  mkdir -p "$REAL_TARGET"
+  echo '{"auths":{"ghcr.io":{"auth":"real-should-be-deleted-through-symlink"}}}' > "$REAL_TARGET/config.json"
+
+  set +e
+  RUNNER_TEMP="$SYMLINK_TEMP_DIR" \
+  GITHUB_RUN_ID="99999" \
+  GITHUB_JOB="$JOB" \
+    bash -c "$cleanup_script" >"$TEST_SCRATCH/cleanup_out_4.txt" 2>&1
+  cleanup_exit=$?
+  set -e
+
+  assert "$JOB: cleanup step exits 0 when RUNNER_TEMP is a symlink to a real dir" \
+    test "$cleanup_exit" -eq 0
+
+  assert "$JOB: real temp config dir is removed through the RUNNER_TEMP symlink" \
+    test ! -e "$REAL_TARGET"
+
+  rm -rf "$REAL_TEMP_DIR" "$SYMLINK_TEMP_DIR"
 
   echo ""
 done

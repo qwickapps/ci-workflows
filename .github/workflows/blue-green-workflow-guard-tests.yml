@@ -37,6 +37,13 @@ jobs:
   guard-tests:
     name: blue-green-workflow-guard.sh behavior tests
     runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout
         uses: actions/checkout@v4
