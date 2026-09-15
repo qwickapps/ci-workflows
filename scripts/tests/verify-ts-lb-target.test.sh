@@ -106,6 +106,44 @@ assert_eq "parse_created_epoch is UTC under TZ=America/New_York" "$KNOWN_UTC_EPO
 PARSED_EPOCH_TOKYO=$(TZ="Asia/Tokyo" parse_created_epoch "$KNOWN_UTC_TS")
 assert_eq "parse_created_epoch is UTC under TZ=Asia/Tokyo" "$KNOWN_UTC_EPOCH" "$PARSED_EPOCH_TOKYO"
 
+# ── check_freshness(): rule 4's decision, in isolation (ci-workflows#189) ──
+# A device created well after (deploy_start - grace) is fresh.
+FRESH_RESULT=$(check_freshness "2026-08-18T14:00:00Z" "$KNOWN_UTC_EPOCH" 120)
+assert_eq "check_freshness: created after threshold -> OK" "OK" "$FRESH_RESULT"
+
+# A device created well before (deploy_start - grace) is stale.
+STALE_RESULT=$(check_freshness "2026-08-18T13:00:00Z" "$KNOWN_UTC_EPOCH" 120)
+assert_eq "check_freshness: created well before threshold -> FAIL_STALE" "FAIL_STALE" "$STALE_RESULT"
+
+# Exactly at the grace boundary still passes (>= threshold, not > threshold).
+BOUNDARY_TS_EPOCH=$(( KNOWN_UTC_EPOCH - 120 ))
+BOUNDARY_TS=$(date -u -d "@$BOUNDARY_TS_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r "$BOUNDARY_TS_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+BOUNDARY_RESULT=$(check_freshness "$BOUNDARY_TS" "$KNOWN_UTC_EPOCH" 120)
+assert_eq "check_freshness: created exactly at grace boundary -> OK" "OK" "$BOUNDARY_RESULT"
+
+# An unparseable timestamp fails closed rather than silently passing.
+UNPARSEABLE_RESULT=$(check_freshness "not-a-timestamp" "$KNOWN_UTC_EPOCH" 120)
+assert_eq "check_freshness: unparseable timestamp -> FAIL_UNPARSEABLE" "FAIL_UNPARSEABLE" "$UNPARSEABLE_RESULT"
+
+# ── --skip-freshness-check argument validation (ci-workflows#189) ─────────
+# Safe to invoke main() directly for these -- arg validation runs before any
+# network call, so a bad/missing combination exits 1 without ever reaching
+# curl.
+SKIP_VALIDATION_OUT=$("$ROOT/scripts/verify-ts-lb-target.sh" \
+  --ts-api-key "fake" --canonical-hostname "fake-host" 2>&1) && SKIP_VALIDATION_RC=0 || SKIP_VALIDATION_RC=$?
+assert_eq "neither --deploy-start-epoch nor --skip-freshness-check -> usage error (rc 1)" "1" "${SKIP_VALIDATION_RC:-0}"
+case "$SKIP_VALIDATION_OUT" in
+  *"--deploy-start-epoch is required unless --skip-freshness-check is set"*)
+    echo "ok - usage error names the missing requirement"
+    pass=$((pass + 1))
+    ;;
+  *)
+    echo "not ok - usage error names the missing requirement"
+    echo "  actual: $SKIP_VALIDATION_OUT"
+    fail=$((fail + 1))
+    ;;
+esac
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

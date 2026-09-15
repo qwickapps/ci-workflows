@@ -1,0 +1,42 @@
+name: Verify TS LB Target Tests
+
+# Regression gate for qwickapps/infrastructure#101 / ci-workflows#189: the
+# deploy pipeline's LB-freshness guard (scripts/verify-ts-lb-target.sh) and
+# its supporting unit tests had no dedicated CI trigger before this -- a
+# path-filtered push/pull_request check only ran when something else's
+# paths happened to also match. This wires it in directly.
+#
+# Test: bash scripts/tests/verify-ts-lb-target.test.sh
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/verify-ts-lb-target.sh'
+      - '.github/workflows/verify-ts-lb-target-tests.yml'
+      - 'scripts/tests/verify-ts-lb-target.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/verify-ts-lb-target.sh'
+      - 'scripts/tests/verify-ts-lb-target.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: verify-ts-lb-target.sh unit tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run verify-ts-lb-target.sh unit tests
+        run: bash scripts/tests/verify-ts-lb-target.test.sh

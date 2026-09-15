@@ -1,0 +1,43 @@
+name: Deploy App LB Guard Skip-Freshness Tests
+
+# Regression gate for ci-workflows#189: deploy-caprover's live-stage LB
+# guard call (checking the STABLE slot's device, not the node this live
+# run deployed) must use --skip-freshness-check, not --deploy-start-epoch;
+# deploy-stable's own LB guard call (checking its own node) must keep
+# using --deploy-start-epoch. This gate exists so a future edit can't
+# silently flip either one back.
+#
+# Test: bash scripts/tests/deploy-app-lb-guard-skip-freshness.test.sh
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-lb-guard-skip-freshness-tests.yml'
+      - 'scripts/tests/deploy-app-lb-guard-skip-freshness.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-lb-guard-skip-freshness.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml LB guard skip-freshness tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run LB guard skip-freshness contract test
+        run: bash scripts/tests/deploy-app-lb-guard-skip-freshness.test.sh
