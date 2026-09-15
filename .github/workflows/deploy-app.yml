@@ -1536,18 +1536,34 @@ jobs:
           # on PATH (for example /tmp/x/python3). "Is the resolved path
           # absolute" proves nothing about which binary it is. Pin to a
           # single, fixed, well-known path instead of resolving from PATH
-          # at all: macOS's own Command Line Tools always provide
-          # /usr/bin/python3 on every self-hosted macmini runner (it is
-          # part of the base OS, not something a job or a stale PATH entry
-          # can shadow ahead of it, since this script never consults PATH
-          # to find it). Refuse outright if that exact path is missing or
-          # not executable -- no PATH-based fallback, ever.
-          PYTHON3_BIN="/usr/bin/python3"
+          # at all.
+          #
+          # aos#193 review finding B3 (BLOCKER, round 4): round 3's fixed
+          # path, /usr/bin/python3, IS the macOS Xcode Command Line Tools
+          # shim -- and on the actual runner host (macmini-dev.local, which
+          # hosts critical-macmini/macmini-qwickapps-*/macmini-agent-3) it
+          # reports Python 3.9.6. qwickapps/aos@41f0a59's pyproject.toml
+          # requires ">=3.11", so `pip install` failed outright
+          # ("Package 'aos' requires a different Python: 3.9.6 not in
+          # '>=3.11'") -- every opted-in deploy-stable run broke at install,
+          # before any gate logic ever ran. Pin to the real 3.11+
+          # interpreter confirmed present on that same host instead
+          # (Homebrew's /opt/homebrew/bin/python3.11, confirmed 3.11.14),
+          # and don't just trust the path -- assert the ACTUAL running
+          # interpreter's version before ever creating the venv, so a
+          # future runner-image change that removes or downgrades this
+          # binary fails loudly here instead of at a confusing pip error
+          # three steps later.
+          PYTHON3_BIN="/opt/homebrew/bin/python3.11"
           if [ ! -x "$PYTHON3_BIN" ]; then
             echo "::error::verify-stable-gate: fixed interpreter '$PYTHON3_BIN' is missing or not executable on this runner -- refusing to build the aos venv (this is deliberately NOT a PATH-based lookup, see the comment above)" >&2
             exit 1
           fi
-          echo "Using fixed python3 interpreter: $PYTHON3_BIN"
+          if ! "$PYTHON3_BIN" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+            echo "::error::verify-stable-gate: fixed interpreter '$PYTHON3_BIN' reports $("$PYTHON3_BIN" --version 2>&1), which is older than the 3.11+ qwickapps/aos@${AOS_PIN_COMMIT} requires -- refusing to build the aos venv with an interpreter the install would just fail against anyway" >&2
+            exit 1
+          fi
+          echo "Using fixed python3.11+ interpreter: $PYTHON3_BIN ($("$PYTHON3_BIN" --version 2>&1))"
 
           # Pinned to the exact reviewed/merged commit the aos#193 design
           # doc built this contract against (round-6 review, 197 tests
