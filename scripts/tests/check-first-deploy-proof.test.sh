@@ -176,6 +176,12 @@ case "\$url" in
       valid)
         echo "{\\"total_count\\":1,\\"check_runs\\":[{\\"id\\":1,\\"name\\":\\"blue-green/first-deploy-used/demo\\",\\"output\\":{\\"text\\":\${MOCK_MARKER_TEXT_JSON}},\\"app\\":{\\"slug\\":\\"\${MOCK_MARKER_APP_SLUG:-github-actions}\\"},\\"external_id\\":\\"\${MOCK_MARKER_EXTERNAL_ID:-$EXTERNAL_ID}\\"}]}"
         ;;
+      truncated)
+        # aos#193 review finding (LOW, round 5): total_count says more
+        # check runs exist than were actually returned -- a real marker
+        # could be on an unfetched page.
+        echo '{"total_count":45,"check_runs":[{"id":1,"name":"blue-green/first-deploy-used/demo","output":{},"app":{"slug":"github-actions"},"external_id":"irrelevant"}]}'
+        ;;
     esac
     ;;
   *actions/runs/*/attempts/*/jobs*)
@@ -488,6 +494,12 @@ assert_yaml "first-deploy-proof step's if: requires require_live_approval_check 
 
 assert_yaml "first-deploy-proof step's if: still requires stage == live" \
   "printf '%s' \"\$FIRST_DEPLOY_PROOF_STEP_IF\" | grep -qF \"resolve-stage.outputs.stage == 'live'\""
+
+echo ""
+echo "== check-first-deploy-proof.sh: marker check-runs pagination (aos#193 review finding, LOW, round 5) =="
+
+MOCK_MARKER_MODE=truncated MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_hard_failure "marker check-runs response is truncated (total_count=45, only 1 returned) -> refused closed, never guessed as absent" "check-runs response is truncated"
 
 echo ""
 echo "== check-first-deploy-proof.sh: marker binding (aos#193 review finding #5 / finding #1) =="
