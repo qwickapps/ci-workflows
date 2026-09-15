@@ -89,6 +89,47 @@
 # to prove. Binding to the SPECIFIC step's own conclusion (point 4 above)
 # is the precise, not-too-strict, not-too-loose version of that same idea.
 #
+# aos#193 review finding B1 (BLOCKER, round 4): round 3's fix -- "a job in
+# the referenced run has the expected step, succeeded" -- was STILL not
+# enough. Demonstrated: a workflow on sha X with one job that calls
+# deploy-app.yml@main (and may let that job fail) plus a SECOND, unrelated
+# job containing a step with the exact same name, succeeding, satisfied
+# the binding -- with no real e2e/approval anywhere. Nothing tied the step
+# to deploy-app.yml's OWN job, and the run's trigger (event/branch) was
+# never checked, so a pull_request run on an attacker-controlled branch
+# could also qualify. Three more facts now have to hold:
+#
+#   - The run's `event` must be "push" or "workflow_dispatch" -- a
+#     pull_request (or any other event) run is never eligible, closing the
+#     "attacker-controlled PR branch" angle.
+#   - The run's `head_branch` must be the repo's default branch
+#     (CHECK_RUN_BINDING_DEFAULT_BRANCH) -- a forging workflow must
+#     therefore already be MERGED to main to have any chance of binding,
+#     not just opened as a PR or pushed to a scratch branch.
+#   - The expected step must be found inside a job whose `name` ends with
+#     " / deploy-caprover" (the GitHub-generated name for a job called
+#     FROM a reusable workflow: "<calling job id> / <called job id>") --
+#     never just "any job, anywhere in the run" -- AND that job's own
+#     `conclusion` must be "success", not just the individual step's.
+#
+# aos#193 review finding M1 (MEDIUM, round 4): the jobs-API call had no
+# `per_page`, so the default page size (30) silently truncated the
+# response for any run with more jobs than that -- a real run whose
+# record-creating step existed but sat on a later page returned 1
+# (refused) instead of 2 (could not verify), which callers then read as
+# "not a marker" rather than failing closed. Fixed by requesting
+# per_page=100 and independently checking `total_count` against the
+# actual number of jobs returned; a truncated response returns 2, never a
+# guessed 1.
+#
+# aos#193 review finding L1 (LOW, round 4): a 2xx response body that is
+# valid JSON but NOT an object (for example a bare JSON string) made the
+# `.head_sha`/etc. jq reads silently resolve to "", which then hit the
+# ordinary mismatch path and returned 1 (refused) instead of 2 (could not
+# verify) -- "every API error path returns 2" did not actually hold.
+# Fixed by explicitly requiring `type == "object"` on both the run
+# response and the jobs response before reading any field out of them.
+#
 # aos#193 review finding #2 (BLOCKER B2, round 3): callers used to treat
 # EVERY failure reason from this function identically -- "not a valid
 # marker, keep looking / conclude absent" -- including failures that mean
@@ -146,6 +187,16 @@ CHECK_RUN_BINDING_WORKFLOW_PATH_PREFIX="qwickapps/ci-workflows/.github/workflows
 # malicious or stale ref) must never bind, even though its `path` prefix
 # would otherwise match.
 CHECK_RUN_BINDING_WORKFLOW_REF="refs/heads/main"
+# aos#193 review finding B1 (round 4): the binding also requires the
+# creating run's `head_branch` to be exactly this -- the repo's default
+# branch -- so a forging workflow must already be merged to main.
+CHECK_RUN_BINDING_DEFAULT_BRANCH="main"
+# aos#193 review finding B1 (round 4): the record-creating step must sit
+# inside a job whose GitHub-generated name has this suffix -- the
+# "<calling job id> / <called job id>" shape GitHub assigns to a job
+# invoked FROM a reusable workflow. deploy-app.yml's own job that creates
+# both blue-green check runs is "deploy-caprover".
+CHECK_RUN_BINDING_JOB_NAME_SUFFIX=" / deploy-caprover"
 
 check_run_binding_verify() {
   local repo="$1" sha="$2" app_slug="$3" external_id="$4" expected_step_name="$5"
@@ -171,11 +222,21 @@ check_run_binding_verify() {
     echo "::error::check-run binding COULD NOT VERIFY (run_query_failed): non-JSON response from repos/${repo}/actions/runs/${run_id} -- this is NOT evidence the record is illegitimate; callers must fail closed, not treat this as absence" >&2
     return 2
   fi
+  # aos#193 review finding L1 (round 4): valid JSON that is not an OBJECT
+  # (a bare string, number, array...) would otherwise let every field read
+  # below silently resolve to "", hitting the ordinary mismatch path
+  # (return 1) instead of signalling "could not verify" (return 2).
+  if ! printf '%s' "$run_response" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "::error::check-run binding COULD NOT VERIFY (run_query_failed): response from repos/${repo}/actions/runs/${run_id} is valid JSON but not an object -- this is NOT evidence the record is illegitimate; callers must fail closed, not treat this as absence" >&2
+    return 2
+  fi
 
-  local run_head_sha run_repo run_status
+  local run_head_sha run_repo run_status run_event run_head_branch
   run_head_sha="$(printf '%s' "$run_response" | jq -r '.head_sha // ""')"
   run_repo="$(printf '%s' "$run_response" | jq -r '.repository.full_name // ""')"
   run_status="$(printf '%s' "$run_response" | jq -r '.status // ""')"
+  run_event="$(printf '%s' "$run_response" | jq -r '.event // ""')"
+  run_head_branch="$(printf '%s' "$run_response" | jq -r '.head_branch // ""')"
 
   if [ "$run_head_sha" != "$sha" ]; then
     echo "::error::check-run binding REFUSED (run_head_sha_mismatch): run ${run_id}'s head_sha='${run_head_sha}', expected '${sha}' -- this record was created by a run against a DIFFERENT commit" >&2
@@ -189,6 +250,21 @@ check_run_binding_verify() {
     echo "::error::check-run binding COULD NOT VERIFY (run_not_completed): run ${run_id} has status='${run_status}', expected 'completed' -- the run that created this record has not finished yet; this is NOT evidence the record is illegitimate, callers must fail closed, not treat this as absence" >&2
     return 2
   fi
+  # aos#193 review finding B1 (round 4): a run triggered any other way
+  # (pull_request, schedule, ...) is never eligible to create a legitimate
+  # blue-green record, even if every other check passes -- production
+  # deploy-app.yml runs are always push or workflow_dispatch.
+  if [ "$run_event" != "push" ] && [ "$run_event" != "workflow_dispatch" ]; then
+    echo "::error::check-run binding REFUSED (run_event_not_allowed): run ${run_id}'s event='${run_event}', expected 'push' or 'workflow_dispatch' -- a run triggered any other way is never eligible to create a legitimate blue-green record" >&2
+    return 1
+  fi
+  # aos#193 review finding B1 (round 4): the creating run must be on the
+  # repo's default branch -- a forging workflow on a scratch or PR-head
+  # branch must not bind, even if it happens to reference deploy-app.yml.
+  if [ "$run_head_branch" != "$CHECK_RUN_BINDING_DEFAULT_BRANCH" ]; then
+    echo "::error::check-run binding REFUSED (run_head_branch_not_default): run ${run_id}'s head_branch='${run_head_branch}', expected '${CHECK_RUN_BINDING_DEFAULT_BRANCH}' -- a forging workflow must be merged to the default branch to have any chance of binding" >&2
+    return 1
+  fi
 
   if ! printf '%s' "$run_response" | jq -e --arg prefix "$CHECK_RUN_BINDING_WORKFLOW_PATH_PREFIX" --arg ref "$CHECK_RUN_BINDING_WORKFLOW_REF" '
       (.referenced_workflows // [])[]?
@@ -200,7 +276,11 @@ check_run_binding_verify() {
   fi
 
   local jobs_response
-  if ! jobs_response="$(gh api "repos/${repo}/actions/runs/${run_id}/attempts/${run_attempt}/jobs" 2>&1)"; then
+  # aos#193 review finding M1 (round 4): per_page=100 -- comfortably above
+  # this repo's real per-run job counts, but explicitly bounded rather
+  # than relying on gh's default page size (30), which silently truncated
+  # the response for any run with more jobs than that.
+  if ! jobs_response="$(gh api "repos/${repo}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100" 2>&1)"; then
     echo "::error::check-run binding COULD NOT VERIFY (jobs_query_failed): could not query repos/${repo}/actions/runs/${run_id}/attempts/${run_attempt}/jobs: ${jobs_response:-<no output>} -- this is NOT evidence the record is illegitimate; callers must fail closed, not treat this as absence" >&2
     return 2
   fi
@@ -208,13 +288,40 @@ check_run_binding_verify() {
     echo "::error::check-run binding COULD NOT VERIFY (jobs_query_failed): non-JSON response from repos/${repo}/actions/runs/${run_id}/attempts/${run_attempt}/jobs -- this is NOT evidence the record is illegitimate; callers must fail closed, not treat this as absence" >&2
     return 2
   fi
+  # aos#193 review finding L1 (round 4): same object-type guard as the run
+  # response above.
+  if ! printf '%s' "$jobs_response" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "::error::check-run binding COULD NOT VERIFY (jobs_query_failed): response from repos/${repo}/actions/runs/${run_id}/attempts/${run_attempt}/jobs is valid JSON but not an object -- this is NOT evidence the record is illegitimate; callers must fail closed, not treat this as absence" >&2
+    return 2
+  fi
 
-  if ! printf '%s' "$jobs_response" | jq -e --arg step "$expected_step_name" '
+  # aos#193 review finding M1 (round 4): independently verify the page we
+  # got back is actually complete -- total_count > (jobs actually
+  # returned) means the record-creating step could be sitting on a page
+  # we never fetched. That is "could not verify", never "the step is
+  # absent".
+  local jobs_total_count jobs_returned_count
+  jobs_total_count="$(printf '%s' "$jobs_response" | jq -r '.total_count // 0')"
+  jobs_returned_count="$(printf '%s' "$jobs_response" | jq -r '(.jobs // []) | length')"
+  if [ "$jobs_returned_count" -lt "$jobs_total_count" ]; then
+    echo "::error::check-run binding COULD NOT VERIFY (jobs_pagination_incomplete): run ${run_id} (attempt ${run_attempt}) reports total_count=${jobs_total_count} jobs but only ${jobs_returned_count} were returned -- refusing to guess whether the record-creating step is on an unfetched page" >&2
+    return 2
+  fi
+
+  # aos#193 review finding B1 (round 4): the expected step must sit inside
+  # a job whose GitHub-generated name has the "<caller job> / <called
+  # job>" shape ending in " / deploy-caprover" -- not just ANY job in the
+  # run -- and that job's OWN conclusion must be "success" too, not just
+  # the step's. A sibling job in the same run (e.g. an unrelated workflow
+  # step with a copied name) must never satisfy this.
+  if ! printf '%s' "$jobs_response" | jq -e --arg step "$expected_step_name" --arg suffix "$CHECK_RUN_BINDING_JOB_NAME_SUFFIX" '
       (.jobs // [])[]?
+      | select(.name != null and (.name | endswith($suffix)))
+      | select(.conclusion == "success")
       | (.steps // [])[]?
       | select(.name == $step and .conclusion == "success")
     ' >/dev/null 2>&1; then
-    echo "::error::check-run binding REFUSED (run_did_not_execute_expected_step): run ${run_id} (attempt ${run_attempt}) has no job step named '${expected_step_name}' with conclusion 'success' -- this run referenced deploy-app.yml on the right sha and ref, but never actually ran the specific step that creates this record (for example: a uat-stage run, or a live run whose e2e/approval failed before reaching it)" >&2
+    echo "::error::check-run binding REFUSED (run_did_not_execute_expected_step): run ${run_id} (attempt ${run_attempt}) has no job named '*${CHECK_RUN_BINDING_JOB_NAME_SUFFIX}' with conclusion 'success' containing a step named '${expected_step_name}' with conclusion 'success' -- this run referenced deploy-app.yml on the right sha/ref/event/branch, but never actually completed the specific deploy-app.yml job and step that creates this record (for example: a uat-stage run, a live run whose e2e/approval failed before reaching it, or a copied step name in an unrelated sibling job)" >&2
     return 1
   fi
 
