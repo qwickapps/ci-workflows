@@ -1,0 +1,46 @@
+name: Self-Hosted Fork PR Guard Tests
+
+# Regression gate for ci-workflows#184: this repo is public and runs
+# multiple jobs on the fleet's self-hosted macmini runner. Without a
+# job-level guard comparing the PR head repo against the base repo, a
+# fork's pull_request would execute its own workflow-file changes and
+# step scripts directly on that runner. This gate exists so a future new
+# self-hosted + pull_request workflow that omits the guard fails this
+# test instead of silently reintroducing that gap -- see
+# self-hosted-fork-pr-guard.test.sh for the full scan.
+#
+# This workflow's own job runs on self-hosted too, so it carries the same
+# guard it tests for (dogfooding -- without this it would be exactly the
+# kind of unguarded file the test exists to catch).
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/tests/self-hosted-fork-pr-guard.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/tests/self-hosted-fork-pr-guard.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  guard-tests:
+    name: self-hosted fork-PR guard tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run self-hosted fork-PR guard test
+        run: bash scripts/tests/self-hosted-fork-pr-guard.test.sh
