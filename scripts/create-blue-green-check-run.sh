@@ -36,15 +36,31 @@
 #                                       verify-stable-gate.sh -- can parse
 #                                       it back out) \
 #     [--external-id <opaque id>]     (recorded verbatim on the check run's
-#                                       `external_id` field -- an audit
-#                                       trail of which run id/attempt
-#                                       created it; aos#193 review finding
-#                                       #5. NOT itself re-verified on read
-#                                       -- the output.text `workflow_ref`
-#                                       field is what read-side callers
-#                                       actually check, since only GitHub
-#                                       itself, not this script's caller,
-#                                       controls that value.) \
+#                                       `external_id` field, expected as
+#                                       "<github.run_id>-<github.run_attempt>".
+#                                       aos#193 review finding #1 (BLOCKER,
+#                                       round 2): THIS field is exactly
+#                                       what read-side callers
+#                                       (verify-stable-gate.sh,
+#                                       check-first-deploy-proof.sh, via
+#                                       scripts/lib/check-run-binding.sh)
+#                                       independently re-verify against the
+#                                       GitHub Actions API on read --
+#                                       `GET /repos/{repo}/actions/runs/
+#                                       {run_id}`, checking head_sha,
+#                                       repository, status, and
+#                                       referenced_workflows[]. This
+#                                       replaces the previous design, which
+#                                       instead trusted a self-reported
+#                                       `output.text.workflow_ref` string --
+#                                       broken two ways (a real record's
+#                                       workflow_ref names the CALLER's
+#                                       workflow inside a reusable workflow,
+#                                       never deploy-app.yml itself, so it
+#                                       never actually matched; and it was
+#                                       trivially forgeable text besides).
+#                                       See check-run-binding.sh's header
+#                                       for the full story.) \
 #     [--on-permission-denied fail|skip]  (default: fail. aos#193 review
 #                                       finding #1: deploy-caprover's and
 #                                       deploy-stable's job-level
@@ -62,13 +78,24 @@
 #                                       treats as "not approved"/"not used"
 #                                       (both blue-green check runs are:
 #                                       verify-stable-gate.sh refuses with
-#                                       zero matching check runs, and a
-#                                       second first-deploy claim without a
-#                                       marker just falls through to
-#                                       today's real stable-health check,
-#                                       not a bypass). Never use `skip` for
-#                                       a step whose success gates
-#                                       something.)
+#                                       zero matching check runs; and for
+#                                       the first-deploy-used marker
+#                                       specifically, a missing marker does
+#                                       NOT "fall through to today's real
+#                                       stable-health check" -- it falls
+#                                       through to check-first-deploy-proof.sh's
+#                                       OTHER two signals, which are the
+#                                       actual backstop: a real first
+#                                       deploy always retags the image
+#                                       :stable (see resolve-stage's
+#                                       NEXT_TAG="${IMAGE_BASE}:stable"),
+#                                       so a REPEAT first-deploy claim on a
+#                                       later commit is still caught by
+#                                       GHCR release/stable tag-history
+#                                       once that retag has happened, even
+#                                       with zero markers recorded).
+#                                       Never use `skip` for a step whose
+#                                       success gates something.)
 #
 # Emits the created check run's `id` and `html_url` to stderr for the
 # workflow log; nothing meaningful goes to stdout other than the raw API

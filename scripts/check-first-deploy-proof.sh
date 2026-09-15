@@ -35,10 +35,21 @@
 # used` check run is scoped by NAME to this exact app (`blue-green/first-
 # deploy-used/<app_name>`, not a bare shared name) so one app's marker on a
 # commit can never satisfy a different app's first-deploy check in a
-# multi-app repo, AND its embedded output.text payload (repo/app_name/sha/
-# workflow_ref) is verified here on read, not just checked for existence --
-# a check run whose payload doesn't match, or whose workflow_ref doesn't
-# point at THIS reusable workflow, is not counted as a valid marker.
+# multi-app repo, AND its embedded output.text payload (repo/app_name/sha)
+# is verified here on read, not just checked for existence.
+#
+# aos#193 review finding #1 (BLOCKER, round 2): a payload match alone is
+# NOT enough to count a candidate as a valid marker -- output.text is just
+# text the creating step fully controls, so a payload match alone is
+# trivially forgeable by any other same-repo workflow with checks:write.
+# Each payload-matching candidate is additionally verified via
+# scripts/lib/check-run-binding.sh against the GitHub Actions API itself
+# (creating app.slug == "github-actions", and the run named by
+# external_id actually has this head_sha, this repo, status=="completed",
+# and referenced_workflows[] proving it executed deploy-app.yml) -- see
+# that library's header for the full story on why the previous
+# self-reported `workflow_ref` text check was both never satisfied by a
+# real record and trivially forgeable.
 #
 # KNOWN LIMITATION (documented, not silently accepted): check 3 above is
 # scoped to the ONE commit sha this run is promoting (the exact sha
@@ -83,6 +94,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/caprover-api.sh
 source "$SCRIPT_DIR/lib/caprover-api.sh"
+# shellcheck source=scripts/lib/check-run-binding.sh
+source "$SCRIPT_DIR/lib/check-run-binding.sh"
 
 CAPROVER_URL=""
 CAPROVER_PASSWORD=""
@@ -93,15 +106,6 @@ REPO=""
 APP_NAME=""
 IMAGE_NAME=""
 COMMIT_SHA=""
-
-# The one workflow this marker may legitimately be created by -- a
-# same-repo workflow with checks:write for some OTHER purpose cannot forge
-# a first-deploy-used marker for this app, because its own
-# github.workflow_ref will never match this prefix (aos#193 review finding
-# #5). Matched as a prefix, not an exact ref, so callers pinning
-# ci-workflows at different refs (@main, a tag, a sha) are all accepted --
-# only a DIFFERENT workflow file is rejected.
-EXPECTED_WORKFLOW_REF_PREFIX="qwickapps/ci-workflows/.github/workflows/deploy-app.yml@"
 
 usage() {
   cat >&2 <<'EOF'
@@ -199,18 +203,48 @@ if GHCR_RESPONSE="$(gh api --paginate "orgs/${OWNER}/packages/container/${IMAGE_
     GHCR_TAG_HISTORY_FOUND="true"
   fi
 else
-  # aos#193 review finding #3 (404 positive-evidence): a 404 counts as
-  # "package genuinely does not exist" ONLY when BOTH the HTTP status is
-  # 404 AND the response carries GitHub's own specific "Package not
-  # found." message -- requiring both (not either alone, which is what
-  # this used to do) means a 404 returned for a DIFFERENT reason (e.g. a
-  # private package this token cannot read, which GitHub APIs commonly
-  # also answer with a bare 404 rather than 403 to avoid confirming the
-  # resource's existence either way) does not carry that specific message
-  # and correctly falls through to the hard-failure branch below instead
-  # of being read as proof of absence.
+  # aos#193 review finding #3 (404 positive-evidence, round 1): a 404
+  # counts as "package genuinely does not exist" ONLY when BOTH the HTTP
+  # status is 404 AND the response carries GitHub's own specific "Package
+  # not found." message -- requiring both (not either alone) means a 404
+  # returned for a DIFFERENT reason falls through to the hard-failure
+  # branch below instead of being read as proof of absence.
+  #
+  # aos#193 review finding #2 (MEDIUM, round 2): that alone is still
+  # ambiguous. GitHub returns that EXACT SAME 404 + "Package not found."
+  # response for a private package this token simply cannot see (not
+  # linked/scoped to the caller repo) -- indistinguishable from "never
+  # pushed" by response text alone. Before trusting this 404 as absence,
+  # independently prove the token can see container packages in this org
+  # AT ALL: `GET /orgs/{owner}/packages?package_type=container` filters
+  # its results to packages associated with the triggering repository when
+  # called with the ephemeral GITHUB_TOKEN, so a non-empty result here is
+  # real positive evidence of package visibility for this repo -- and in
+  # real operation this is the normal case, not a special one: this job's
+  # `build` dependency has already pushed THIS run's image to
+  # `${IMAGE_NAME}` moments before this script ever runs (see
+  # deploy-app.yml's `deploy-caprover` job: `needs: [..., build]`). If the
+  # visibility probe itself fails or comes back empty, the whole
+  # first-deploy proof is INDETERMINATE -- never silently read as
+  # absence, exactly like every other ambiguous signal in this script.
   if grep -qi "HTTP 404" "$GHCR_ERR_FILE" && grep -qi "Package not found" "$GHCR_ERR_FILE"; then
-    echo "check-first-deploy-proof: GHCR package '${IMAGE_NAME}' does not exist -- no tag history (as expected for a genuinely new app)" >&2
+    echo "check-first-deploy-proof: got a 404 'Package not found' for '${IMAGE_NAME}' -- confirming the token has real container-package visibility in org '${OWNER}' before trusting this as absence..." >&2
+    VISIBILITY_ERR_FILE="$(mktemp)"
+    VISIBILITY_OK="false"
+    VISIBILITY_RESPONSE=""
+    if VISIBILITY_RESPONSE="$(gh api "orgs/${OWNER}/packages?package_type=container&per_page=1" 2>"$VISIBILITY_ERR_FILE")"; then
+      if printf '%s' "$VISIBILITY_RESPONSE" | jq -es 'flatten | length > 0' 2>/dev/null | grep -q '^true$'; then
+        VISIBILITY_OK="true"
+      fi
+    fi
+    if [ "$VISIBILITY_OK" != "true" ]; then
+      echo "::error::check-first-deploy-proof: could not positively confirm this token can see ANY container package in org '${OWNER}' (orgs/${OWNER}/packages?package_type=container returned empty or failed) -- a 404 for '${IMAGE_NAME}' is therefore INDETERMINATE (genuine absence and a visibility gap look identical), not proof of absence. Refusing to guess first-deploy status." >&2
+      cat "$VISIBILITY_ERR_FILE" >&2
+      rm -f "$VISIBILITY_ERR_FILE"
+      exit 1
+    fi
+    rm -f "$VISIBILITY_ERR_FILE"
+    echo "check-first-deploy-proof: confirmed token has real container-package visibility in org '${OWNER}' -- GHCR package '${IMAGE_NAME}' genuinely does not exist -- no tag history (as expected for a genuinely new app)" >&2
     GHCR_TAG_HISTORY_FOUND="false"
   else
     echo "::error::check-first-deploy-proof: GHCR package-versions query failed unexpectedly -- refusing to guess first-deploy status" >&2
@@ -239,30 +273,49 @@ fi
 # aos#193 review finding #5: existence of a same-named check run is not
 # enough -- verify each candidate's embedded output.text payload actually
 # binds repo+app_name+sha (redundant with the name scoping and the
-# per-sha API path, but cheap defense in depth) AND that it was created by
-# a legitimate ci-workflows deploy-app.yml run (workflow_ref prefix
-# match), not merely by some other same-repo workflow that also happens
-# to hold checks:write.
+# per-sha API path, but cheap defense in depth).
+#
+# aos#193 review finding #1 (BLOCKER, round 2): a payload match alone is
+# NOT sufficient either -- output.text is just text the creating step
+# fully controls. Each payload-matching candidate is additionally run
+# through scripts/lib/check-run-binding.sh's GitHub-Actions-API binding
+# check (creating app.slug=="github-actions" and the run named by
+# external_id really has this head_sha/repo/status=="completed" and
+# referenced_workflows[] proving it executed deploy-app.yml) before it
+# counts as a legitimate marker.
 MARKER_FOUND="false"
 MARKER_CANDIDATE_COUNT="$(printf '%s' "$MARKER_RESPONSE" | jq -r '.total_count // 0')"
 if [ "$MARKER_CANDIDATE_COUNT" != "0" ]; then
-  VALID_MARKER_COUNT="$(printf '%s' "$MARKER_RESPONSE" | jq -r \
-    --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$COMMIT_SHA" --arg wf_prefix "$EXPECTED_WORKFLOW_REF_PREFIX" '
+  PAYLOAD_MATCHING_CANDIDATES="$(printf '%s' "$MARKER_RESPONSE" | jq -c \
+    --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$COMMIT_SHA" '
       [ .check_runs[]?
         | (.output.text // "") as $t
         | ($t | fromjson? // {}) as $p
         | select(
             ($p.repo // "") == $repo and
             ($p.app_name // "") == $app and
-            ($p.sha // "") == $sha and
-            (($p.workflow_ref // "") | startswith($wf_prefix))
+            ($p.sha // "") == $sha
           )
-      ] | length
+        | {app_slug: (.app.slug // ""), external_id: (.external_id // "")}
+      ]
     ')"
-  if [ "${VALID_MARKER_COUNT:-0}" != "0" ]; then
-    MARKER_FOUND="true"
+  PAYLOAD_MATCH_COUNT="$(printf '%s' "$PAYLOAD_MATCHING_CANDIDATES" | jq 'length')"
+
+  if [ "${PAYLOAD_MATCH_COUNT:-0}" = "0" ]; then
+    echo "::warning::check-first-deploy-proof: found ${MARKER_CANDIDATE_COUNT} check run(s) named '${MARKER_CHECK_NAME}' on ${COMMIT_SHA}, but none carried a payload matching repo/app_name/sha -- not counted as a marker" >&2
   else
-    echo "::warning::check-first-deploy-proof: found ${MARKER_CANDIDATE_COUNT} check run(s) named '${MARKER_CHECK_NAME}' on ${COMMIT_SHA}, but none carried a valid, matching, legitimately-created payload -- not counted as a marker" >&2
+    while IFS= read -r candidate; do
+      [ -z "$candidate" ] && continue
+      CAND_APP_SLUG="$(printf '%s' "$candidate" | jq -r '.app_slug')"
+      CAND_EXTERNAL_ID="$(printf '%s' "$candidate" | jq -r '.external_id')"
+      if check_run_binding_verify "$REPO" "$COMMIT_SHA" "$CAND_APP_SLUG" "$CAND_EXTERNAL_ID"; then
+        MARKER_FOUND="true"
+        break
+      fi
+    done < <(printf '%s' "$PAYLOAD_MATCHING_CANDIDATES" | jq -c '.[]')
+    if [ "$MARKER_FOUND" != "true" ]; then
+      echo "::warning::check-first-deploy-proof: ${PAYLOAD_MATCH_COUNT} check run(s) named '${MARKER_CHECK_NAME}' on ${COMMIT_SHA} matched the expected payload, but none passed the GitHub-Actions-run binding check -- not counted as a marker" >&2
+    fi
   fi
 fi
 echo "check-first-deploy-proof: first-deploy-used marker found=${MARKER_FOUND}" >&2

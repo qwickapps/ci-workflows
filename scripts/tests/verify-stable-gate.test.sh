@@ -8,13 +8,21 @@
 #
 #   0 or 2+ check runs                 -> refused
 #   1 check run, conclusion != success -> refused
-#   1 success check run, payload repo/app_name/sha/stage/workflow_ref
-#     mismatch                         -> refused
-#   1 success check run, no directive_payload/signature/body (today's
-#     expected state -- the aos#193 §1 signing bridge isn't built)
+#   1 success check run, payload repo/app_name/sha/stage mismatch
+#                                       -> refused
+#   1 success check run, payload matches, but the GitHub-Actions-run
+#     binding fails (wrong creating app, malformed external_id, run
+#     head_sha/repo mismatch, run not completed, run never referenced
+#     deploy-app.yml)                  -> refused (aos#193 review finding
+#                                          #1, BLOCKER, round 2)
+#   1 success check run, payload matches, binding verified, no
+#     directive_payload/signature/body (today's expected state -- the
+#     aos#193 §1 signing bridge isn't built)
 #                                       -> refused, WITHOUT ever invoking aos
-#   1 success check run, payload matches, aos directive verify says ok      -> PASS
-#   1 success check run, payload matches, aos directive verify says refused -> refused
+#   1 success check run, payload matches, binding verified, aos directive
+#     verify says ok                   -> PASS
+#   1 success check run, payload matches, binding verified, aos directive
+#     verify says refused              -> refused
 #
 # The mock `gh`/`aos` binaries are fixed scripts written once; each
 # scenario configures them via a JSON response file and an env var rather
@@ -37,11 +45,30 @@ mkdir -p "$TMPDIR/bin"
 REPO="qwickapps/demo"
 APP_NAME="demo"
 SHA="0123456789abcdef0123456789abcdef01234567"
-WORKFLOW_REF="qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main"
+RUN_ID="99887766"
+RUN_ATTEMPT="1"
+EXTERNAL_ID="${RUN_ID}-${RUN_ATTEMPT}"
+WORKFLOW_PATH="qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main"
 RESPONSE_FILE="$TMPDIR/gh-check-runs-response.json"
+RUN_RESPONSE_FILE="$TMPDIR/gh-run-response.json"
 AOS_MODE_FILE="$TMPDIR/aos-mode"
 AOS_CALLED_LOG="$TMPDIR/aos-called.log"
 AOS_ARGS_LOG="$TMPDIR/aos-args.log"
+
+# A default, fully-legitimate "actions/runs/{id}" response -- the run that
+# (per external_id) created the check run being verified. Individual
+# scenarios below overwrite $RUN_RESPONSE_FILE to break one field at a
+# time.
+write_valid_run_response() {
+  jq -nc --arg sha "$SHA" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{
+    head_sha: $sha,
+    repository: {full_name: $repo},
+    status: "completed",
+    conclusion: "success",
+    referenced_workflows: [{path: $wf, sha: "deadbeef", ref: "refs/heads/main"}]
+  }' > "$RUN_RESPONSE_FILE"
+}
+write_valid_run_response
 
 cat > "$TMPDIR/bin/gh" <<MOCK
 #!/usr/bin/env bash
@@ -60,6 +87,9 @@ done
 case "\$url" in
   *commits/*/check-runs*)
     cat "$RESPONSE_FILE"
+    ;;
+  *actions/runs/*)
+    cat "$RUN_RESPONSE_FILE"
     ;;
   *)
     echo "mock gh: unexpected api url: \$url" >&2
@@ -101,19 +131,21 @@ set_response_count() {
 
 set_response_one() {
   # $1 = conclusion, $2 = output.text (a JSON *string* value, already
-  # serialized -- pass "" to omit output.text entirely)
-  local conclusion="$1" text="$2"
+  # serialized -- pass "" to omit output.text entirely), $3 = app.slug
+  # (default "github-actions"), $4 = external_id (default $EXTERNAL_ID)
+  local conclusion="$1" text="$2" app_slug="${3:-github-actions}" ext_id="${4:-$EXTERNAL_ID}"
   if [ -z "$text" ]; then
-    jq -nc --arg c "$conclusion" '{total_count: 1, check_runs: [{conclusion: $c, output: {}}]}' > "$RESPONSE_FILE"
+    jq -nc --arg c "$conclusion" --arg slug "$app_slug" --arg eid "$ext_id" \
+      '{total_count: 1, check_runs: [{conclusion: $c, output: {}, app: {slug: $slug}, external_id: $eid}]}' > "$RESPONSE_FILE"
   else
-    jq -nc --arg c "$conclusion" --arg t "$text" '{total_count: 1, check_runs: [{conclusion: $c, output: {text: $t}}]}' > "$RESPONSE_FILE"
+    jq -nc --arg c "$conclusion" --arg t "$text" --arg slug "$app_slug" --arg eid "$ext_id" \
+      '{total_count: 1, check_runs: [{conclusion: $c, output: {text: $t}, app: {slug: $slug}, external_id: $eid}]}' > "$RESPONSE_FILE"
   fi
 }
 
 matching_payload_text() {
-  jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" --arg wf "$WORKFLOW_REF" '{
+  jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{
     repo: $repo, app_name: $app, sha: $sha, stage: "live", e2e_digest: "sha256:deadbeef",
-    workflow_ref: $wf,
     directive_payload: "{\"from\":\"prime\"}", directive_signature: "armored-sig", directive_body: "body text"
   }'
 }
@@ -199,23 +231,56 @@ WRONG_APP_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg sha "$SHA" '{repo: $repo, a
 set_response_one "success" "$WRONG_APP_PAYLOAD"
 assert_refused "app_name mismatch in embedded payload (a DIFFERENT app's approval on the same commit) -> refused (aos#193 review finding #5)" "payload_app_name_mismatch"
 
-FORGED_WORKFLOW_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{
-  repo: $repo, app_name: $app, sha: $sha, stage: "live",
-  workflow_ref: "qwickapps/some-other-repo/.github/workflows/totally-unrelated.yml@refs/heads/main"
-}')"
-set_response_one "success" "$FORGED_WORKFLOW_PAYLOAD"
-assert_refused "workflow_ref is not deploy-app.yml (forgery attempt by another same-repo workflow) -> refused (aos#193 review finding #5)" "payload_workflow_ref_mismatch"
+echo ""
+echo "== verify-stable-gate.sh: GitHub-Actions-API binding (aos#193 review finding #1, BLOCKER, round 2) =="
+
+MATCHING_PAYLOAD="$(matching_payload_text)"
+
+write_valid_run_response
+set_response_one "success" "$MATCHING_PAYLOAD" "some-other-app" "$EXTERNAL_ID"
+assert_refused "check run created by an app other than github-actions -> refused (self-reported text is never trusted)" "check_run_app_mismatch"
+
+write_valid_run_response
+set_response_one "success" "$MATCHING_PAYLOAD" "github-actions" "not-a-run-id"
+assert_refused "malformed external_id (cannot be parsed as <run_id>-<run_attempt>) -> refused" "missing_or_malformed_external_id"
+
+BAD_SHA_RUN="$(jq -nc --arg sha "ffffffffffffffffffffffffffffffffffffff" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: $wf}]}')"
+printf '%s' "$BAD_SHA_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the run named by external_id has a DIFFERENT head_sha than the commit being deployed -> refused" "run_head_sha_mismatch"
+
+BAD_REPO_RUN="$(jq -nc --arg sha "$SHA" --arg repo "qwickapps/some-other-repo" --arg wf "$WORKFLOW_PATH" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: $wf}]}')"
+printf '%s' "$BAD_REPO_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the run named by external_id belongs to a DIFFERENT repo -> refused" "run_repository_mismatch"
+
+IN_PROGRESS_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{head_sha: $sha, repository: {full_name: $repo}, status: "in_progress", referenced_workflows: [{path: $wf}]}')"
+printf '%s' "$IN_PROGRESS_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the run named by external_id has not completed yet -> refused" "run_not_completed"
+
+NO_REFERENCED_WORKFLOW_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/some-other-repo/.github/workflows/totally-unrelated.yml@refs/heads/main"}]}')"
+printf '%s' "$NO_REFERENCED_WORKFLOW_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the run named by external_id never referenced deploy-app.yml (forgery attempt -- a DIFFERENT workflow's run trying to claim this record) -> refused (aos#193 review finding #1)" "run_did_not_reference_deploy_app_workflow"
+
+EMPTY_REFERENCED_WORKFLOWS_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: []}')"
+printf '%s' "$EMPTY_REFERENCED_WORKFLOWS_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the run named by external_id references no reusable workflows at all -> refused" "run_did_not_reference_deploy_app_workflow"
+
+write_valid_run_response
 
 echo ""
 echo "== verify-stable-gate.sh: missing directive signature (today's expected state) =="
 
-NO_SIG_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" --arg wf "$WORKFLOW_REF" '{
-  repo: $repo, app_name: $app, sha: $sha, stage: "live", e2e_digest: "sha256:x", workflow_ref: $wf,
+NO_SIG_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{
+  repo: $repo, app_name: $app, sha: $sha, stage: "live", e2e_digest: "sha256:x",
   directive_payload: null, directive_signature: null, directive_body: null
 }')"
 set_response_one "success" "$NO_SIG_PAYLOAD"
 set_aos_mode "ok"
-assert_refused "null directive_payload/signature/body -> refused closed, WITHOUT invoking aos (aos#193 §1 bridge not built)" "missing_directive_signature"
+assert_refused "null directive_payload/signature/body -> refused closed, WITHOUT invoking aos (aos#193 §1 bridge not built) -- only reached once the run binding above already passed" "missing_directive_signature"
 if [ -f "$AOS_CALLED_LOG" ]; then
   echo "  FAIL: aos CLI was invoked even though the signature was null -- must never happen"
   fail=$((fail + 1))
@@ -227,15 +292,13 @@ fi
 echo ""
 echo "== verify-stable-gate.sh: real aos directive verify contract, mocked result =="
 
-MATCHING_PAYLOAD="$(matching_payload_text)"
-
 set_response_one "success" "$MATCHING_PAYLOAD"
 set_aos_mode "ok"
-assert_passes "matching payload + aos directive verify ok -> PASS"
+assert_passes "matching payload + verified binding + aos directive verify ok -> PASS"
 
 set_response_one "success" "$MATCHING_PAYLOAD"
 set_aos_mode "refused"
-assert_refused "matching payload + aos directive verify refused -> refused" "directive_verify_failed"
+assert_refused "matching payload + verified binding + aos directive verify refused -> refused" "directive_verify_failed"
 
 echo ""
 echo "== verify-stable-gate.sh: --require-signer is always hardcoded at the call site, never droppable (aos#193 review finding #5 mutation gap) =="
@@ -281,11 +344,40 @@ set +e
 RC=$?
 set -e
 if [ "$RC" -eq 0 ]; then
-  echo "  PASS: an ambient \$AOS_MANIFEST set before invoking the script never reaches the aos call (explicitly unset via env -u)"
+  echo "  PASS: an ambient \$AOS_MANIFEST set before invoking the script (with no --aos-manifest passed) never reaches the aos call (explicitly unset via env -u)"
   pass=$((pass + 1))
 else
   echo "  FAIL: ambient \$AOS_MANIFEST leaked through to the aos invocation"
   sed 's/^/      /' "$OUT"
+  fail=$((fail + 1))
+fi
+
+echo ""
+echo "== verify-stable-gate.sh: --aos-manifest, when passed, IS forwarded as \$AOS_MANIFEST (aos#193 review finding #4) =="
+
+cat > "$TMPDIR/bin/aos" <<'MOCK'
+#!/usr/bin/env bash
+echo "AOS_MANIFEST=${AOS_MANIFEST:-<unset>}" >> "__AOS_MANIFEST_LOG__"
+echo '{"ok": true, "from": "prime", "scope": "test", "target": "ci-workflows-stable-gate"}'
+MOCK
+sed -i "s#__AOS_MANIFEST_LOG__#$TMPDIR/aos-manifest-seen.log#" "$TMPDIR/bin/aos"
+chmod +x "$TMPDIR/bin/aos"
+rm -f "$TMPDIR/aos-manifest-seen.log"
+
+set_response_one "success" "$MATCHING_PAYLOAD"
+OUT="$TMPDIR/out-manifest-passthrough"
+(
+  export PATH="$TMPDIR/bin:$PATH"
+  bash "$SUT" --github-token irrelevant --repo "$REPO" --app-name "$APP_NAME" --sha "$SHA" \
+    --aos-manifest "/tmp/pinned-prime-manifest.yaml"
+) > "$OUT" 2>&1
+if grep -qF "AOS_MANIFEST=/tmp/pinned-prime-manifest.yaml" "$TMPDIR/aos-manifest-seen.log" 2>/dev/null; then
+  echo "  PASS: --aos-manifest's value was forwarded to the aos call as \$AOS_MANIFEST"
+  pass=$((pass + 1))
+else
+  echo "  FAIL: --aos-manifest's value was not forwarded to the aos call"
+  sed 's/^/      /' "$OUT"
+  cat "$TMPDIR/aos-manifest-seen.log" 2>/dev/null | sed 's/^/      /'
   fail=$((fail + 1))
 fi
 

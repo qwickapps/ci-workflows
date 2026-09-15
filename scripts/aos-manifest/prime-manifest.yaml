@@ -1,0 +1,68 @@
+# prime-manifest.yaml -- aos#193 review finding #4 (HIGH, round 2).
+#
+# This is the manifest ci-workflows itself commits and pins for
+# verify-stable-gate.sh's `aos directive verify --require-signer prime`
+# call (see that script's header comment for the full story). It exists so
+# the stable gate's fail-closed behavior is a DELIBERATE, DOCUMENTED
+# design choice -- "no real prime signing key has been provisioned yet" --
+# rather than an ACCIDENT of the installed aos venv having no manifest
+# file to read at all (aos@41f0a59's pyproject.toml does not package
+# config/agents.yaml into the wheel, so with no manifest explicitly
+# passed, aos's own DEFAULT_MANIFEST path resolves to a file that simply
+# does not exist in a fresh venv install).
+#
+# deploy-app.yml's deploy-stable job passes this file's absolute,
+# checksum-verified path via --aos-manifest to verify-stable-gate.sh,
+# which forwards it to `aos` as $AOS_MANIFEST. The checksum check (against
+# a hardcoded sha256 recorded in deploy-app.yml itself) means a compromised
+# runner cannot silently swap this file's contents out from under a
+# checksum this repo's own git history/review already vouches for.
+#
+# The `prime` entry below deliberately carries NO `signing_key:` yet --
+# aos#123 §5 / this ADR's "Update" section (docs/adr/002-prime-key-isolation.md
+# in qwickapps/aos) moved real key custody into the secrets service, which
+# has not issued a real prime signing key as of this manifest. Until it
+# does, `aos directive verify --require-signer prime` cannot succeed
+# against ANY payload -- by construction of this committed manifest, not
+# by accident. Bump this file (and its checksum in deploy-app.yml)
+# deliberately, in the same PR that wires up a real signing key, when
+# aos#123 §5 ships one.
+#
+# Schema/shape mirrors qwickapps/aos's own config/agents.yaml (fleet/v2) --
+# see aos/manifest.py's `parse()` for the authoritative schema this must
+# satisfy. Only the fields verify-stable-gate.sh's call path actually
+# needs are included; this manifest is NOT the real fleet manifest and
+# must never be used for anything other than this one gate's
+# directive-verify call.
+
+schema: fleet/v2
+
+fleet:
+  name: qwickapps
+  manifest_ref: ci-workflows-pinned
+
+hosts:
+  ci-workflows-stable-gate-placeholder:
+    token: ci-workflows-stable-gate-placeholder
+    status: planned
+
+quota_classes:
+  critical: {}
+
+agents:
+  - company: qwickapps
+    name: prime
+    role: manager
+    environment: ci-workflows-stable-gate-placeholder
+    model: opus
+    signature: Agent QwickApps
+    quota_class: critical
+    # `agent_id` is always "<name>-<role>" ("prime-manager"), never the
+    # bare "prime" -- aos.manifest._canonical_id() never drops the role
+    # suffix. `absorbs: [prime]` is what actually makes the bare name
+    # "prime" resolve (as Status.FOLDED, which
+    # aos.directive.verify()'s required_signer check accepts identically
+    # to Status.ACTIVE) -- mirrors qwickapps/aos's own real
+    # config/agents.yaml, whose prime entry absorbs "prime" the same way.
+    absorbs: [prime]
+    # signing_key: intentionally absent -- see the header comment above.

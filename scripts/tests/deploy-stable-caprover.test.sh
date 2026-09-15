@@ -90,6 +90,14 @@ result = {
     # solely to the step, so the step can never be structurally bypassed
     # by a job-level short-circuit that looks unrelated).
     'job_if': job.get('if', ''),
+    # aos#193 review §5 mutation gaps "G8"/"G9": the pin-verification
+    # step's actual run script, so its content can be regex-checked below
+    # for the specific protections a plausible mutation could silently
+    # drop.
+    'gate_step_run': next(
+        (s.get('run', '') for s in steps if (s.get('name') or '').startswith('Verify live-e2e-approved')),
+        None,
+    ),
 }
 
 # Confirm no OTHER job in the file references Coolify either -- the
@@ -165,6 +173,57 @@ assert "no other job in deploy-app.yml still mentions coolify" \
 if [ "$OTHER_COOLIFY_JOBS" != "[]" ]; then
   echo "    jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
 fi
+
+echo ""
+echo "== deploy-app.yml: aos pin-verification mutation gaps (aos#193 review §5, round 2) =="
+
+GATE_STEP_RUN="$(get gate_step_run)"
+
+assert_run() {
+  local desc="$1" needle_regex="$2"
+  if printf '%s' "$GATE_STEP_RUN" | grep -qE -- "$needle_regex"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc"
+    fail=$((fail + 1))
+  fi
+}
+
+# "G8": the installed aos commit is compared against the pinned commit via
+# pip's own PEP 610 direct_url.json record -- dropping this comparison
+# (so ANY installed commit, including a stub package, would silently pass)
+# must fail this assertion.
+assert_run "G8: direct_url.json's vcs_info.commit_id is read and compared against the pinned commit" \
+  'INSTALLED_COMMIT.*!=.*AOS_PIN_COMMIT'
+assert_run "G8: direct_url.json is actually consulted (not skipped)" \
+  'direct_url\.json'
+
+# "G9": verify-stable-gate.sh is invoked with an explicit --aos-bin
+# pointing at the fresh per-job venv's OWN binary -- dropping --aos-bin
+# (so the script would fall back to a bare `aos` resolved from PATH,
+# which a stub/stale install on this shared runner could hijack) must
+# fail this assertion.
+assert_run "G9: --aos-bin is passed pointing at the venv's own aos binary (never a bare 'aos' left to resolve from PATH)" \
+  '\-\-aos-bin "\$AOS_BIN"'
+assert_run "G9: AOS_BIN is resolved from inside the fresh per-job venv, not PATH" \
+  'AOS_BIN="\$AOS_VENV/bin/aos"'
+
+# aos#193 review finding #3 (round 2): python3 is resolved to an absolute
+# path once, explicitly, and that captured path -- never a bare python3 --
+# is what actually builds the venv.
+assert_run "finding #3: python3 is resolved to an absolute path before building the venv" \
+  'PYTHON3_BIN="\$\(command -v python3'
+assert_run "finding #3: the venv is built with the resolved absolute-path python3, never a bare 'python3 -m venv'" \
+  '"\$PYTHON3_BIN" -m venv "\$AOS_VENV"'
+
+# aos#193 review finding #4 (round 2): a real, committed, checksum-verified
+# manifest is passed via --aos-manifest -- merely unsetting $AOS_MANIFEST
+# (today's stale claim about a "bundled default manifest") must fail this.
+assert_run "finding #4: a checksum-verified manifest path is passed via --aos-manifest" \
+  '\-\-aos-manifest "\$AOS_MANIFEST_ABS_PATH"'
+assert_run "finding #4: the manifest's sha256 is verified against a hardcoded expected value before use" \
+  'AOS_MANIFEST_ACTUAL_SHA256.*!=.*AOS_MANIFEST_EXPECTED_SHA256'
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
