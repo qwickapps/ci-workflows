@@ -16,6 +16,8 @@ on:
     paths:
       - 'scripts/check-first-deploy-proof.sh'
       - 'scripts/lib/caprover-api.sh'
+      - 'scripts/lib/check-run-binding.sh'
+      - '.github/workflows/deploy-app.yml'
       - '.github/workflows/check-first-deploy-proof-tests.yml'
       - 'scripts/tests/check-first-deploy-proof.test.sh'
   push:
@@ -23,6 +25,8 @@ on:
     paths:
       - 'scripts/check-first-deploy-proof.sh'
       - 'scripts/lib/caprover-api.sh'
+      - 'scripts/lib/check-run-binding.sh'
+      - '.github/workflows/deploy-app.yml'
       - 'scripts/tests/check-first-deploy-proof.test.sh'
 
 permissions:
