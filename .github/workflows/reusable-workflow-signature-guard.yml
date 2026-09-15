@@ -1,0 +1,53 @@
+name: Reusable Workflow Signature Guard
+
+# ci-workflows#175: commit 90e0adf9226dcc426750a7785feba7301285d515 silently
+# rewrote main-push-guard.yml's `on.workflow_call` inputs/secrets (turning it
+# into a plain `on.push` thin wrapper) while 6 dependent repos were still
+# calling it as a reusable workflow with the old signature. Nothing compared
+# a reusable workflow's callable interface before vs after a PR, so the
+# break went unnoticed for hours.
+#
+# This is the real-time PR gate version of that check: on every PR that
+# touches .github/workflows/**, it diffs the on.workflow_call
+# inputs/outputs/secrets key sets of every reusable workflow in this repo
+# between the PR base and the PR head, and fails loudly on any change
+# (added, removed, or renamed keys) or outright removal of the
+# workflow_call interface. A brand-new reusable workflow is fine.
+#
+# See scripts/check-reusable-workflow-signatures.sh for the check itself,
+# and scripts/tests/check-reusable-workflow-signatures.test.sh (wired via
+# reusable-workflow-signature-guard-tests.yml) for its own regression tests
+# -- including replaying the ci-workflows#175 incident's exact before/after
+# commits and asserting this script would have caught it.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  signature-guard:
+    name: on.workflow_call signature diff (base vs head)
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Ensure PR base commit is available
+        run: git fetch --no-tags origin "${{ github.event.pull_request.base.sha }}"
+
+      - name: Check reusable workflow signatures (base vs PR head)
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/check-reusable-workflow-signatures.sh
