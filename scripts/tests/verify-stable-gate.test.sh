@@ -268,21 +268,28 @@ assert_refused "zero check runs -> refused (never approved)" "no_check_run_found
 # produces) must still refuse -- multiplicity alone is no longer the
 # refusal reason, but "none of them are valid" still is.
 set_response_count 2
-assert_refused "two check runs, neither carries a valid payload -> refused" "no_valid_approval_found"
+assert_refused "two check runs, neither carries a valid payload -> refused" "no_successful_check_run"
 
 set_response_one "failure" ""
 assert_refused "one check run, conclusion=failure -> refused (never even becomes a success candidate)" "no_successful_check_run"
+
+# aos#193 review finding (LOW, round 5): the check-runs query itself
+# (distinct from the already-fixed jobs-API pagination) must also detect
+# truncation -- total_count exceeding the number of check_runs actually
+# returned must refuse, never silently search only the fetched page.
+jq -nc '{total_count: 45, check_runs: [range(30) | {id: ., conclusion: "success", output: {}}]}' > "$RESPONSE_FILE"
+assert_refused "check-runs response is truncated (total_count=45, only 30 returned) -> refused closed" "check_runs_pagination_incomplete"
 
 echo ""
 echo "== verify-stable-gate.sh: payload cross-checks =="
 
 MISMATCHED_PAYLOAD="$(jq -nc --arg sha "$SHA" '{repo: "qwickapps/OTHER", sha: $sha, stage: "live"}')"
 set_response_one "success" "$MISMATCHED_PAYLOAD"
-assert_refused "repo mismatch in embedded payload -> refused" "payload_mismatch"
+assert_refused "repo mismatch in embedded payload -> refused" "no_successful_check_run"
 
 WRONG_STAGE_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{repo: $repo, app_name: $app, sha: $sha, stage: "uat"}')"
 set_response_one "success" "$WRONG_STAGE_PAYLOAD"
-assert_refused "stage != 'live' in embedded payload -> refused" "payload_mismatch"
+assert_refused "stage != 'live' in embedded payload -> refused" "no_successful_check_run"
 
 # aos#193 review mutation gap: removing the sha-payload check from
 # verify-stable-gate.sh (i.e. no longer verifying that the directive's
@@ -291,11 +298,11 @@ assert_refused "stage != 'live' in embedded payload -> refused" "payload_mismatc
 # matches on everything EXCEPT sha, is exactly that test.
 WRONG_SHA_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" '{repo: $repo, app_name: $app, sha: "ffffffffffffffffffffffffffffffffffffff", stage: "live"}')"
 set_response_one "success" "$WRONG_SHA_PAYLOAD"
-assert_refused "sha mismatch in embedded payload (record is for a DIFFERENT commit than the one actually being deployed) -> refused" "payload_mismatch"
+assert_refused "sha mismatch in embedded payload (record is for a DIFFERENT commit than the one actually being deployed) -> refused" "no_successful_check_run"
 
 WRONG_APP_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg sha "$SHA" '{repo: $repo, app_name: "some-other-app", sha: $sha, stage: "live"}')"
 set_response_one "success" "$WRONG_APP_PAYLOAD"
-assert_refused "app_name mismatch in embedded payload (a DIFFERENT app's approval on the same commit) -> refused (aos#193 review finding #5)" "payload_mismatch"
+assert_refused "app_name mismatch in embedded payload (a DIFFERENT app's approval on the same commit) -> refused (aos#193 review finding #5)" "no_successful_check_run"
 
 echo ""
 echo "== verify-stable-gate.sh: GitHub-Actions-API binding (aos#193 review finding #1, BLOCKER, round 2) =="
@@ -496,13 +503,52 @@ echo "== verify-stable-gate.sh: reruns create a second, equally legitimate recor
 echo "   Requiring uniqueness used to make a routine 'Re-run all jobs' on an"
 echo "   already-approved live run permanently refuse stable for that sha."
 
-# M2a: two check runs on the same sha, both fully legitimate (as a real
-# rerun produces) -- must PASS, deterministically selecting the newest
-# (highest id).
+# M2a: two check runs on the same sha, both fully legitimate, from a REAL
+# rerun -- which GitHub gives its own new run_attempt (a different
+# external_id: "${RUN_ID}-2" rather than "${RUN_ID}-1") -- must PASS,
+# deterministically selecting the newest (highest id). Using genuinely
+# distinct external_ids here is what makes this a real M2 rerun scenario
+# rather than the B4 forgery scenario below, which is distinguished
+# ONLY by both candidates naming the exact same external_id.
 OLDER_ID=6000
 NEWER_ID=7000
-set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID"
-assert_passes "two check runs from a rerun, BOTH fully legitimate -> PASS (does not refuse merely for existing twice)"
+RERUN_EXTERNAL_ID="${RUN_ID}-2"
+set_response_two "$OLDER_ID" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "$NEWER_ID" "$MATCHING_PAYLOAD" "$RERUN_EXTERNAL_ID"
+assert_passes "two check runs from a REAL rerun (distinct run_attempt each), BOTH fully legitimate -> PASS (does not refuse merely for existing twice)"
+
+echo ""
+echo "== verify-stable-gate.sh: duplicate record forgery (aos#193 review finding B4, BLOCKER, round 5) =="
+echo "   Newest-first selection alone let a forged record -- pointing"
+echo "   external_id at a genuine live run's run_id-attempt -- win over"
+echo "   the real approval, since binding only proves the NAMED run is"
+echo "   legitimate, never that it created THIS SPECIFIC check run."
+
+# B4: two check runs, BOTH naming the exact SAME external_id (the reviewer's
+# demonstrated scenario: a forged record with attacker payload pointing at
+# a genuine live run, newer than -- and about to shadow -- the real
+# approval). This must now be refused outright as ambiguous, before ever
+# reaching the binding check that would otherwise let the newer (forged)
+# one win.
+FORGED_PAYLOAD="$(jq -nc --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '{
+  repo: $repo, app_name: $app, sha: $sha, stage: "live", e2e_digest: "sha256:forged",
+  directive_payload: "REPLAYED-FROM-OTHER-SHA", directive_signature: "forged-sig", directive_body: "forged body"
+}')"
+set_response_two "800" "$MATCHING_PAYLOAD" "$EXTERNAL_ID" "900" "$FORGED_PAYLOAD" "$EXTERNAL_ID"
+assert_refused "a forged record and the genuine approval both name the SAME external_id (same run_id-attempt) -> refused as ambiguous, never silently picks the newer/forged one" "ambiguous_duplicate_run_reference"
+
+# Mutation-coverage proof: confirm the forged payload never actually
+# reaches aos when this refusal fires (i.e. this isn't just an incidental
+# early exit that still lets a later step leak the forged directive).
+OUT="$TMPDIR/out-b4-forgery"
+rm -f "$AOS_CALLED_LOG"
+run_sut "$OUT" || true
+if [ -f "$AOS_CALLED_LOG" ]; then
+  echo "  FAIL: aos CLI was invoked despite the duplicate-run-reference refusal -- the forged payload could have reached it"
+  fail=$((fail + 1))
+else
+  echo "  PASS: aos CLI was never invoked when the duplicate-run-reference refusal fired"
+  pass=$((pass + 1))
+fi
 
 # M2b: two check runs -- the OLDER one is legitimate, the NEWER one has a
 # mismatched payload (e.g. a stray/irrelevant check run created later for
