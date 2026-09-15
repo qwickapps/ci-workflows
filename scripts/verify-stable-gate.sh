@@ -223,7 +223,18 @@ APP_SLUG="$(printf '%s' "$RESPONSE" | jq -r '.check_runs[0].app.slug // ""')"
 EXTERNAL_ID="$(printf '%s' "$RESPONSE" | jq -r '.check_runs[0].external_id // ""')"
 # check_run_binding_verify prints its own specifically-named ::error::
 # reason directly to stderr on failure -- nothing further to add here.
-check_run_binding_verify "$REPO" "$SHA" "$APP_SLUG" "$EXTERNAL_ID" || exit 1
+# The exact step name must match deploy-app.yml's "Create live-e2e-approved
+# check run (aos#193 Phase 1 §1)" step, so a run that merely referenced
+# deploy-app.yml without ever reaching that specific step (e.g. a uat
+# stage run, or a live run whose e2e/approval failed first) cannot bind.
+# This gate already treats ANY nonzero return (1 "definitively refused" or
+# 2 "could not verify") identically -- exit 1 -- which is correct here:
+# unlike check-first-deploy-proof.sh's multi-candidate loop, there is only
+# ever exactly one record to check at this point (the earlier count==1
+# requirement above), so "could not verify" and "refused" both mean the
+# gate cannot proceed, with no different candidate left to fall back to.
+LIVE_APPROVED_CREATING_STEP_NAME="Create live-e2e-approved check run (aos#193 Phase 1 §1)"
+check_run_binding_verify "$REPO" "$SHA" "$APP_SLUG" "$EXTERNAL_ID" "$LIVE_APPROVED_CREATING_STEP_NAME" || exit 1
 
 # ── 5: directive signature verification (fails closed today -- see the
 #    module docstring above) ──────────────────────────────────────────────
