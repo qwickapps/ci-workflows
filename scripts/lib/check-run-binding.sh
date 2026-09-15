@@ -224,8 +224,19 @@ check_run_binding_verify() {
     return 1
   fi
 
-  if [[ ! "$external_id" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-    echo "::error::check-run binding REFUSED (missing_or_malformed_external_id): external_id='${external_id}', expected '<run_id>-<run_attempt>' -- cannot look up the creating run without it" >&2
+  # aos#193 review finding B4b (BLOCKER, round 6): the previous pattern
+  # (^([0-9]+)-([0-9]+)$) accepted leading zeros ("0777-1", "777-01"),
+  # which GitHub's API resolves to the EXACT SAME run/attempt as "777-1"
+  # (confirmed live: GET .../actions/runs/035002254495 returns run
+  # 35002254495; .../attempts/01/jobs returns attempt 1's jobs) -- so two
+  # candidates naming "777-1" and "0777-1" named the identical run but
+  # were treated as different strings by the caller's duplicate-detection,
+  # letting a forged one with a leading-zero external_id evade it
+  # entirely. Requiring a canonical form (no leading zeros, no bare "0")
+  # makes "same run_id" and "same external_id run_id component" the same
+  # question -- there is now exactly one string that names a given run_id.
+  if [[ ! "$external_id" =~ ^([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+    echo "::error::check-run binding REFUSED (missing_or_malformed_external_id): external_id='${external_id}', expected the canonical '<run_id>-<run_attempt>' (no leading zeros, no zero values) -- cannot look up the creating run without it" >&2
     return 1
   fi
   local run_id="${BASH_REMATCH[1]}"
