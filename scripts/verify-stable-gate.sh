@@ -208,8 +208,32 @@ refuse() {
 # skipped to try an older candidate (an attacker must not be able to make
 # a real approval unreachable just by adding a fresh record that happens
 # to 5xx on lookup).
+# aos#193 review finding B4 (BLOCKER, round 5): newest-first selection, by
+# itself, opened a NEW hole. check_run_binding_verify validates the RUN
+# NAMED by a candidate's external_id -- it has no way to prove that THAT
+# specific check-run object is what the named run actually created (the
+# jobs/steps API exposes no such link). So any workflow with checks:write
+# could create a SECOND record pointing external_id at a genuine, already-
+# approved live run's run_id-attempt, and -- being newer (a higher id) --
+# it would be tried FIRST, with its own attacker-written directive_payload/
+# signature/body substituted in place of the genuine approval's.
+#
+# Demonstrated: id 900 (forged) and id 800 (genuine) both carry
+# external_id "777-1" pointing at the same real push/main run; id 900
+# (newer) was selected, and its forged directive_payload reached `aos`.
+#
+# Fix: a legitimate rerun always gets its OWN run_id (or at least its own
+# attempt) -- create-blue-green-check-run.sh only ever runs the
+# record-creating step once per run+attempt, so at most one LEGITIMATE
+# record can ever name a given (run_id, run_attempt). Two OR MORE
+# candidates naming the exact same (run_id, run_attempt) is therefore
+# never legitimate -- refuse as ambiguous outright, before ever running
+# the (expensive, and beside the point) binding check on either of them.
 CHECK_NAME_ENCODED="$(jq -rn --arg n "$CHECK_NAME" '$n | @uri')"
-RESPONSE="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?check_name=${CHECK_NAME_ENCODED}" 2>&1)" \
+# aos#193 review finding (LOW, round 5): per_page=100 plus an explicit
+# total_count-vs-returned-count check -- the default page (30) would
+# otherwise silently truncate "newest first" to only the first page.
+RESPONSE="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?check_name=${CHECK_NAME_ENCODED}&per_page=100" 2>&1)" \
   || refuse "check_runs_query_failed" "could not query check-runs for ${REPO}@${SHA}: ${RESPONSE:-<no output>}"
 
 if ! printf '%s' "$RESPONSE" | jq -e . >/dev/null 2>&1; then
@@ -221,14 +245,47 @@ if [ "$COUNT" = "0" ]; then
   refuse "no_check_run_found" "found zero '${CHECK_NAME}' check runs on ${SHA} -- never approved"
 fi
 
-# Newest first (highest check-run id first) among the successful ones only
-# -- a failed/pending record is never a candidate at all.
-CANDIDATES="$(printf '%s' "$RESPONSE" | jq -c '
-  [ .check_runs[]? | select(.conclusion == "success") ] | sort_by(-.id) | .[]
+RETURNED_COUNT="$(printf '%s' "$RESPONSE" | jq -r '(.check_runs // []) | length')"
+if [ "$RETURNED_COUNT" -lt "$COUNT" ]; then
+  refuse "check_runs_pagination_incomplete" "total_count=${COUNT} but only ${RETURNED_COUNT} were returned -- refusing to guess whether a more-recent (or duplicate) record is on an unfetched page"
+fi
+
+# Newest first (highest check-run id first) among the successful,
+# payload-matching ones only -- a failed/pending/payload-mismatched
+# record is never a candidate at all, and is never subject to the B4
+# duplicate-run-reference check below either (it was never a real
+# contender in the first place).
+CANDIDATES="$(printf '%s' "$RESPONSE" | jq -c --arg repo "$REPO" --arg app "$APP_NAME" --arg sha "$SHA" '
+  [ .check_runs[]?
+    | select(.conclusion == "success")
+    | . as $c
+    | (.output.text // "") as $t
+    | ($t | fromjson? // null) as $p
+    | select($p != null)
+    | select(($p.repo // "") == $repo and ($p.app_name // "") == $app and ($p.sha // "") == $sha and ($p.stage // "") == "live")
+    | {id: $c.id, output_text: $t, app_slug: ($c.app.slug // ""), external_id: ($c.external_id // "")}
+  ] | sort_by(-.id) | .[]
 ')"
 
 if [ -z "$CANDIDATES" ]; then
-  refuse "no_successful_check_run" "found ${COUNT} '${CHECK_NAME}' check run(s) on ${SHA}, but none has conclusion='success'"
+  refuse "no_successful_check_run" "found ${COUNT} '${CHECK_NAME}' check run(s) on ${SHA}, but none has conclusion='success' with a payload matching repo/app_name/sha/stage=live"
+fi
+
+# aos#193 review finding B4 (BLOCKER, round 5): group the real contenders
+# by the (run_id, run_attempt) their external_id names -- a MALFORMED
+# external_id groups under its own literal (raw) value, which two
+# candidates could only share by both being malformed the exact same
+# way, an edge case the binding check's own malformed-external_id refusal
+# already handles independently. Two OR MORE candidates naming the same
+# run+attempt is never legitimate; refuse before ever running the binding
+# check on either.
+DUPLICATE_RUN_REF="$(printf '%s' "$CANDIDATES" | jq -s -c '
+  group_by(.external_id) | map(select(length > 1)) | .[0] // empty
+')"
+if [ -n "$DUPLICATE_RUN_REF" ] && [ "$DUPLICATE_RUN_REF" != "null" ]; then
+  DUP_EXTERNAL_ID="$(printf '%s' "$DUPLICATE_RUN_REF" | jq -r '.[0].external_id')"
+  DUP_IDS="$(printf '%s' "$DUPLICATE_RUN_REF" | jq -c '[.[].id]')"
+  refuse "ambiguous_duplicate_run_reference" "check-run ids ${DUP_IDS} all name external_id='${DUP_EXTERNAL_ID}' -- a legitimate run+attempt can create at most one record, so two or more candidates naming the same one is never legitimate (aos#193 review finding B4, round 5) -- refusing rather than silently trusting whichever has the highest id"
 fi
 
 LIVE_APPROVED_CREATING_STEP_NAME="Create live-e2e-approved check run (aos#193 Phase 1 §1)"
@@ -237,25 +294,10 @@ SELECTED_OUTPUT_TEXT=""
 while IFS= read -r candidate; do
   [ -z "$candidate" ] && continue
 
-  CAND_ID="$(printf '%s' "$candidate" | jq -r '.id // "?"')"
-
-  CAND_OUTPUT_TEXT="$(printf '%s' "$candidate" | jq -r '.output.text // ""')"
-  if [ -z "$CAND_OUTPUT_TEXT" ] || ! printf '%s' "$CAND_OUTPUT_TEXT" | jq -e . >/dev/null 2>&1; then
-    echo "::warning::verify-stable-gate: candidate check-run id=${CAND_ID} skipped -- output.text is missing or not valid JSON" >&2
-    continue
-  fi
-
-  CAND_REPO="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.repo // ""')"
-  CAND_APP_NAME="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.app_name // ""')"
-  CAND_SHA="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.sha // ""')"
-  CAND_STAGE="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.stage // ""')"
-  if [ "$CAND_REPO" != "$REPO" ] || [ "$CAND_APP_NAME" != "$APP_NAME" ] || [ "$CAND_SHA" != "$SHA" ] || [ "$CAND_STAGE" != "live" ]; then
-    echo "::warning::verify-stable-gate: candidate check-run id=${CAND_ID} skipped (payload_mismatch) -- repo='${CAND_REPO}' app_name='${CAND_APP_NAME}' sha='${CAND_SHA}' stage='${CAND_STAGE}', expected repo='${REPO}' app_name='${APP_NAME}' sha='${SHA}' stage='live'" >&2
-    continue
-  fi
-
-  CAND_APP_SLUG="$(printf '%s' "$candidate" | jq -r '.app.slug // ""')"
-  CAND_EXTERNAL_ID="$(printf '%s' "$candidate" | jq -r '.external_id // ""')"
+  CAND_ID="$(printf '%s' "$candidate" | jq -r '.id')"
+  CAND_OUTPUT_TEXT="$(printf '%s' "$candidate" | jq -r '.output_text')"
+  CAND_APP_SLUG="$(printf '%s' "$candidate" | jq -r '.app_slug')"
+  CAND_EXTERNAL_ID="$(printf '%s' "$candidate" | jq -r '.external_id')"
 
   # check_run_binding_verify prints its own specifically-named ::error::
   # reason directly to stderr on failure -- nothing further to add here.
@@ -265,7 +307,7 @@ while IFS= read -r candidate; do
   else
     binding_rc=$?
     if [ "$binding_rc" -eq 2 ]; then
-      echo "::error::verify-stable-gate REFUSED (binding_could_not_be_verified): a candidate '${CHECK_NAME}' record's creator binding could not be verified (see the check-run-binding error above); this is NOT evidence it is illegitimate, so the whole gate fails closed rather than silently trying an older candidate" >&2
+      echo "::error::verify-stable-gate REFUSED (binding_could_not_be_verified): candidate check-run id=${CAND_ID}'s creator binding could not be verified (see the check-run-binding error above); this is NOT evidence it is illegitimate, so the whole gate fails closed rather than silently trying an older candidate" >&2
       exit 1
     fi
     # binding_rc == 1: this candidate definitively isn't valid; try the
@@ -281,6 +323,25 @@ OUTPUT_TEXT="$SELECTED_OUTPUT_TEXT"
 
 # ── 5: directive signature verification (fails closed today -- see the
 #    module docstring above) ──────────────────────────────────────────────
+#
+# TODO(aos#123, before the CI-invocation signing bridge lands): today this
+# refuses unconditionally on the null-payload check right below, so
+# neither gap here is reachable yet -- but the round-5 review flagged both
+# as real design gaps to close in the SAME change that wires up the
+# bridge, not after:
+#   1. The signed body/payload is never parsed and compared against
+#      $REPO/$APP_NAME/$SHA -- `--as ci-workflows-stable-gate` is the same
+#      target for every app and every commit, so once real directives
+#      exist, a directive genuinely issued for sha A (readable by anyone
+#      with repo read access, from A's check run) would also verify for
+#      sha B or a different app within its TTL. Require the signed body to
+#      name repo/app_name/sha and compare them here.
+#   2. `--aos-environment-root` is a FRESH, empty, per-run directory
+#      (`aos-stable-gate-env-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`), so
+#      the durable nonce store aos's replay protection relies on resets
+#      every run -- a directive consumed once is not recorded as consumed
+#      for any FUTURE run's lookup. Needs a durable store shared across
+#      runs (or a per-sha identity design that makes replay moot).
 DIRECTIVE_PAYLOAD="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.directive_payload // empty')"
 DIRECTIVE_SIGNATURE="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.directive_signature // empty')"
 DIRECTIVE_BODY="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.directive_body // empty')"
