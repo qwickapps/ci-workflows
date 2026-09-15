@@ -87,9 +87,10 @@ jobs:
     runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - name: Reject empty/malformed platforms
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           set -euo pipefail
-          PLATFORMS="${{ inputs.platforms }}"
           if [ -z "$PLATFORMS" ]; then
             echo "::error::inputs.platforms is empty. This reusable workflow requires an explicit, non-empty platform list (e.g. linux/amd64,linux/arm64) — it will not silently fall back to a default or empty platform set."
             exit 1
@@ -167,12 +168,14 @@ jobs:
         # green with zero install/build/test steps having run. Fail loudly
         # instead, before checkout, naming the bad value and the options.
         if: inputs.language == 'ts' || inputs.language == 'js'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
         run: |
           set -euo pipefail
-          case "${{ inputs.package_manager }}" in
+          case "$PACKAGE_MANAGER" in
             npm|pnpm) ;;
             *)
-              echo "::error::inputs.package_manager='${{ inputs.package_manager }}' is not a recognized package manager. Valid options: npm, pnpm."
+              echo "::error::inputs.package_manager='${PACKAGE_MANAGER}' is not a recognized package manager. Valid options: npm, pnpm."
               exit 1
               ;;
           esac
