@@ -43,6 +43,8 @@ write_valid_run_response() {
     head_sha: $sha,
     repository: {full_name: $repo},
     status: "completed",
+    event: "push",
+    head_branch: "main",
     referenced_workflows: [{path: $wf, ref: "refs/heads/main"}]
   }' > "$RUN_RESPONSE_FILE"
 }
@@ -50,9 +52,11 @@ write_valid_run_response
 
 write_valid_jobs_response() {
   jq -nc --arg step "$MARKER_CREATING_STEP_NAME" '{
+    total_count: 1,
     jobs: [
       {
-        name: "deploy-caprover",
+        name: "deploy / deploy-caprover",
+        conclusion: "success",
         steps: [
           {name: "Checkout code", conclusion: "success"},
           {name: $step, conclusion: "success"}
@@ -174,7 +178,7 @@ case "\$url" in
         ;;
     esac
     ;;
-  *actions/runs/*/attempts/*/jobs)
+  *actions/runs/*/attempts/*/jobs*)
     if [ -f "$JOBS_QUERY_SHOULD_FAIL" ]; then
       echo "mock gh: simulated jobs API failure (rate limit / 404 / 5xx)" >&2
       exit 1
@@ -515,7 +519,7 @@ MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
   assert_verdict "marker check run has a malformed external_id -> not counted -> first_deploy stays true" "true"
 unset MOCK_MARKER_EXTERNAL_ID
 
-FORGED_RUN="$(jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/some-other-repo/.github/workflows/totally-unrelated.yml@refs/heads/main"}]}')"
+FORGED_RUN="$(jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: [{path: "qwickapps/some-other-repo/.github/workflows/totally-unrelated.yml@refs/heads/main"}]}')"
 printf '%s' "$FORGED_RUN" > "$RUN_RESPONSE_FILE"
 MOCK_MARKER_MODE=valid
 MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
@@ -534,7 +538,7 @@ echo "   'the run referenced deploy-app.yml on this sha' was not enough -- a uat
 echo "   run, or a live run whose e2e/approval failed before the marker-"
 echo "   creating step, referenced it too."
 
-WRONG_REF_RUN="$(jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/evil", ref: "refs/heads/evil"}]}')"
+WRONG_REF_RUN="$(jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/evil", ref: "refs/heads/evil"}]}')"
 printf '%s' "$WRONG_REF_RUN" > "$RUN_RESPONSE_FILE"
 MOCK_MARKER_MODE=valid
 MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
@@ -542,7 +546,7 @@ MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
   assert_verdict "the run named by external_id referenced deploy-app.yml, but from a DIFFERENT ref than production callers use -> not counted -> first_deploy stays true" "true"
 write_valid_run_response
 
-JOBS_NO_MATCHING_STEP="$(jq -nc '{jobs: [{name: "deploy-caprover", steps: [{name: "Checkout code", conclusion: "success"}, {name: "Resolve CapRover credentials", conclusion: "success"}]}]}')"
+JOBS_NO_MATCHING_STEP="$(jq -nc '{jobs: [{name: "deploy / deploy-caprover", conclusion: "success", steps: [{name: "Checkout code", conclusion: "success"}, {name: "Resolve CapRover credentials", conclusion: "success"}]}]}')"
 printf '%s' "$JOBS_NO_MATCHING_STEP" > "$JOBS_RESPONSE_FILE"
 MOCK_MARKER_MODE=valid
 MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
@@ -550,7 +554,7 @@ MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
   assert_verdict "the referenced run never actually ran the marker-creating step (e.g. a uat run on the same sha) -> not counted -> first_deploy stays true" "true"
 write_valid_jobs_response
 
-JOBS_STEP_FAILED="$(jq -nc --arg step "$MARKER_CREATING_STEP_NAME" '{jobs: [{name: "deploy-caprover", steps: [{name: "Checkout code", conclusion: "success"}, {name: $step, conclusion: "failure"}]}]}')"
+JOBS_STEP_FAILED="$(jq -nc --arg step "$MARKER_CREATING_STEP_NAME" '{jobs: [{name: "deploy / deploy-caprover", conclusion: "success", steps: [{name: "Checkout code", conclusion: "success"}, {name: $step, conclusion: "failure"}]}]}')"
 printf '%s' "$JOBS_STEP_FAILED" > "$JOBS_RESPONSE_FILE"
 MOCK_MARKER_MODE=valid
 MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
@@ -666,12 +670,12 @@ case "\$url" in
   *commits/*/check-runs*)
     echo "{\\"total_count\\":1,\\"check_runs\\":[{\\"id\\":1,\\"name\\":\\"blue-green/first-deploy-used/demo\\",\\"output\\":{\\"text\\":\${MOCK_MARKER_TEXT_JSON}},\\"app\\":{\\"slug\\":\\"github-actions\\"},\\"external_id\\":\\"$EXTERNAL_ID\\"}]}"
     ;;
-  *actions/runs/*/attempts/*/jobs)
+  *actions/runs/*/attempts/*/jobs*)
     echo "mock gh: simulated jobs API failure (rate limit / 404 / 5xx)" >&2
     exit 1
     ;;
   *actions/runs/*)
-    jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: \$sha, repository: {full_name: \$repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main", ref: "refs/heads/main"}]}'
+    jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: \$sha, repository: {full_name: \$repo}, status: "completed", event: "push", head_branch: "main", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main", ref: "refs/heads/main"}]}'
     ;;
   *)
     echo "mock gh: unexpected api url: \$url" >&2
