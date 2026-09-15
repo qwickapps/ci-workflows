@@ -218,11 +218,21 @@ assert_run "G9: AOS_BIN is resolved from inside the fresh per-job venv, not PATH
 # long as the stub sits somewhere earlier on PATH. "Is the resolved path
 # absolute" proves nothing about which binary it is. Pin to a single,
 # fixed, well-known path instead of resolving from PATH at all.
-assert_run "finding L1 (round 3): python3 is pinned to a fixed, well-known path, never resolved via PATH lookup" \
-  'PYTHON3_BIN="/usr/bin/python3"'
-assert_run "finding L1 (round 3): the fixed interpreter is verified executable before use, with no PATH-based fallback" \
+#
+# aos#193 review finding B3 (BLOCKER, round 4): round 3's fixed path,
+# /usr/bin/python3, IS the macOS Xcode Command Line Tools shim, which the
+# reviewer measured at Python 3.9.6 on the real runner host --
+# qwickapps/aos requires >=3.11, so every opted-in deploy-stable run broke
+# at install. Pin to the real 3.11+ interpreter confirmed present on that
+# same host (Homebrew's python3.11), and assert its actual version before
+# ever creating the venv -- never just trust the path.
+assert_run "finding B3 (round 4): python3 is pinned to a real 3.11+ interpreter, not the 3.9.6 Xcode shim at /usr/bin/python3" \
+  'PYTHON3_BIN="/opt/homebrew/bin/python3.11"'
+assert_run "finding B3 (round 4): the fixed interpreter is verified executable before use, with no PATH-based fallback" \
   '\[ ! -x "\$PYTHON3_BIN" \]'
-assert_run "finding #3/L1: the venv is built with the pinned absolute-path python3, never a bare 'python3 -m venv'" \
+assert_run "finding B3 (round 4): the ACTUAL running interpreter's version is asserted >= 3.11 before building the venv, not just trusted from the path" \
+  'sys\.version_info >= \(3, 11\)'
+assert_run "finding #3/L1/B3: the venv is built with the pinned absolute-path python3, never a bare 'python3 -m venv'" \
   '"\$PYTHON3_BIN" -m venv "\$AOS_VENV"'
 
 # aos#193 review finding #4 (round 2): a real, committed, checksum-verified
