@@ -32,16 +32,37 @@ WORKFLOW_PATH="qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/head
 
 VALID_MARKER_JSON="$(jq -nc --arg repo "$REPO" --arg sha "$COMMIT_SHA" '{repo:$repo,app_name:"demo",sha:$sha}')"
 RUN_RESPONSE_FILE="$TMPDIR/gh-run-response.json"
+JOBS_RESPONSE_FILE="$TMPDIR/gh-jobs-response.json"
+JOBS_QUERY_SHOULD_FAIL="$TMPDIR/jobs-query-should-fail"
+# Must match check-first-deploy-proof.sh's own MARKER_CREATING_STEP_NAME
+# constant exactly.
+MARKER_CREATING_STEP_NAME="Mark first-deploy-used (aos#193 Phase 1 §2)"
 
 write_valid_run_response() {
   jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" --arg wf "$WORKFLOW_PATH" '{
     head_sha: $sha,
     repository: {full_name: $repo},
     status: "completed",
-    referenced_workflows: [{path: $wf}]
+    referenced_workflows: [{path: $wf, ref: "refs/heads/main"}]
   }' > "$RUN_RESPONSE_FILE"
 }
 write_valid_run_response
+
+write_valid_jobs_response() {
+  jq -nc --arg step "$MARKER_CREATING_STEP_NAME" '{
+    jobs: [
+      {
+        name: "deploy-caprover",
+        steps: [
+          {name: "Checkout code", conclusion: "success"},
+          {name: $step, conclusion: "success"}
+        ]
+      }
+    ]
+  }' > "$JOBS_RESPONSE_FILE"
+}
+write_valid_jobs_response
+rm -f "$JOBS_QUERY_SHOULD_FAIL"
 
 cat > "$TMPDIR/bin/curl" <<MOCK
 #!/usr/bin/env bash
@@ -152,6 +173,13 @@ case "\$url" in
         echo "{\\"total_count\\":1,\\"check_runs\\":[{\\"id\\":1,\\"name\\":\\"blue-green/first-deploy-used/demo\\",\\"output\\":{\\"text\\":\${MOCK_MARKER_TEXT_JSON}},\\"app\\":{\\"slug\\":\\"\${MOCK_MARKER_APP_SLUG:-github-actions}\\"},\\"external_id\\":\\"\${MOCK_MARKER_EXTERNAL_ID:-$EXTERNAL_ID}\\"}]}"
         ;;
     esac
+    ;;
+  *actions/runs/*/attempts/*/jobs)
+    if [ -f "$JOBS_QUERY_SHOULD_FAIL" ]; then
+      echo "mock gh: simulated jobs API failure (rate limit / 404 / 5xx)" >&2
+      exit 1
+    fi
+    cat "$JOBS_RESPONSE_FILE"
     ;;
   *actions/runs/*)
     cat "$RUN_RESPONSE_FILE"
@@ -499,6 +527,164 @@ MOCK_MARKER_MODE=valid
 MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
 MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
   assert_verdict "marker payload fully matches AND the GitHub-Actions-run binding verifies -> counted -> first_deploy=false" "false"
+
+echo ""
+echo "== check-first-deploy-proof.sh: marker job/step + ref binding (aos#193 review finding #1, BLOCKER B1, round 3) =="
+echo "   'the run referenced deploy-app.yml on this sha' was not enough -- a uat"
+echo "   run, or a live run whose e2e/approval failed before the marker-"
+echo "   creating step, referenced it too."
+
+WRONG_REF_RUN="$(jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/evil", ref: "refs/heads/evil"}]}')"
+printf '%s' "$WRONG_REF_RUN" > "$RUN_RESPONSE_FILE"
+MOCK_MARKER_MODE=valid
+MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_verdict "the run named by external_id referenced deploy-app.yml, but from a DIFFERENT ref than production callers use -> not counted -> first_deploy stays true" "true"
+write_valid_run_response
+
+JOBS_NO_MATCHING_STEP="$(jq -nc '{jobs: [{name: "deploy-caprover", steps: [{name: "Checkout code", conclusion: "success"}, {name: "Resolve CapRover credentials", conclusion: "success"}]}]}')"
+printf '%s' "$JOBS_NO_MATCHING_STEP" > "$JOBS_RESPONSE_FILE"
+MOCK_MARKER_MODE=valid
+MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_verdict "the referenced run never actually ran the marker-creating step (e.g. a uat run on the same sha) -> not counted -> first_deploy stays true" "true"
+write_valid_jobs_response
+
+JOBS_STEP_FAILED="$(jq -nc --arg step "$MARKER_CREATING_STEP_NAME" '{jobs: [{name: "deploy-caprover", steps: [{name: "Checkout code", conclusion: "success"}, {name: $step, conclusion: "failure"}]}]}')"
+printf '%s' "$JOBS_STEP_FAILED" > "$JOBS_RESPONSE_FILE"
+MOCK_MARKER_MODE=valid
+MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_verdict "the marker-creating step ran in the referenced run but did not conclude success -> not counted -> first_deploy stays true" "true"
+write_valid_jobs_response
+
+echo ""
+echo "== check-first-deploy-proof.sh: marker binding fails CLOSED on an unverifiable lookup (aos#193 review finding #2, BLOCKER B2, round 3) =="
+echo "   A rate-limited/failed runs-or-jobs-API query, or a creating run"
+echo "   that has not completed yet, is NOT evidence the marker is absent --"
+echo "   a legitimate single-use marker must never silently disappear just"
+echo "   because GitHub is degraded or the creating run hasn't settled."
+
+# B2a: the runs-API lookup itself fails (rate limit / 5xx / deleted run
+# returning 404) while a legitimate marker's payload matches -- must be a
+# HARD FAILURE (script exits non-zero), never silently "marker absent".
+cat > "$TMPDIR/bin/gh" <<MOCK
+#!/usr/bin/env bash
+if [ "\${1:-}" != "api" ]; then
+  echo "mock gh: unexpected command: \$*" >&2
+  exit 1
+fi
+shift
+url=""
+for a in "\$@"; do
+  case "\$a" in
+    -*) ;;
+    *) url="\$a" ;;
+  esac
+done
+case "\$url" in
+  *packages/container*/versions*) echo '[{"id":2,"metadata":{"container":{"tags":["sha-abc123"]}}}]' ;;
+  *orgs/*/packages*package_type=container*) echo '[{"id":1,"name":"some-other-package","package_type":"container"}]' ;;
+  *commits/*/check-runs*)
+    echo "{\\"total_count\\":1,\\"check_runs\\":[{\\"id\\":1,\\"name\\":\\"blue-green/first-deploy-used/demo\\",\\"output\\":{\\"text\\":\${MOCK_MARKER_TEXT_JSON}},\\"app\\":{\\"slug\\":\\"github-actions\\"},\\"external_id\\":\\"$EXTERNAL_ID\\"}]}"
+    ;;
+  *actions/runs/*)
+    echo "mock gh: simulated runs API failure (rate limit / 404 / 5xx)" >&2
+    exit 1
+    ;;
+  *)
+    echo "mock gh: unexpected api url: \$url" >&2
+    exit 1
+    ;;
+esac
+MOCK
+chmod +x "$TMPDIR/bin/gh"
+
+MOCK_MARKER_MODE=valid
+MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_hard_failure "runs-API lookup fails (rate limit / 5xx / deleted-run 404) with a legitimate marker present -> HARD FAILURE, never silently 'marker absent'" "refusing to conclude first-deploy status"
+
+# B2b: the runs-API lookup succeeds but the CREATING RUN HAS NOT COMPLETED
+# YET (still in its retag/cleanup jobs) -- also NOT evidence of absence,
+# must be a hard failure, not "marker absent".
+cat > "$TMPDIR/bin/gh" <<MOCK
+#!/usr/bin/env bash
+if [ "\${1:-}" != "api" ]; then
+  echo "mock gh: unexpected command: \$*" >&2
+  exit 1
+fi
+shift
+url=""
+for a in "\$@"; do
+  case "\$a" in
+    -*) ;;
+    *) url="\$a" ;;
+  esac
+done
+case "\$url" in
+  *packages/container*/versions*) echo '[{"id":2,"metadata":{"container":{"tags":["sha-abc123"]}}}]' ;;
+  *orgs/*/packages*package_type=container*) echo '[{"id":1,"name":"some-other-package","package_type":"container"}]' ;;
+  *commits/*/check-runs*)
+    echo "{\\"total_count\\":1,\\"check_runs\\":[{\\"id\\":1,\\"name\\":\\"blue-green/first-deploy-used/demo\\",\\"output\\":{\\"text\\":\${MOCK_MARKER_TEXT_JSON}},\\"app\\":{\\"slug\\":\\"github-actions\\"},\\"external_id\\":\\"$EXTERNAL_ID\\"}]}"
+    ;;
+  *actions/runs/*)
+    jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: \$sha, repository: {full_name: \$repo}, status: "in_progress", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main", ref: "refs/heads/main"}]}'
+    ;;
+  *)
+    echo "mock gh: unexpected api url: \$url" >&2
+    exit 1
+    ;;
+esac
+MOCK
+chmod +x "$TMPDIR/bin/gh"
+
+MOCK_MARKER_MODE=valid
+MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_hard_failure "the creating run has not completed yet, with a legitimate marker present -> HARD FAILURE, never silently 'marker absent'" "refusing to conclude first-deploy status"
+
+# B2c: the jobs-API lookup itself fails (rate limit / 404 / 5xx), same
+# requirement.
+cat > "$TMPDIR/bin/gh" <<MOCK
+#!/usr/bin/env bash
+if [ "\${1:-}" != "api" ]; then
+  echo "mock gh: unexpected command: \$*" >&2
+  exit 1
+fi
+shift
+url=""
+for a in "\$@"; do
+  case "\$a" in
+    -*) ;;
+    *) url="\$a" ;;
+  esac
+done
+case "\$url" in
+  *packages/container*/versions*) echo '[{"id":2,"metadata":{"container":{"tags":["sha-abc123"]}}}]' ;;
+  *orgs/*/packages*package_type=container*) echo '[{"id":1,"name":"some-other-package","package_type":"container"}]' ;;
+  *commits/*/check-runs*)
+    echo "{\\"total_count\\":1,\\"check_runs\\":[{\\"id\\":1,\\"name\\":\\"blue-green/first-deploy-used/demo\\",\\"output\\":{\\"text\\":\${MOCK_MARKER_TEXT_JSON}},\\"app\\":{\\"slug\\":\\"github-actions\\"},\\"external_id\\":\\"$EXTERNAL_ID\\"}]}"
+    ;;
+  *actions/runs/*/attempts/*/jobs)
+    echo "mock gh: simulated jobs API failure (rate limit / 404 / 5xx)" >&2
+    exit 1
+    ;;
+  *actions/runs/*)
+    jq -nc --arg sha "$COMMIT_SHA" --arg repo "$REPO" '{head_sha: \$sha, repository: {full_name: \$repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main", ref: "refs/heads/main"}]}'
+    ;;
+  *)
+    echo "mock gh: unexpected api url: \$url" >&2
+    exit 1
+    ;;
+esac
+MOCK
+chmod +x "$TMPDIR/bin/gh"
+
+MOCK_MARKER_MODE=valid
+MOCK_MARKER_TEXT_JSON="$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none \
+  assert_hard_failure "jobs-API lookup fails (rate limit / 404 / 5xx) with a legitimate marker present -> HARD FAILURE, never silently 'marker absent'" "refusing to conclude first-deploy status"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
