@@ -355,12 +355,12 @@ fi
 echo ""
 echo "== verify-stable-gate.sh: --aos-manifest, when passed, IS forwarded as \$AOS_MANIFEST (aos#193 review finding #4) =="
 
-cat > "$TMPDIR/bin/aos" <<'MOCK'
+AOS_MANIFEST_SEEN_LOG="$TMPDIR/aos-manifest-seen.log"
+cat > "$TMPDIR/bin/aos" <<MOCK
 #!/usr/bin/env bash
-echo "AOS_MANIFEST=${AOS_MANIFEST:-<unset>}" >> "__AOS_MANIFEST_LOG__"
+echo "AOS_MANIFEST=\${AOS_MANIFEST:-<unset>}" >> "$AOS_MANIFEST_SEEN_LOG"
 echo '{"ok": true, "from": "prime", "scope": "test", "target": "ci-workflows-stable-gate"}'
 MOCK
-sed -i "s#__AOS_MANIFEST_LOG__#$TMPDIR/aos-manifest-seen.log#" "$TMPDIR/bin/aos"
 chmod +x "$TMPDIR/bin/aos"
 rm -f "$TMPDIR/aos-manifest-seen.log"
 
