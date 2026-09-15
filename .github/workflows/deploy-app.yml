@@ -1049,10 +1049,18 @@ jobs:
           fi
 
           chmod +x .ci-workflows/scripts/verify-ts-lb-target.sh
+          # ci-workflows#189: this checks the STABLE slot's device, not the
+          # node THIS live run deployed -- stable is a long-lived,
+          # persistent-identity service that is NOT expected to have
+          # re-registered during this run, so the created-timestamp
+          # freshness check (rule 4) does not apply here. Rules 1-3
+          # (exactly one connected, authorized, correctly-named device) are
+          # sufficient proof stable is a real, unambiguous, live fallback
+          # target.
           .ci-workflows/scripts/verify-ts-lb-target.sh \
             --ts-api-key "$TS_API_KEY_RESOLVED" \
             --canonical-hostname "$CANONICAL_HOSTNAME" \
-            --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
+            --skip-freshness-check
 
   # -- Tag lifecycle promotion ---------------------------------------------
   retag:
