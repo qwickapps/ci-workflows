@@ -5,9 +5,18 @@
 #
 # Requires ALL of the following, fail-closed with no bypass:
 #
-#   1. Exactly one `blue-green/live-e2e-approved` check run on the exact
-#      commit sha about to deploy to stable. Zero (never approved) or more
-#      than one (ambiguous -- which one is authoritative?) both refuse.
+#   1. At least one `blue-green/live-e2e-approved` check run on the exact
+#      commit sha about to deploy to stable, with conclusion == 'success'.
+#      Zero means never approved -- refused. Among any that DO exist, the
+#      MOST RECENT one (highest check-run id) that also passes checks 3
+#      and 4 below is selected deterministically -- see aos#193 review
+#      finding M2 (round 4): requiring exact uniqueness here used to let a
+#      routine "Re-run all jobs" on an already-approved live run (which
+#      creates a second, equally legitimate check run) permanently refuse
+#      stable for that sha. A candidate that fails 3 or 4 is skipped in
+#      favor of an older one; this does not reopen a forgery risk, because
+#      every candidate -- however many exist -- must independently pass
+#      the full, API-verified binding check in #4 to ever be selected.
 #   2. That check run's conclusion == 'success'.
 #   3. Its output.text parses as JSON carrying {repo, app_name, sha, stage,
 #      e2e_digest, directive_payload, directive_signature, directive_body}
@@ -172,7 +181,33 @@ refuse() {
   exit 1
 }
 
-# ── 1/2: exactly one check run, conclusion == success ────────────────────
+# ── 1-4: find the most recent, successful, payload-matched, binding-
+#    verified candidate ──────────────────────────────────────────────────
+#
+# aos#193 review finding M2 (MEDIUM, round 4): requiring EXACTLY ONE
+# '${CHECK_NAME}' check run used to make a legitimate "Re-run all jobs" on
+# an already-approved live run permanently refuse stable for that sha --
+# the rerun creates a SECOND check run with the same name (GitHub does not
+# dedupe check-run creation by name+sha), so a wholly benign rerun turned
+# into a denial-of-service against a real approval that already existed.
+# The fix: stop requiring uniqueness and instead deterministically prefer
+# the MOST RECENT candidate (highest check-run id -- GitHub assigns these
+# as a strictly increasing global counter, so "highest id" is an exact,
+# unambiguous "most recently created" ordering, unlike parsing
+# started_at timestamps). Each candidate, newest first, is independently
+# payload-checked and binding-verified (scripts/lib/check-run-binding.sh);
+# the first one that passes BOTH is selected. A candidate that merely
+# fails payload/binding checks is skipped, exactly like
+# check-first-deploy-proof.sh's marker-candidate loop already does -- this
+# does NOT reopen the forgery risk the count==1 check used to guard
+# against, because a forged candidate still has to pass the full,
+# independently-API-verified binding check on its own to ever be
+# selected, regardless of how many other check runs (real or forged)
+# exist alongside it. A binding call that returns 2 ("could not verify")
+# aborts the WHOLE gate immediately -- fail closed, never silently
+# skipped to try an older candidate (an attacker must not be able to make
+# a real approval unreachable just by adding a fresh record that happens
+# to 5xx on lookup).
 CHECK_NAME_ENCODED="$(jq -rn --arg n "$CHECK_NAME" '$n | @uri')"
 RESPONSE="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?check_name=${CHECK_NAME_ENCODED}" 2>&1)" \
   || refuse "check_runs_query_failed" "could not query check-runs for ${REPO}@${SHA}: ${RESPONSE:-<no output>}"
@@ -182,59 +217,67 @@ if ! printf '%s' "$RESPONSE" | jq -e . >/dev/null 2>&1; then
 fi
 
 COUNT="$(printf '%s' "$RESPONSE" | jq -r '.total_count // 0')"
-if [ "$COUNT" != "1" ]; then
-  refuse "wrong_check_run_count" "expected exactly 1 '${CHECK_NAME}' check run on ${SHA}, found ${COUNT} -- zero means never approved, more than one is ambiguous and neither is accepted"
+if [ "$COUNT" = "0" ]; then
+  refuse "no_check_run_found" "found zero '${CHECK_NAME}' check runs on ${SHA} -- never approved"
 fi
 
-CONCLUSION="$(printf '%s' "$RESPONSE" | jq -r '.check_runs[0].conclusion // "null"')"
-if [ "$CONCLUSION" != "success" ]; then
-  refuse "check_run_not_successful" "'${CHECK_NAME}' on ${SHA} has conclusion='${CONCLUSION}', not 'success'"
+# Newest first (highest check-run id first) among the successful ones only
+# -- a failed/pending record is never a candidate at all.
+CANDIDATES="$(printf '%s' "$RESPONSE" | jq -c '
+  [ .check_runs[]? | select(.conclusion == "success") ] | sort_by(-.id) | .[]
+')"
+
+if [ -z "$CANDIDATES" ]; then
+  refuse "no_successful_check_run" "found ${COUNT} '${CHECK_NAME}' check run(s) on ${SHA}, but none has conclusion='success'"
 fi
 
-# ── 3: parse and cross-check the embedded payload (repo/app_name/sha/
-#    stage) ─────────────────────────────────────────────────────────────
-OUTPUT_TEXT="$(printf '%s' "$RESPONSE" | jq -r '.check_runs[0].output.text // ""')"
-if [ -z "$OUTPUT_TEXT" ] || ! printf '%s' "$OUTPUT_TEXT" | jq -e . >/dev/null 2>&1; then
-  refuse "malformed_check_run_output" "'${CHECK_NAME}' output.text is missing or not valid JSON"
-fi
-
-RECORD_REPO="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.repo // ""')"
-RECORD_APP_NAME="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.app_name // ""')"
-RECORD_SHA="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.sha // ""')"
-RECORD_STAGE="$(printf '%s' "$OUTPUT_TEXT" | jq -r '.stage // ""')"
-
-if [ "$RECORD_REPO" != "$REPO" ]; then
-  refuse "payload_repo_mismatch" "check run records repo='${RECORD_REPO}', expected '${REPO}'"
-fi
-if [ "$RECORD_APP_NAME" != "$APP_NAME" ]; then
-  refuse "payload_app_name_mismatch" "check run records app_name='${RECORD_APP_NAME}', expected '${APP_NAME}' -- a different app's approval on this same commit does not count"
-fi
-if [ "$RECORD_SHA" != "$SHA" ]; then
-  refuse "payload_sha_mismatch" "check run records sha='${RECORD_SHA}', expected '${SHA}'"
-fi
-if [ "$RECORD_STAGE" != "live" ]; then
-  refuse "payload_stage_mismatch" "check run records stage='${RECORD_STAGE}', expected 'live'"
-fi
-
-# ── 4: GitHub-verified binding (aos#193 review finding #1, BLOCKER) ──────
-# Never trust the record's own self-reported text -- see
-# scripts/lib/check-run-binding.sh's header for the full story on why.
-APP_SLUG="$(printf '%s' "$RESPONSE" | jq -r '.check_runs[0].app.slug // ""')"
-EXTERNAL_ID="$(printf '%s' "$RESPONSE" | jq -r '.check_runs[0].external_id // ""')"
-# check_run_binding_verify prints its own specifically-named ::error::
-# reason directly to stderr on failure -- nothing further to add here.
-# The exact step name must match deploy-app.yml's "Create live-e2e-approved
-# check run (aos#193 Phase 1 §1)" step, so a run that merely referenced
-# deploy-app.yml without ever reaching that specific step (e.g. a uat
-# stage run, or a live run whose e2e/approval failed first) cannot bind.
-# This gate already treats ANY nonzero return (1 "definitively refused" or
-# 2 "could not verify") identically -- exit 1 -- which is correct here:
-# unlike check-first-deploy-proof.sh's multi-candidate loop, there is only
-# ever exactly one record to check at this point (the earlier count==1
-# requirement above), so "could not verify" and "refused" both mean the
-# gate cannot proceed, with no different candidate left to fall back to.
 LIVE_APPROVED_CREATING_STEP_NAME="Create live-e2e-approved check run (aos#193 Phase 1 §1)"
-check_run_binding_verify "$REPO" "$SHA" "$APP_SLUG" "$EXTERNAL_ID" "$LIVE_APPROVED_CREATING_STEP_NAME" || exit 1
+
+SELECTED_OUTPUT_TEXT=""
+while IFS= read -r candidate; do
+  [ -z "$candidate" ] && continue
+
+  CAND_ID="$(printf '%s' "$candidate" | jq -r '.id // "?"')"
+
+  CAND_OUTPUT_TEXT="$(printf '%s' "$candidate" | jq -r '.output.text // ""')"
+  if [ -z "$CAND_OUTPUT_TEXT" ] || ! printf '%s' "$CAND_OUTPUT_TEXT" | jq -e . >/dev/null 2>&1; then
+    echo "::warning::verify-stable-gate: candidate check-run id=${CAND_ID} skipped -- output.text is missing or not valid JSON" >&2
+    continue
+  fi
+
+  CAND_REPO="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.repo // ""')"
+  CAND_APP_NAME="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.app_name // ""')"
+  CAND_SHA="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.sha // ""')"
+  CAND_STAGE="$(printf '%s' "$CAND_OUTPUT_TEXT" | jq -r '.stage // ""')"
+  if [ "$CAND_REPO" != "$REPO" ] || [ "$CAND_APP_NAME" != "$APP_NAME" ] || [ "$CAND_SHA" != "$SHA" ] || [ "$CAND_STAGE" != "live" ]; then
+    echo "::warning::verify-stable-gate: candidate check-run id=${CAND_ID} skipped (payload_mismatch) -- repo='${CAND_REPO}' app_name='${CAND_APP_NAME}' sha='${CAND_SHA}' stage='${CAND_STAGE}', expected repo='${REPO}' app_name='${APP_NAME}' sha='${SHA}' stage='live'" >&2
+    continue
+  fi
+
+  CAND_APP_SLUG="$(printf '%s' "$candidate" | jq -r '.app.slug // ""')"
+  CAND_EXTERNAL_ID="$(printf '%s' "$candidate" | jq -r '.external_id // ""')"
+
+  # check_run_binding_verify prints its own specifically-named ::error::
+  # reason directly to stderr on failure -- nothing further to add here.
+  if check_run_binding_verify "$REPO" "$SHA" "$CAND_APP_SLUG" "$CAND_EXTERNAL_ID" "$LIVE_APPROVED_CREATING_STEP_NAME"; then
+    SELECTED_OUTPUT_TEXT="$CAND_OUTPUT_TEXT"
+    break
+  else
+    binding_rc=$?
+    if [ "$binding_rc" -eq 2 ]; then
+      echo "::error::verify-stable-gate REFUSED (binding_could_not_be_verified): a candidate '${CHECK_NAME}' record's creator binding could not be verified (see the check-run-binding error above); this is NOT evidence it is illegitimate, so the whole gate fails closed rather than silently trying an older candidate" >&2
+      exit 1
+    fi
+    # binding_rc == 1: this candidate definitively isn't valid; try the
+    # next, older one.
+  fi
+done <<< "$CANDIDATES"
+
+if [ -z "$SELECTED_OUTPUT_TEXT" ]; then
+  refuse "no_valid_approval_found" "found ${COUNT} '${CHECK_NAME}' check run(s) on ${SHA}, but none had a matching payload AND a verified creator binding"
+fi
+
+OUTPUT_TEXT="$SELECTED_OUTPUT_TEXT"
 
 # ── 5: directive signature verification (fails closed today -- see the
 #    module docstring above) ──────────────────────────────────────────────
