@@ -24,7 +24,7 @@
 #     --github-token <token with checks:write> \
 #     --repo         <owner>/<repo> \
 #     --sha          <commit-sha> \
-#     --name         blue-green/first-deploy-used | blue-green/live-e2e-approved \
+#     --name         blue-green/first-deploy-used/<app> | blue-green/live-e2e-approved/<app> \
 #     --title        <short title> \
 #     --summary      <short human-readable summary> \
 #     [--conclusion  success]  (default: success -- this script only ever
@@ -34,7 +34,41 @@
 #     [--output-json <JSON object>]   (merged into output.text verbatim,
 #                                       so a caller downstream -- e.g.
 #                                       verify-stable-gate.sh -- can parse
-#                                       it back out)
+#                                       it back out) \
+#     [--external-id <opaque id>]     (recorded verbatim on the check run's
+#                                       `external_id` field -- an audit
+#                                       trail of which run id/attempt
+#                                       created it; aos#193 review finding
+#                                       #5. NOT itself re-verified on read
+#                                       -- the output.text `workflow_ref`
+#                                       field is what read-side callers
+#                                       actually check, since only GitHub
+#                                       itself, not this script's caller,
+#                                       controls that value.) \
+#     [--on-permission-denied fail|skip]  (default: fail. aos#193 review
+#                                       finding #1: deploy-caprover's and
+#                                       deploy-stable's job-level
+#                                       permissions blocks deliberately do
+#                                       NOT grant checks:write/read today
+#                                       -- see deploy-app.yml's comments --
+#                                       so a caller that opts into
+#                                       require_live_approval_check before
+#                                       that Phase 1b follow-up lands will
+#                                       hit a 403 here. `skip` logs a clear
+#                                       warning and exits 0 instead of
+#                                       failing the whole job -- safe ONLY
+#                                       for a record whose absence a
+#                                       downstream fail-closed gate already
+#                                       treats as "not approved"/"not used"
+#                                       (both blue-green check runs are:
+#                                       verify-stable-gate.sh refuses with
+#                                       zero matching check runs, and a
+#                                       second first-deploy claim without a
+#                                       marker just falls through to
+#                                       today's real stable-health check,
+#                                       not a bypass). Never use `skip` for
+#                                       a step whose success gates
+#                                       something.)
 #
 # Emits the created check run's `id` and `html_url` to stderr for the
 # workflow log; nothing meaningful goes to stdout other than the raw API
@@ -51,6 +85,8 @@ TITLE=""
 SUMMARY=""
 CONCLUSION="success"
 OUTPUT_JSON=""
+EXTERNAL_ID=""
+ON_PERMISSION_DENIED="fail"
 
 usage() {
   cat >&2 <<'EOF'
@@ -58,7 +94,8 @@ Usage:
   create-blue-green-check-run.sh \
     --github-token <token> --repo <owner/repo> --sha <sha> --name <name> \
     --title <title> --summary <summary> \
-    [--conclusion <success|...>] [--output-json <json-object>]
+    [--conclusion <success|...>] [--output-json <json-object>] \
+    [--external-id <id>] [--on-permission-denied fail|skip]
 EOF
 }
 
@@ -72,10 +109,17 @@ while [[ $# -gt 0 ]]; do
     --summary)      SUMMARY="$2"; shift 2 ;;
     --conclusion)   CONCLUSION="$2"; shift 2 ;;
     --output-json)  OUTPUT_JSON="$2"; shift 2 ;;
+    --external-id)  EXTERNAL_ID="$2"; shift 2 ;;
+    --on-permission-denied) ON_PERMISSION_DENIED="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "::error::unknown option: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+case "$ON_PERMISSION_DENIED" in
+  fail|skip) ;;
+  *) echo "::error::--on-permission-denied must be 'fail' or 'skip', got: $ON_PERMISSION_DENIED" >&2; exit 2 ;;
+esac
 
 for var in GITHUB_TOKEN REPO SHA NAME TITLE SUMMARY; do
   if [ -z "${!var}" ]; then
@@ -107,6 +151,7 @@ PAYLOAD="$(jq -nc \
   --arg summary "$SUMMARY" \
   --arg conclusion "$CONCLUSION" \
   --arg text "$TEXT_VALUE" \
+  --arg external_id "$EXTERNAL_ID" \
   '{
     name: $name,
     head_sha: $sha,
@@ -117,11 +162,38 @@ PAYLOAD="$(jq -nc \
       summary: $summary,
       text: $text
     }
-  }')"
+  }
+  + (if $external_id != "" then {external_id: $external_id} else {} end)')"
 
 echo "create-blue-green-check-run: creating '${NAME}' on ${REPO}@${SHA} (conclusion=${CONCLUSION})..." >&2
 
-RESPONSE="$(printf '%s' "$PAYLOAD" | gh api "repos/${REPO}/check-runs" --input -)"
+ERR_FILE="$(mktemp)"
+trap 'rm -f "$ERR_FILE"' EXIT
+set +e
+RESPONSE="$(printf '%s' "$PAYLOAD" | gh api "repos/${REPO}/check-runs" --input - 2>"$ERR_FILE")"
+API_EXIT=$?
+set -e
+
+if [ "$API_EXIT" -ne 0 ]; then
+  # aos#193 review finding #1's fallback: deploy-caprover/deploy-stable
+  # deliberately do NOT get checks:write/read in their job-level
+  # permissions today (a job's permissions block is validated for the
+  # WHOLE reusable workflow at dispatch time regardless of any step's or
+  # job's `if:` -- confirmed empirically against this org's own
+  # qwickapps/forge#254 incident shape: a job with elevated permissions
+  # gated by `if: false` still trips startup_failure with zero jobs
+  # created). A 403 here is therefore an EXPECTED outcome for any caller
+  # that opts into require_live_approval_check before the 14 callers'
+  # top-level permissions grant checks down (a required Phase 1b
+  # follow-up) -- not a bug in this script.
+  if grep -qiE "HTTP 403|Resource not accessible by integration" "$ERR_FILE" && [ "$ON_PERMISSION_DENIED" = "skip" ]; then
+    echo "::warning::create-blue-green-check-run: '${NAME}' was NOT created -- GITHUB_TOKEN lacks checks:write on this job (aos#193 Phase 1b: checks:write must land in the 14 callers' top-level permissions before require_live_approval_check works in production). Skipping, not failing this deploy -- a downstream fail-closed reader already treats a missing record correctly." >&2
+    exit 0
+  fi
+  echo "::error::create-blue-green-check-run: gh api failed creating '${NAME}':" >&2
+  cat "$ERR_FILE" >&2
+  exit 1
+fi
 
 if ! printf '%s' "$RESPONSE" | jq -e '.id' >/dev/null 2>&1; then
   echo "::error::create-blue-green-check-run: unexpected response creating '${NAME}':" >&2
