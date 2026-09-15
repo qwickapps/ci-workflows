@@ -266,14 +266,25 @@ MARKER_CREATING_STEP_NAME="Mark first-deploy-used (aos#193 Phase 1 §2)"
 MARKER_CHECK_NAME="blue-green/first-deploy-used/${APP_NAME}"
 MARKER_CHECK_NAME_ENCODED="$(jq -rn --arg n "$MARKER_CHECK_NAME" '$n | @uri')"
 echo "check-first-deploy-proof: checking for an existing '${MARKER_CHECK_NAME}' marker on ${COMMIT_SHA}..." >&2
+# aos#193 review finding (LOW, round 5): per_page=100 plus an explicit
+# total_count-vs-returned-count check -- the default page (30) would
+# otherwise silently truncate the marker search to only the first page,
+# and a real marker sitting on an unfetched page must never be read as
+# "absent".
 MARKER_RESPONSE=""
-if ! MARKER_RESPONSE="$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs?check_name=${MARKER_CHECK_NAME_ENCODED}" 2>&1)"; then
+if ! MARKER_RESPONSE="$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs?check_name=${MARKER_CHECK_NAME_ENCODED}&per_page=100" 2>&1)"; then
   echo "::error::check-first-deploy-proof: check-runs query failed unexpectedly -- refusing to guess first-deploy status" >&2
   echo "$MARKER_RESPONSE" >&2
   exit 1
 fi
 if ! printf '%s' "$MARKER_RESPONSE" | jq -e . >/dev/null 2>&1; then
   echo "::error::check-first-deploy-proof: check-runs query returned non-JSON response" >&2
+  exit 1
+fi
+MARKER_TOTAL_COUNT="$(printf '%s' "$MARKER_RESPONSE" | jq -r '.total_count // 0')"
+MARKER_RETURNED_COUNT="$(printf '%s' "$MARKER_RESPONSE" | jq -r '(.check_runs // []) | length')"
+if [ "$MARKER_RETURNED_COUNT" -lt "$MARKER_TOTAL_COUNT" ]; then
+  echo "::error::check-first-deploy-proof: check-runs response is truncated (total_count=${MARKER_TOTAL_COUNT}, only ${MARKER_RETURNED_COUNT} returned) -- refusing to guess whether a real marker is on an unfetched page" >&2
   exit 1
 fi
 
