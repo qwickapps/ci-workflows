@@ -49,8 +49,14 @@ RUN_ID="99887766"
 RUN_ATTEMPT="1"
 EXTERNAL_ID="${RUN_ID}-${RUN_ATTEMPT}"
 WORKFLOW_PATH="qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/main"
+# Must match verify-stable-gate.sh's own LIVE_APPROVED_CREATING_STEP_NAME
+# constant exactly -- the step name the job/step binding check (aos#193
+# review finding #1, BLOCKER, round 3) requires to have concluded success.
+CREATING_STEP_NAME="Create live-e2e-approved check run (aos#193 Phase 1 §1)"
 RESPONSE_FILE="$TMPDIR/gh-check-runs-response.json"
 RUN_RESPONSE_FILE="$TMPDIR/gh-run-response.json"
+JOBS_RESPONSE_FILE="$TMPDIR/gh-jobs-response.json"
+JOBS_QUERY_SHOULD_FAIL="$TMPDIR/jobs-query-should-fail"
 AOS_MODE_FILE="$TMPDIR/aos-mode"
 AOS_CALLED_LOG="$TMPDIR/aos-called.log"
 AOS_ARGS_LOG="$TMPDIR/aos-args.log"
@@ -70,6 +76,29 @@ write_valid_run_response() {
 }
 write_valid_run_response
 
+# A default, fully-legitimate "actions/runs/{id}/attempts/{n}/jobs"
+# response -- a job whose steps include the exact step that creates the
+# live-e2e-approved record, concluded success (aos#193 review finding #1,
+# BLOCKER, round 3: binding to "the run referenced deploy-app.yml" alone
+# was not enough -- a uat run, or a live run whose e2e/approval step
+# failed, also referenced it). Individual scenarios below overwrite
+# $JOBS_RESPONSE_FILE to prove the step-binding check independently.
+write_valid_jobs_response() {
+  jq -nc --arg step "$CREATING_STEP_NAME" '{
+    jobs: [
+      {
+        name: "deploy-caprover",
+        steps: [
+          {name: "Checkout code", conclusion: "success"},
+          {name: $step, conclusion: "success"}
+        ]
+      }
+    ]
+  }' > "$JOBS_RESPONSE_FILE"
+}
+write_valid_jobs_response
+rm -f "$JOBS_QUERY_SHOULD_FAIL"
+
 cat > "$TMPDIR/bin/gh" <<MOCK
 #!/usr/bin/env bash
 if [ "\${1:-}" != "api" ]; then
@@ -87,6 +116,13 @@ done
 case "\$url" in
   *commits/*/check-runs*)
     cat "$RESPONSE_FILE"
+    ;;
+  *actions/runs/*/attempts/*/jobs)
+    if [ -f "$JOBS_QUERY_SHOULD_FAIL" ]; then
+      echo "mock gh: simulated jobs API failure (rate limit / 404 / 5xx)" >&2
+      exit 1
+    fi
+    cat "$JOBS_RESPONSE_FILE"
     ;;
   *actions/runs/*)
     cat "$RUN_RESPONSE_FILE"
@@ -270,6 +306,70 @@ set_response_one "success" "$MATCHING_PAYLOAD"
 assert_refused "the run named by external_id references no reusable workflows at all -> refused" "run_did_not_reference_deploy_app_workflow"
 
 write_valid_run_response
+write_valid_jobs_response
+
+echo ""
+echo "== verify-stable-gate.sh: GitHub-Actions-API binding round 3 (aos#193 review finding #1, BLOCKER, round 3) =="
+echo "   B1: 'the run referenced deploy-app.yml on this sha' was not enough -- a"
+echo "   uat run, or a live run whose e2e/approval failed before the record-"
+echo "   creating step, referenced it too. Also pin the ref, not just the path"
+echo "   prefix."
+
+# B1a: wrong ref. Path prefix matches, but the run used a DIFFERENT ref
+# than production callers actually use ("@main" -> refs/heads/main) -- a
+# branch, a fork, or an attacker-controlled ref. This scenario used to pass
+# before the ref pin (round 2's `startswith($prefix)` alone was not
+# enough).
+WRONG_REF_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/evil", ref: "refs/heads/evil"}]}')"
+printf '%s' "$WRONG_REF_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the run referenced deploy-app.yml, but from a DIFFERENT ref than production callers use -> refused (ref pinning)" "run_did_not_reference_deploy_app_workflow_at_expected_ref"
+write_valid_run_response
+
+# B1b: forged external_id pointing at a genuine, same-sha, same-ref run
+# that simply never reached the record-creating step -- for example a uat
+# stage run (deploy-app.yml only creates this check run on the LIVE
+# stage). The run/ref checks above all pass; only the job/step binding
+# below can catch this.
+JOBS_NO_MATCHING_STEP="$(jq -nc '{jobs: [{name: "deploy-caprover", steps: [{name: "Checkout code", conclusion: "success"}, {name: "Resolve CapRover credentials", conclusion: "success"}]}]}')"
+printf '%s' "$JOBS_NO_MATCHING_STEP" > "$JOBS_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the referenced run never actually ran the record-creating step (e.g. a uat run on the same sha) -> refused (job/step binding)" "run_did_not_execute_expected_step"
+write_valid_jobs_response
+
+# B1c: the record-creating step DID run, in the referenced run, but it
+# FAILED -- for example a live run whose e2e passed but the check-run
+# creation step itself errored on a transient GitHub issue, and a
+# different, forged check run for the SAME run_id/attempt is being
+# presented as if it were legitimate. The step existing is not enough; it
+# must have concluded success.
+JOBS_STEP_FAILED="$(jq -nc --arg step "$CREATING_STEP_NAME" '{jobs: [{name: "deploy-caprover", steps: [{name: "Checkout code", conclusion: "success"}, {name: $step, conclusion: "failure"}]}]}')"
+printf '%s' "$JOBS_STEP_FAILED" > "$JOBS_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "the record-creating step ran in the referenced run but did not conclude success -> refused" "run_did_not_execute_expected_step"
+write_valid_jobs_response
+
+# B2 (fail-CLOSED on an unverifiable binding, mirrored here for the single-
+# record case): a rate-limited/failed jobs-API query must refuse, exactly
+# like a failed runs-API query already does -- never be silently treated
+# as "the step didn't run".
+printf '%s' "1" > "$JOBS_QUERY_SHOULD_FAIL"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "jobs-API query itself fails (rate limit / 404 / 5xx) -> refused closed, never treated as 'step absent'" "jobs_query_failed"
+rm -f "$JOBS_QUERY_SHOULD_FAIL"
+
+# Mutation-coverage proof: loosening the path-prefix match to a bare
+# `contains("deploy-app")` (round 3's exact reviewer-cited bypass) must
+# stay caught by the ref pin even if the prefix check were somehow
+# loosened -- this scenario's path already starts with the real prefix,
+# so it isolates the ref check specifically.
+CORRECT_PREFIX_WRONG_REF_RUN="$(jq -nc --arg sha "$SHA" --arg repo "$REPO" '{head_sha: $sha, repository: {full_name: $repo}, status: "completed", referenced_workflows: [{path: "qwickapps/ci-workflows/.github/workflows/deploy-app.yml@refs/heads/attacker-controlled", ref: "refs/heads/attacker-controlled"}]}')"
+printf '%s' "$CORRECT_PREFIX_WRONG_REF_RUN" > "$RUN_RESPONSE_FILE"
+set_response_one "success" "$MATCHING_PAYLOAD"
+assert_refused "path prefix matches exactly but ref does not -> refused (proves the ref check is independent of the prefix check)" "run_did_not_reference_deploy_app_workflow_at_expected_ref"
+
+write_valid_run_response
+write_valid_jobs_response
 
 echo ""
 echo "== verify-stable-gate.sh: missing directive signature (today's expected state) =="
