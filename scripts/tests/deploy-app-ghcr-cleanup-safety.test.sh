@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 #
 # Regression test: the "Remove GHCR credentials" cleanup step in
-# verify-provenance and deploy-stable (ci-workflows#183) must never delete
-# anything outside its own deterministic RUNNER_TEMP path, no matter what
-# $DOCKER_CONFIG happens to hold when it runs.
+# verify-provenance (ci-workflows#183) must never delete anything outside
+# its own deterministic RUNNER_TEMP path, no matter what $DOCKER_CONFIG
+# happens to hold when it runs.
+#
+# deploy-stable no longer has this step (mcp#392 / ci-workflows deploy-
+# stable-caprover fix): now that it deploys via CapRover (deploy-from-
+# ghcr.sh) instead of a local `docker buildx imagetools inspect` + Docker-
+# config login, there's no local GHCR credential file to write or clean up
+# at all.
 #
 # Why this matters: actions-runner-critical-macmini's own .env sets a
 # persistent, ambient DOCKER_CONFIG for that runner. The credential step
@@ -65,7 +71,7 @@ print(matches[0]['run'])
 
 CLEANUP_STEP="Remove GHCR credentials"
 
-for JOB in verify-provenance deploy-stable; do
+for JOB in verify-provenance; do
   echo "== $JOB: cleanup step safety =="
 
   cleanup_script="$(extract_step "$JOB" "$CLEANUP_STEP")"
