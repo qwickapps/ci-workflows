@@ -138,6 +138,14 @@ jobs:
     needs: [drift-check]
     runs-on: [self-hosted, macmini]
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
       - name: Validate inputs
         run: |
           IMAGE_REF="${{ inputs.image_ref }}"
@@ -250,26 +258,50 @@ jobs:
           echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}" >> "$GITHUB_ENV"
 
       - name: Tag image as stable in GHCR
+        # ci-workflows#200: `docker pull`/`docker tag`/`docker push` resolves
+        # a multi-arch manifest list to the runner's single platform before
+        # re-publishing it — the list itself never survives that round trip,
+        # so every "stable" tag came out arm64-only regardless of how the
+        # source was built. `docker buildx imagetools create` is
+        # manifest-aware: it copies the list (or single-platform manifest,
+        # if that's genuinely all the source has) intact, never
+        # materializing the image locally.
         run: |
           TMPDIR_DOCKER="$(mktemp -d)"
           AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "${GHCR_PUSH_TOKEN}" | base64 | tr -d '\n')
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$TMPDIR_DOCKER/config.json"
           export DOCKER_CONFIG="$TMPDIR_DOCKER"
 
-          echo "Pulling ${image_ref}..."
-          docker --config "$TMPDIR_DOCKER" pull "${image_ref}"
-
           STABLE_IMAGE_VERSIONED="${BASE_IMAGE_NAME}:${STABLE_TAG}"
-          docker --config "$TMPDIR_DOCKER" tag "${image_ref}" "${STABLE_IMAGE_VERSIONED}"
-          docker --config "$TMPDIR_DOCKER" push "${STABLE_IMAGE_VERSIONED}"
+          docker --config "$TMPDIR_DOCKER" buildx imagetools create \
+            -t "${STABLE_IMAGE_VERSIONED}" "${image_ref}"
           echo "Pushed: ${STABLE_IMAGE_VERSIONED}"
 
           STABLE_IMAGE_LATEST="${BASE_IMAGE_NAME}:stable-latest"
-          docker --config "$TMPDIR_DOCKER" tag "${image_ref}" "${STABLE_IMAGE_LATEST}"
-          docker --config "$TMPDIR_DOCKER" push "${STABLE_IMAGE_LATEST}"
+          docker --config "$TMPDIR_DOCKER" buildx imagetools create \
+            -t "${STABLE_IMAGE_LATEST}" "${image_ref}"
           echo "Pushed: ${STABLE_IMAGE_LATEST}"
 
           echo "STABLE_IMAGE_VERSIONED=${STABLE_IMAGE_VERSIONED}" >> "$GITHUB_ENV"
+          echo "STABLE_IMAGE_LATEST=${STABLE_IMAGE_LATEST}" >> "$GITHUB_ENV"
+          echo "TMPDIR_DOCKER=${TMPDIR_DOCKER}" >> "$GITHUB_ENV"
+
+      - name: Verify stable tags did not lose platforms during promotion
+        # ci-workflows#200 acceptance criteria: fail when a promoted tag
+        # has fewer platforms than its source. This is the check that
+        # would have caught the bug the fix above addresses — every prior
+        # step reported success even while silently flattening the image,
+        # which is exactly why the bug went unnoticed.
+        run: |
+          chmod +x scripts/verify-multiarch-manifest.sh
+          scripts/verify-multiarch-manifest.sh \
+            --config "$TMPDIR_DOCKER" \
+            --ref "$STABLE_IMAGE_VERSIONED" \
+            --source-ref "$image_ref"
+          scripts/verify-multiarch-manifest.sh \
+            --config "$TMPDIR_DOCKER" \
+            --ref "$STABLE_IMAGE_LATEST" \
+            --source-ref "$image_ref"
           rm -rf "$TMPDIR_DOCKER"
 
       - name: Obtain CapRover auth token
