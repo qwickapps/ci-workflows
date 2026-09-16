@@ -359,21 +359,16 @@ jobs:
 
           ENV_VARS=$(echo "$LIVE_DEF" | jq -c '.envVars // []')
           SVC_OVERRIDE=$(echo "$LIVE_DEF" | jq -r '.serviceUpdateOverride // ""')
-          MERGED=$(echo "$STABLE_DEF" | jq --argjson vars "$ENV_VARS" '.envVars = $vars')
-          # protocols#299 (ported from qwickapps/documents' inline copy of
-          # this workflow, which carried this fix while this shared one
-          # did not): the env vars copied above include the LIVE slot's
-          # own TS_HOSTNAME. Each blue-green slot must register its own
-          # Tailscale node named after its own app, so re-scope
-          # TS_HOSTNAME to the stable slot's app name whenever the copied
-          # env carries one -- a shared hostname collides on one Tailnet
-          # node and breaks the live slot. Gated on the key actually being
-          # present so apps that never set TS_HOSTNAME don't get one
-          # introduced.
-          if echo "$ENV_VARS" | jq -e 'any(.[]; .key == "TS_HOSTNAME")' >/dev/null 2>&1; then
-            MERGED=$(echo "$MERGED" | jq --arg name "$STABLE_APP" \
-              '.envVars = (((.envVars // []) | map(select(.key != "TS_HOSTNAME"))) + [{key: "TS_HOSTNAME", value: $name}])')
-          fi
+          # protocols#299, ported with one deliberate deviation from the
+          # original (documents' swap-instances.sh set_ts_hostname(), which
+          # is unconditional): scripts/rescope-ts-hostname.sh only rescopes
+          # TS_HOSTNAME when the copied env actually carries that key (any
+          # value, including empty/whitespace) -- an unconditional port
+          # would introduce TS_HOSTNAME into callers like ide/forge/crew
+          # that never set it at all. See that script's own header and
+          # scripts/tests/rescope-ts-hostname.test.sh for the covered cases.
+          chmod +x scripts/rescope-ts-hostname.sh
+          MERGED=$(scripts/rescope-ts-hostname.sh "$STABLE_DEF" "$ENV_VARS" "$STABLE_APP")
           if [ -n "$SVC_OVERRIDE" ]; then
             MERGED=$(echo "$MERGED" | jq --arg override "$SVC_OVERRIDE" '.serviceUpdateOverride = $override')
           fi
