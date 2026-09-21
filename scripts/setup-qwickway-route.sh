@@ -96,6 +96,65 @@ caprover_api_call() {
   return 1
 }
 
+# Delete all Tailscale devices whose hostname is the canonical gateway hostname
+# or its numeric suffix variant. QwickWay gateway apps use ephemeral Tailscale
+# identities and CapRover app-definition updates restart containers; when those
+# restarts happen faster than Tailscale expires the old ephemeral node, MagicDNS
+# can strand the canonical name on a dead node and move the live gateway to -1.
+# Reaping the whole hostname family immediately before the intentional restart
+# makes the next registration reclaim the canonical name instead of accumulating
+# qwickapps-foo, qwickapps-foo-1, qwickapps-foo-2, ...
+tailscale_reap_hostname_family() {
+  local api_key="$1"
+  local hostname="$2"
+  local tailnet="${3:--}"
+
+  if [ -z "$api_key" ] || [ -z "$hostname" ] || [ "$api_key" = "-" ]; then
+    return 0
+  fi
+
+  echo "  Reaping Tailscale hostname family for ${hostname} before restart"
+  local devices_json
+  devices_json=$(curl -sS -H "Authorization: Bearer ${api_key}" \
+    "https://api.tailscale.com/api/v2/tailnet/${tailnet}/devices?fields=all" 2>/dev/null || true)
+  if ! echo "$devices_json" | jq -e '.devices' >/dev/null 2>&1; then
+    echo "  Warning: Tailscale API did not return devices; skipping hostname reap"
+    return 0
+  fi
+
+  local ids
+  ids=$(echo "$devices_json" | jq -r --arg h_raw "$hostname" '
+    ($h_raw | ascii_downcase) as $h
+    | .devices[]?
+    | select(
+        (((.hostname // "") | ascii_downcase) == $h) or
+        (((.hostname // "") | ascii_downcase) | test("^" + $h + "-[0-9]+$")) or
+        (((.name // "") | ascii_downcase) | test("^" + $h + "(-[0-9]+)?\\."))
+      )
+    | .id
+  ')
+
+  local deleted=0
+  local dev_id
+  while IFS= read -r dev_id; do
+    [ -z "$dev_id" ] && continue
+    if curl -sf -X DELETE -H "Authorization: Bearer ${api_key}" \
+      "https://api.tailscale.com/api/v2/device/${dev_id}" >/dev/null 2>&1; then
+      echo "  Deleted stale Tailscale device ${dev_id}"
+      deleted=$((deleted + 1))
+    else
+      echo "  Warning: failed to delete Tailscale device ${dev_id}"
+    fi
+  done <<< "$ids"
+
+  if [ "$deleted" -gt 0 ]; then
+    echo "  Waiting 10s for ${deleted} Tailscale deletion(s) to propagate"
+    sleep 10
+  else
+    echo "  No existing Tailscale devices matched ${hostname}"
+  fi
+}
+
 # Parse arguments
 GATEWAY_APP_NAME=""
 TARGET_APP_URL=""
@@ -304,54 +363,7 @@ else
   exit 1
 fi
 
-# Step 5a: Set env vars and container port (no forceSsl/websocket yet - SSL must be enabled first)
-# TARGET_APP uses the external URL because the route and app servers are on
-# separate Docker swarms and cannot communicate via internal hostnames.
-echo ""
-echo "Configuring env vars and container port..."
-
-# Read existing Tailscale vars from the current app definition so they survive
-# deploys that do not pass --ts-* flags, and resolve the effective value for
-# each (explicit --ts-* flag wins, otherwise fall back to the existing value,
-# otherwise empty/not-set). Without this, a full envVars replace would wipe
-# TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS, and TS_API_KEY every
-# time the gateway is provisioned, knocking the app off the Tailscale network
-# (TS_API_KEY specifically breaks the gateway's Tailscale cleanup logic, since
-# that logic no-ops without it).
-# (Fixes qwickapps/ci-workflows#22 and qwickapps/ci-workflows#131; resolution
-# logic extracted to scripts/lib/resolve-ts-env-vars.sh and covered by
-# scripts/tests/resolve-ts-env-vars.test.sh — qwickapps/ci-workflows#133.)
-ENV_VARS=$(jq -n \
-  --arg targetApp "$TARGET_APP_URL" \
-  --arg healthPath "$HEALTH_CHECK_PATH" \
-  '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
-
-ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY" "$TS_EPHEMERAL_AUTHKEY")
-
-MERGED=$(echo "$CURRENT_DEF" | jq \
-  --argjson envVars "$ENV_VARS" \
-  --argjson port 80 \
-  '.envVars = $envVars | .containerHttpPort = $port | .instanceCount = 1')
-
-echo "  TARGET_APP=$TARGET_APP_URL"
-echo "  HEALTH_CHECK_PATH=$HEALTH_CHECK_PATH"
-echo "  Container port: 80"
-
-UPDATE_RESPONSE=$(caprover_api_call "Update app definition (basic)" \
-  curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/update" \
-  -H "Content-Type: application/json" \
-  -H "x-captain-auth: $TOKEN" \
-  -d "$MERGED")
-
-UPDATE_STATUS=$(echo "$UPDATE_RESPONSE" | jq -r '.status')
-
-if [ "$UPDATE_STATUS" = "100" ] || [ "$UPDATE_STATUS" = "1000" ]; then
-  echo "  Basic settings updated"
-else
-  echo "  Warning: Update response: $(echo "$UPDATE_RESPONSE" | jq -r '.description')"
-fi
-
-# Step 5b: Enable SSL on base domain before setting forceSsl
+# Step 5a: Enable SSL on base domain before the single app-definition update.
 echo ""
 echo "Enabling SSL on gateway base domain..."
 SSL_BASE_RESPONSE=$(caprover_api_call "Enable base domain SSL" \
@@ -370,31 +382,73 @@ else
   echo "  Warning: SSL enable response: $SSL_BASE_DESC (status: $SSL_BASE_STATUS)"
 fi
 
-# Step 5c: Now enable forceSsl and websocket (SSL is ready)
-echo ""
-echo "Enabling force HTTPS and websocket support..."
-
-# Re-fetch to get latest state
+# Re-fetch after SSL changes so the final update starts from the freshest app definition.
 ALL_DEFS_UPDATED=$(curl -s -k -X GET "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions" \
   -H "x-captain-auth: $TOKEN")
 CURRENT_DEF_UPDATED=$(echo "$ALL_DEFS_UPDATED" | jq --arg name "$GATEWAY_APP_NAME" '.data.appDefinitions[] | select(.appName == $name)')
 if [ -z "$CURRENT_DEF_UPDATED" ] || [ "$CURRENT_DEF_UPDATED" = "null" ]; then
-  CURRENT_DEF_UPDATED="$MERGED"
+  CURRENT_DEF_UPDATED="$CURRENT_DEF"
 fi
 
-SSL_MERGED=$(echo "$CURRENT_DEF_UPDATED" | jq '.forceSsl = true | .websocketSupport = true')
+# Step 5b: Set env vars, container port, force HTTPS, and websocket support in
+# one app-definition update. Multiple sequential app-definition writes each
+# restart the ephemeral Tailscale gateway container; that creates runaway
+# qwickapps-foo, qwickapps-foo-1, ... registrations while Tailscale catches up.
+# TARGET_APP uses the external URL because the route and app servers are on
+# separate Docker swarms and cannot communicate via internal hostnames.
+echo ""
+echo "Configuring gateway app definition atomically..."
 
-SSL_UPDATE_RESPONSE=$(caprover_api_call "Update app (SSL + websocket)" \
-  curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/update" \
-  -H "Content-Type: application/json" \
-  -H "x-captain-auth: $TOKEN" \
-  -d "$SSL_MERGED")
+# Read existing Tailscale vars from the current app definition so they survive
+# deploys that do not pass --ts-* flags, and resolve the effective value for
+# each (explicit --ts-* flag wins, otherwise fall back to the existing value,
+# otherwise empty/not-set). Without this, a full envVars replace would wipe
+# TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS, and TS_API_KEY every
+# time the gateway is provisioned, knocking the app off the Tailscale network
+# (TS_API_KEY specifically breaks the gateway's Tailscale cleanup logic, since
+# that logic no-ops without it).
+# (Fixes qwickapps/ci-workflows#22 and qwickapps/ci-workflows#131; resolution
+# logic extracted to scripts/lib/resolve-ts-env-vars.sh and covered by
+# scripts/tests/resolve-ts-env-vars.test.sh — qwickapps/ci-workflows#133.)
+ENV_VARS=$(jq -n \
+  --arg targetApp "$TARGET_APP_URL" \
+  --arg healthPath "$HEALTH_CHECK_PATH" \
+  '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
 
-SSL_UPDATE_STATUS=$(echo "$SSL_UPDATE_RESPONSE" | jq -r '.status')
-if [ "$SSL_UPDATE_STATUS" = "100" ] || [ "$SSL_UPDATE_STATUS" = "1000" ]; then
-  echo "  Force HTTPS and websocket enabled"
+ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF_UPDATED" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY" "$TS_EPHEMERAL_AUTHKEY")
+EFFECTIVE_TS_HOSTNAME=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_HOSTNAME") | .value // ""' | head -1)
+EFFECTIVE_TS_API_KEY=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_API_KEY") | .value // ""' | head -1)
+
+MERGED=$(echo "$CURRENT_DEF_UPDATED" | jq \
+  --argjson envVars "$ENV_VARS" \
+  --argjson port 80 \
+  '.envVars = $envVars | .containerHttpPort = $port | .instanceCount = 1 | .forceSsl = true | .websocketSupport = true')
+
+echo "  TARGET_APP=$TARGET_APP_URL"
+echo "  HEALTH_CHECK_PATH=$HEALTH_CHECK_PATH"
+echo "  Container port: 80"
+echo "  Tailscale hostname: ${EFFECTIVE_TS_HOSTNAME:-<unset>}"
+
+CURRENT_NORMALIZED=$(echo "$CURRENT_DEF_UPDATED" | jq -S '.envVars = ((.envVars // []) | sort_by(.key))')
+MERGED_NORMALIZED=$(echo "$MERGED" | jq -S '.envVars = ((.envVars // []) | sort_by(.key))')
+if [ "$CURRENT_NORMALIZED" = "$MERGED_NORMALIZED" ]; then
+  echo "  App definition already matches desired state; skipping restart-inducing update"
 else
-  echo "  Warning: SSL update response: $(echo "$SSL_UPDATE_RESPONSE" | jq -r '.description')"
+  tailscale_reap_hostname_family "$EFFECTIVE_TS_API_KEY" "${EFFECTIVE_TS_HOSTNAME:-$GATEWAY_APP_NAME}" "${TS_TAILNET:-${TAILSCALE_TAILNET:--}}"
+
+  UPDATE_RESPONSE=$(caprover_api_call "Update app definition (env + SSL + websocket)" \
+    curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/update" \
+    -H "Content-Type: application/json" \
+    -H "x-captain-auth: $TOKEN" \
+    -d "$MERGED")
+
+  UPDATE_STATUS=$(echo "$UPDATE_RESPONSE" | jq -r '.status')
+
+  if [ "$UPDATE_STATUS" = "100" ] || [ "$UPDATE_STATUS" = "1000" ]; then
+    echo "  Gateway app definition updated"
+  else
+    echo "  Warning: Update response: $(echo "$UPDATE_RESPONSE" | jq -r '.description')"
+  fi
 fi
 
 # Step 6: Refresh GHCR registry credentials on the route CapRover instance.
