@@ -25,6 +25,64 @@
 
 set -euo pipefail
 
+# ghcr_parse_image_ref <image_ref>
+#
+# Parses a (possibly digest-pinned) ghcr.io image reference into the three
+# pieces ghcr_probe_pull_token/ghcr_select_token actually need, printed as
+# three lines: owner, package, reference. Callers that derived "reference"
+# via `${IMAGE_REF##*:}` alone get the wrong value for a digest-pinned ref
+# like ghcr.io/qwickapps/img-x@sha256:abcd... (that pattern strips to just
+# the hex, dropping the "sha256:" prefix ghcr.io's manifest endpoint
+# requires) -- this function exists so every call site parses the same way.
+#
+# - A leading "ghcr.io/" is stripped if present.
+# - If "@" is present, the reference is everything after the LAST "@"
+#   (e.g. "sha256:abcd...") -- a digest always wins over any tag also
+#   present in the same ref (e.g. "img-x:tag@sha256:...").
+# - Otherwise, the reference is the tag after the last ":" in the FINAL
+#   path segment only (so a registry ref never confuses a "owner/pkg" path
+#   separator for a tag separator), defaulting to "latest" when that
+#   segment has no ":".
+# - owner is the first remaining path segment; package is everything after
+#   it, slashes kept, so nested package paths (owner/team/pkg) survive
+#   intact rather than collapsing to just the last segment.
+ghcr_parse_image_ref() {
+  local ref="$1"
+  local path="$ref"
+
+  case "$path" in
+    ghcr.io/*) path="${path#ghcr.io/}" ;;
+  esac
+
+  local reference
+  case "$path" in
+    *@*)
+      reference="${path##*@}"
+      path="${path%%@*}"
+      # A ref can carry both a tag and a digest (e.g. "img-x:tag@sha256:...");
+      # the digest above already wins as the reference, so any leftover
+      # ":tag" on the final path segment must still be stripped here.
+      local last_segment="${path##*/}"
+      case "$last_segment" in
+        *:*) path="${path%:*}" ;;
+      esac
+      ;;
+    *)
+      local last_segment="${path##*/}"
+      case "$last_segment" in
+        *:*) reference="${last_segment##*:}" ;;
+        *) reference="latest" ;;
+      esac
+      path="${path%:"$reference"}"
+      ;;
+  esac
+
+  local owner="${path%%/*}"
+  local package="${path#*/}"
+
+  printf '%s\n%s\n%s\n' "$owner" "$package" "$reference"
+}
+
 # ghcr_probe_pull_token <actor> <token> <owner> <package> <tag>
 #
 # Returns 0 if <token>, basic-auth'd as <actor>, can pull the manifest for

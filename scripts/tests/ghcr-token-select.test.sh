@@ -181,6 +181,40 @@ refute "auth-only probe fails for a token the token endpoint rejects" \
 refute "auth-only probe fails on an empty token without calling curl" \
   ghcr_probe_auth_only "actor" "" "qwickapps"
 
+echo "== ghcr_parse_image_ref: tag, digest, no-tag and nested-path refs =="
+
+assert_parsed() {
+  local desc="$1" ref="$2" expected_owner="$3" expected_package="$4" expected_reference="$5"
+  local out owner package reference
+  out="$(ghcr_parse_image_ref "$ref")"
+  owner="$(sed -n '1p' <<<"$out")"
+  package="$(sed -n '2p' <<<"$out")"
+  reference="$(sed -n '3p' <<<"$out")"
+  if [ "$owner" = "$expected_owner" ] && [ "$package" = "$expected_package" ] && [ "$reference" = "$expected_reference" ]; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc (got owner='$owner' package='$package' reference='$reference', want owner='$expected_owner' package='$expected_package' reference='$expected_reference')"
+    fail=$((fail + 1))
+  fi
+}
+
+assert_parsed "tagged ref" \
+  "ghcr.io/qwickapps/img-secrets:sha-abc123" "qwickapps" "img-secrets" "sha-abc123"
+
+assert_parsed "digest-pinned ref keeps the sha256: prefix (the #204 regression)" \
+  "ghcr.io/qwickapps/img-secrets@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd" \
+  "qwickapps" "img-secrets" "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
+
+assert_parsed "no-tag ref defaults to latest" \
+  "ghcr.io/qwickapps/img-secrets" "qwickapps" "img-secrets" "latest"
+
+assert_parsed "nested package path keeps slashes, owner is only the first segment" \
+  "ghcr.io/qwickapps/team/img-secrets:release" "qwickapps" "team/img-secrets" "release"
+
+assert_parsed "ref with both a tag and a digest: digest wins over the tag" \
+  "ghcr.io/qwickapps/img-secrets:stale-tag@sha256:aaaa" "qwickapps" "img-secrets" "sha256:aaaa"
+
 echo ""
 echo "Tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

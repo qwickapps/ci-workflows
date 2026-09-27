@@ -704,15 +704,16 @@ jobs:
           set -euo pipefail
           # shellcheck source=/dev/null
           source .ci-workflows/scripts/lib/ghcr-token-select.sh
-          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
-          PACKAGE="${IMAGE_BASE##*/}"
-          TAG="${{ needs.resolve-stage.outputs.image_ref }}"
-          TAG="${TAG##*:}"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "${{ env.OWNER }}" "$PACKAGE" "$TAG" \
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "github.token" "$GHCR_TOKEN_EPHEMERAL" \
               "GHCR_PULL_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
-            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${{ env.OWNER }}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
             exit 1
           fi
           echo "GHCR pull token source: $SOURCE"
@@ -921,15 +922,16 @@ jobs:
           set -euo pipefail
           # shellcheck source=/dev/null
           source .ci-workflows/scripts/lib/ghcr-token-select.sh
-          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
-          PACKAGE="${IMAGE_BASE##*/}"
           IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
-          TAG="${IMAGE_REF##*:}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "${{ env.OWNER }}" "$PACKAGE" "$TAG" \
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
               "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${{ env.OWNER }}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
@@ -1505,14 +1507,15 @@ jobs:
           # shellcheck source=/dev/null
           source .ci-workflows/scripts/lib/ghcr-token-select.sh
           SOURCE_IMAGE="${{ needs.resolve-stage.outputs.image_ref }}"
-          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
-          PACKAGE="${IMAGE_BASE##*/}"
-          TAG="${SOURCE_IMAGE##*:}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$SOURCE_IMAGE")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "${{ env.OWNER }}" "$PACKAGE" "$TAG" \
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "github.token" "$GHCR_TOKEN_EPHEMERAL" \
               "GHCR_PUSH_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
-            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${{ env.OWNER }}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
             exit 1
           fi
           echo "GHCR token source: $SOURCE"
@@ -1862,15 +1865,16 @@ jobs:
           set -euo pipefail
           # shellcheck source=/dev/null
           source .ci-workflows/scripts/lib/ghcr-token-select.sh
-          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
-          PACKAGE="${IMAGE_BASE##*/}"
           IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
-          TAG="${IMAGE_REF##*:}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "${{ env.OWNER }}" "$PACKAGE" "$TAG" \
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
               "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${{ env.OWNER }}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
