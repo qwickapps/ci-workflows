@@ -104,12 +104,11 @@ ghcr_probe_pull_token() {
   bearer="$(printf '%s' "$token_resp" | jq -r '.token // empty' 2>/dev/null)" || return 1
   [ -n "$bearer" ] || return 1
 
+  local accept="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
   local status
   status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
     -H "Authorization: Bearer ${bearer}" \
-    -H "Accept: application/vnd.oci.image.index.v1+json" \
-    -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
-    -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+    -H "Accept: ${accept}" \
     "https://ghcr.io/v2/${owner}/${package}/manifests/${tag}" 2>/dev/null)" || return 1
   [ "$status" = "200" ]
 }

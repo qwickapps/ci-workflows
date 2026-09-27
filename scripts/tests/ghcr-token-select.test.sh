@@ -215,6 +215,52 @@ assert_parsed "nested package path keeps slashes, owner is only the first segmen
 assert_parsed "ref with both a tag and a digest: digest wins over the tag" \
   "ghcr.io/qwickapps/img-secrets:stale-tag@sha256:aaaa" "qwickapps" "img-secrets" "sha256:aaaa"
 
+echo "== ghcr_probe_pull_token: single-arch OCI image manifest Accept header (live-registry regression) =="
+
+# ghcr.io 404s a manifest GET for a single-arch OCI image (buildx,
+# provenance: false -- e.g. ghcr.io/qwickapps/img-secrets:sha-e5b8c6f)
+# unless application/vnd.oci.image.manifest.v1+json is in the Accept
+# header; it 200s once it is. This stub reproduces exactly that: it scans
+# every "-H Accept: ..." value the library sent (there may be several, if
+# the library still sends one -H per media type) and only answers 200 if
+# that type shows up somewhere in there.
+curl() {
+  local args=("$@")
+  local url="" accept_headers=""
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      https://*) url="${args[$i]}" ;;
+    esac
+    if [ "${args[$i]}" = "-H" ]; then
+      case "${args[$((i + 1))]}" in
+        Accept:*) accept_headers="${accept_headers}${args[$((i + 1))]}"$'\n' ;;
+      esac
+    fi
+  done
+
+  case "$url" in
+    https://ghcr.io/token\?*)
+      printf '{"token":"bearer-oci-probe"}'
+      return 0
+      ;;
+    https://ghcr.io/v2/*/manifests/*)
+      if [[ "$accept_headers" == *"application/vnd.oci.image.manifest.v1+json"* ]]; then
+        printf '200'
+      else
+        printf '404'
+      fi
+      return 0
+      ;;
+    *)
+      echo "unexpected curl invocation in test stub: ${args[*]}" >&2
+      return 1
+      ;;
+  esac
+}
+
+assert "probe succeeds for a single-arch OCI image once Accept includes application/vnd.oci.image.manifest.v1+json" \
+  ghcr_probe_pull_token "actor" "some-token" "qwickapps" "img-secrets" "sha-e5b8c6f"
+
 echo ""
 echo "Tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
