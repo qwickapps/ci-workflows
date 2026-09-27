@@ -364,7 +364,11 @@ fi
 # surviving across blue-green restore cycles.  swap-instances.sh only
 # force-overrides live/stable, not build — so a restore that restores stale
 # envVars onto the build slot would carry the orphan TS_HOSTNAME forward.
-if [[ "$APP_NAME" == *-build ]]; then
+# 2026-09-27 (ci-workflows t_7e71b4a8): the build/dev slot's app-name suffix
+# was renamed -build -> -dev (oci-dev CapRover retired; slot moved to
+# oci-main). Match both so already-deployed -build leftovers are still
+# covered during the transition.
+if [[ "$APP_NAME" == *-build || "$APP_NAME" == *-dev ]]; then
   echo ""
   echo "Build slot detected: forcing TS_HOSTNAME to app name..."
   FORCE_DEFS=$(curl "${CURL_ARGS[@]}" -X GET "$CAPROVER_URL/api/v2/user/apps/appDefinitions" \
