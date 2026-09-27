@@ -1,0 +1,50 @@
+name: GHCR Token Select Tests
+
+# Regression gate for scripts/lib/ghcr-token-select.sh (ci-workflows#204):
+# the shared ephemeral-github.token-vs-legacy-PAT selection logic used by
+# deploy-app.yml's build/verify-provenance/retag/deploy-caprover/deploy-
+# stable jobs. Exists so a future change to the probe logic that lets a
+# set-but-invalid token win again fails a test instead of shipping silently
+# (the exact class of bug #204 fixes: `secrets.X || secrets.Y` only falls
+# back when X is UNSET, never when X is merely stale).
+#
+# Tests:
+#   bash scripts/tests/ghcr-token-select.test.sh
+#     - a set-but-invalid PAT never beats a valid github.token, regardless
+#       of which order the caller lists candidates in
+#     - selection fails (rather than picking a bad token) when no
+#       candidate works
+#     - no candidate token value ever appears in captured output
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lib/ghcr-token-select.sh'
+      - 'scripts/tests/ghcr-token-select.test.sh'
+      - '.github/workflows/ghcr-token-select-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/lib/ghcr-token-select.sh'
+      - 'scripts/tests/ghcr-token-select.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: ghcr-token-select.sh selection tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ghcr-token-select contract test
+        run: bash scripts/tests/ghcr-token-select.test.sh

@@ -345,8 +345,30 @@ Required inherited secrets:
 | `OCI_DEV_CAPROVER_URL`, `OCI_DEV_CAPROVER_PASSWORD` | Dev CapRover deploys. |
 | `OCI_MAIN_CAPROVER_URL`, `OCI_MAIN_CAPROVER_PASSWORD` | UAT and prod CapRover deploys. |
 | `OCI_GATEWAY_CAPROVER_URL`, `OCI_GATEWAY_CAPROVER_PASSWORD` | QwickWay route updates. |
-| `GHCR_PUSH_TOKEN` | Building and pushing images when `image_ref` is not supplied. |
-| `GHCR_PULL_TOKEN` | Deploying images from GHCR. |
+
+Optional legacy secrets (ephemeral-token-first policy, ci-workflows#204):
+
+| Secret | Used for |
+|---|---|
+| `GHCR_PUSH_TOKEN` | Legacy fallback for the `build`/`retag` jobs' GHCR writes, only consulted if the job's own ephemeral `github.token` can't reach the target image. |
+| `GHCR_PULL_TOKEN` | Legacy fallback for GHCR pulls, and the preferred credential CapRover's shared `ghcr.io` registry entry is refreshed with (see below) -- it's long-lived and org-wide, so it stays valid on CapRover after the job that set it ends, unlike `github.token`. |
+
+`deploy-app.yml` no longer trusts "is the secret merely set" as a proxy for
+"does it still work" -- every GHCR operation probes candidate tokens
+directly against `ghcr.io` (token endpoint + manifest fetch) and uses the
+first one that actually succeeds, never a token that failed validation.
+The runner-side jobs (`build`, `verify-provenance`, `retag`) prefer the
+job's own ephemeral `github.token` and only fall back to the legacy PAT
+above if `github.token` can't pull the image; `build` uses `github.token`
+unconditionally, since the package it pushes to always belongs to the
+calling repo. `deploy-caprover`/`deploy-stable` invert that preference:
+they prefer the PAT (when it validates) because whatever token they export
+overwrites CapRover's **shared** `ghcr.io` registry entry for every app on
+that instance, and the PAT outlives this one job's lifetime while
+`github.token` does not. Neither `GHCR_PUSH_TOKEN` nor `GHCR_PULL_TOKEN` is
+required for a caller whose `github.token` already has adequate `packages`
+access -- they exist purely as a fallback for callers/targets it can't
+reach.
 
 ### Manual Promotion
 

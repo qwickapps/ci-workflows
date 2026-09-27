@@ -109,6 +109,42 @@ IN_CAPROVER_URL="https://Captain.Dev.QwickForge.Com" NEEDS_CAPROVER_HOST_NAME="c
 NEEDS_CAPROVER_HOST_NAME="Captain.App.QwickForge.Com" \
   assert_selects "mixed-case main host still selects MAIN" MAIN_SECRET_MARKER
 
+assert() {
+  local desc="$1"; shift
+  if "$@"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc"
+    fail=$((fail + 1))
+  fi
+}
+
+echo "== ci-workflows#204: 'Resolve CapRover credentials' no longer raw-exports GHCR_PULL_TOKEN =="
+# Before #204, this exact step exported secrets.GHCR_PULL_TOKEN into
+# GITHUB_ENV unconditionally, regardless of whether it still worked --
+# selection now happens in a separate, dedicated step (see the assertion
+# below) that probes ghcr.io before exporting anything.
+RAW_STEP="$(python3 -c "
+import yaml
+with open('$WORKFLOW') as f:
+    doc = yaml.safe_load(f)
+print(doc['jobs']['deploy-caprover']['steps'][2]['run'])
+")"
+assert "deploy-caprover: 'Resolve CapRover credentials' step no longer exports GHCR_PULL_TOKEN directly" \
+  bash -c '! printf "%s" "$1" | grep -qF "GHCR_PULL_TOKEN="' _ "$RAW_STEP"
+
+for job in deploy-caprover deploy-stable; do
+  assert "$job: has a dedicated 'Select GHCR pull token' step (ci-workflows#204)" \
+    bash -c "python3 -c \"
+import yaml, sys
+with open('$WORKFLOW') as f:
+    doc = yaml.safe_load(f)
+steps = doc['jobs']['$job']['steps']
+sys.exit(0 if any('Select GHCR pull token' in s.get('name', '') for s in steps) else 1)
+\""
+done
+
 echo ""
 echo "Tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
