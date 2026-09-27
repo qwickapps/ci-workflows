@@ -1,7 +1,7 @@
 name: Self-Hosted Fork PR Guard Tests
 
 # Regression gate for ci-workflows#184: this repo is public and runs
-# multiple jobs on the fleet's self-hosted macmini runner. Without a
+# multiple jobs on the fleet's self-hosted choco runner. Without a
 # job-level guard comparing the PR head repo against the base repo, a
 # fork's pull_request would execute its own workflow-file changes and
 # step scripts directly on that runner. This gate exists so a future new
@@ -30,9 +30,9 @@ permissions:
 jobs:
   guard-tests:
     name: self-hosted fork-PR guard tests
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     # ci-workflows#184: this repo is public and this job runs on the
-    # fleet's self-hosted macmini runner. Without this guard, a
+    # fleet's self-hosted choco runner. Without this guard, a
     # pull_request from a fork would execute its own workflow-file
     # changes (and step scripts) directly on that host. event_name is
     # checked first so push (this file's other trigger) is unaffected --

@@ -36,9 +36,9 @@ permissions:
 jobs:
   contract:
     name: resolve-ts-env-vars.sh resolution tests
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     # ci-workflows#184: this repo is public and this job runs on the
-    # fleet's self-hosted macmini runner. Without this guard, a
+    # fleet's self-hosted choco runner. Without this guard, a
     # pull_request from a fork would execute its own workflow-file
     # changes (and step scripts) directly on that host. event_name is
     # checked first so push (this file's other trigger) is unaffected --
