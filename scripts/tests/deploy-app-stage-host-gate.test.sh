@@ -121,15 +121,22 @@ assert_succeeds() {
 
 echo "== Check 1: stage/host agreement =="
 
-# RED: build stage pointed at oci-main (the faabzi-uat-build-shaped mistake,
-# generalized to the build slot itself).
-IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
-  assert_fails_with "build stage targeting oci-main host is refused" \
-  "stage 'build' must deploy to 'captain.dev.qwickforge.com'"
+# 2026-09-27 (t_7e71b4a8): oci-dev's CapRover was scaled to 0 and the host
+# repurposed as gateway-2 (t_e7df7236); every build/dev-stage deploy started
+# failing at CapRover login with an nginx 404. Decision (prime, final): do
+# not revive oci-dev CapRover, repoint the build/dev stage to the same
+# oci-main CapRover uat/live/stable already use. Check 1 now requires
+# captain.app.qwickforge.com for ALL four stages, and captain.dev.qwickforge.com
+# is refused everywhere (there is no live CapRover behind it any more).
 
-# GREEN: same app/stage, correct oci-dev host.
+# RED: build/dev stage pointed at the now-retired oci-dev host.
 IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
-  assert_succeeds "build stage targeting oci-dev host succeeds"
+  assert_fails_with "build stage targeting the retired oci-dev host is refused" \
+  "stage 'build' must deploy to 'captain.app.qwickforge.com'"
+
+# GREEN: build/dev stage, repointed oci-main host.
+IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_succeeds "build stage targeting the repointed oci-main host succeeds"
 
 # RED: uat stage pointed at oci-dev.
 IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
@@ -171,28 +178,29 @@ echo ""
 echo "== Check 2: no per-environment build slots =="
 
 # RED: app_name already carries an environment suffix, producing exactly the
-# faabzi-uat-build shape when combined with stage=build.
-IN_STAGE=build IN_APP_NAME=faabzi-uat IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+# faabzi-uat-dev shape when combined with stage=build (renamed from
+# faabzi-uat-build on 2026-09-27, t_7e71b4a8).
+IN_STAGE=build IN_APP_NAME=faabzi-uat IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_fails_with "app_name carrying a -uat suffix + stage=build is refused" \
-  "computed CapRover app name 'faabzi-uat-build' is a per-environment build slot"
+  "computed CapRover app name 'faabzi-uat-dev' is a per-environment build slot"
 
-IN_STAGE=build IN_APP_NAME=faabzi-live IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+IN_STAGE=build IN_APP_NAME=faabzi-live IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_fails_with "app_name carrying a -live suffix + stage=build is refused" \
-  "computed CapRover app name 'faabzi-live-build' is a per-environment build slot"
+  "computed CapRover app name 'faabzi-live-dev' is a per-environment build slot"
 
-IN_STAGE=build IN_APP_NAME=faabzi-stable IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+IN_STAGE=build IN_APP_NAME=faabzi-stable IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_fails_with "app_name carrying a -stable suffix + stage=build is refused" \
-  "computed CapRover app name 'faabzi-stable-build' is a per-environment build slot"
+  "computed CapRover app name 'faabzi-stable-dev' is a per-environment build slot"
 
-# GREEN: the legal shape -- plain app_name, build stage -> <app>-build only.
-IN_STAGE=build IN_APP_NAME=faabzi IN_CAPROVER_HOST=captain.dev.qwickforge.com \
-  assert_succeeds "plain app_name + stage=build (the only legal build slot) succeeds"
+# GREEN: the legal shape -- plain app_name, build stage -> <app>-dev only.
+IN_STAGE=build IN_APP_NAME=faabzi IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_succeeds "plain app_name + stage=build (the only legal build/dev slot) succeeds"
 
-# RED: mixed-case app_name suffix reproduces the exact faabzi-uat-build
+# RED: mixed-case app_name suffix reproduces the exact faabzi-uat-dev
 # incident with different casing -- the check-2 glob is lowercase-only, so
 # app_name="faabzi-UAT" + stage=build must still be refused. This is the
 # case-sensitivity bypass found in adversarial review of ci-workflows#157.
-IN_STAGE=build IN_APP_NAME=faabzi-UAT IN_CAPROVER_HOST=captain.dev.qwickforge.com \
+IN_STAGE=build IN_APP_NAME=faabzi-UAT IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_fails_with "app_name carrying a mixed-case -UAT suffix + stage=build is refused" \
   "is a per-environment build slot"
 

@@ -3,10 +3,18 @@ name: Deploy App (Reusable)
 # Canonical 4-stage blue-green pipeline.
 #
 # Stage mapping:
-# - build  -> oci-dev  / <app>-build  -> release-candidate
+# - build  -> oci-main / <app>-dev    -> release-candidate  (2026-09-27: was
+#             oci-dev; oci-dev's CapRover was deliberately scaled to 0 and
+#             the host repurposed as gateway-2, see t_e7df7236. Do NOT revive
+#             oci-dev CapRover for this -- it would steal 80/443 from
+#             gateway-2. Re-pointed here, not skipped, per the blue-green SOP
+#             requirement that every stage still runs. The slot is renamed
+#             -build -> -dev because it now lives on the same physical
+#             CapRover cluster as uat/live/stable; "-build" implied a
+#             dedicated build host, which no longer exists.)
 # - uat    -> oci-main / <app>-uat    -> release
 # - live   -> oci-main / <app>-live   -> stable + route update
-# - stable -> macmini  / <app>-stable
+# - stable -> oci-main / <app>-stable
 #
 # All stages run on [self-hosted, macmini].
 #
@@ -75,7 +83,7 @@ on:
 
       # -- CapRover ----------------------------------------------------------
       caprover_host:
-        description: 'CapRover host fallback (e.g. captain.dev.qwickforge.com)'
+        description: 'CapRover host fallback (e.g. captain.app.qwickforge.com; captain.dev.qwickforge.com is retired 2026-09-27, do not use)'
         type: string
         required: true
 
@@ -269,7 +277,20 @@ jobs:
           # exists to prevent, just for a different stage. `stable` is now
           # mapped to the same canonical oci-main host uat/live already use,
           # instead of being exempted.
-          CANONICAL_DEV_HOST="captain.dev.qwickforge.com"
+          #
+          # 2026-09-27 (t_7e71b4a8): oci-dev's CapRover was deliberately
+          # scaled to 0 and the host repurposed as gateway-2 (t_e7df7236, a
+          # free HA gateway for oci-gateway). Every dev-stage deploy started
+          # failing at CapRover login with an nginx 404. Decision (prime,
+          # final): do NOT revive oci-dev CapRover -- it would steal 80/443
+          # from gateway-2 -- and do NOT skip the dev/build stage. Repoint it
+          # to the same live oci-main CapRover uat/live/stable already use.
+          # CANONICAL_DEV_HOST is therefore now identical to
+          # CANONICAL_MAIN_HOST; kept as a separate named constant (rather
+          # than collapsing the two) so a future re-split (e.g. to a
+          # dedicated momo CapRover if oci-main capacity requires it) is a
+          # one-line change here, not a re-derivation of this whole check.
+          CANONICAL_DEV_HOST="captain.app.qwickforge.com"
           CANONICAL_MAIN_HOST="captain.app.qwickforge.com"
           normalize_host() {
             # DNS hostnames are case-insensitive; lowercase so a caller
@@ -319,8 +340,16 @@ jobs:
 
           case "$STAGE" in
             build)
-              TARGET_APP="${APP_NAME}-build"
-              TARGET_APP_URL="https://${APP_NAME}-build.dev.qwickforge.com"
+              # 2026-09-27 (t_7e71b4a8): app-name suffix renamed -build ->
+              # -dev to match the new oci-main host -- "-build" implied a
+              # dedicated build host, which no longer exists now that this
+              # slot lives on the same CapRover cluster as uat/live/stable.
+              # GATEWAY_APP_NAME was already "-dev" before this change (the
+              # qwickway route name was never "-build"), so this just aligns
+              # the CapRover app name with the route name that already
+              # existed.
+              TARGET_APP="${APP_NAME}-dev"
+              TARGET_APP_URL="https://${APP_NAME}-dev.app.qwickforge.com"
               GATEWAY_APP_NAME="${APP_NAME}-dev"
               ENV_LABEL="dev"
               PRIOR_TAG=""
@@ -446,8 +475,8 @@ jobs:
           # casing (found in adversarial review of ci-workflows#157).
           TARGET_APP_LC="$(printf '%s' "$TARGET_APP" | tr '[:upper:]' '[:lower:]')"
           case "$TARGET_APP_LC" in
-            *-uat-build|*-live-build|*-stable-build)
-              echo "ERROR: computed CapRover app name '$TARGET_APP' is a per-environment build slot, forbidden by the blue-green SOP (ci-workflows#153) -- '<app>-build' is the only legal build slot; app_name must not itself carry an environment suffix"
+            *-uat-build|*-live-build|*-stable-build|*-uat-dev|*-live-dev|*-stable-dev)
+              echo "ERROR: computed CapRover app name '$TARGET_APP' is a per-environment build slot, forbidden by the blue-green SOP (ci-workflows#153) -- '<app>-build'/'<app>-dev' is the only legal build slot; app_name must not itself carry an environment suffix"
               exit 1
               ;;
           esac
@@ -1559,13 +1588,18 @@ jobs:
 
       - name: Resolve CapRover credentials
         run: |
+          # 2026-09-27 (t_7e71b4a8): this used to hardcode
+          # OCI_DEV_CAPROVER_PASSWORD unconditionally -- harmless while the
+          # build/dev slot only ever lived on oci-dev, but wrong now that the
+          # build/dev stage's host is resolved dynamically (it moved to
+          # oci-main). Select credentials from the ACTUAL resolved host, the
+          # same dev/main glob deploy-caprover and deploy-stable already use,
+          # instead of assuming dev.
           CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
-          CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-          if [ -z "$CP_URL" ] || [ -z "$CP_PASS" ]; then
+          if [ -z "$CP_URL" ]; then
             CP_URL="${{ secrets.OCI_DEV_CAPROVER_URL }}"
-            CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
           fi
-          if [ -z "$CP_URL" ] || [ -z "$CP_PASS" ]; then
+          if [ -z "$CP_URL" ]; then
             echo "ERROR: CapRover credentials missing for dev scale operation"
             exit 1
           fi
@@ -1573,8 +1607,22 @@ jobs:
             http://*|https://*) ;;
             *) CP_URL="https://$CP_URL" ;;
           esac
+          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
+          case "$CP_URL_LOWER" in
+            *dev.qwickforge.com*)
+              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+              ;;
+            *)
+              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              ;;
+          esac
+          if [ -z "$CP_PASS" ]; then
+            echo "ERROR: CapRover credentials missing for dev scale operation"
+            exit 1
+          fi
           echo "CAPROVER_URL=$CP_URL" >> "$GITHUB_ENV"
           echo "CAPROVER_PASSWORD=$CP_PASS" >> "$GITHUB_ENV"
+          echo "::add-mask::$CP_PASS"
 
       - name: Scale build slot to zero on build pass
         run: |
