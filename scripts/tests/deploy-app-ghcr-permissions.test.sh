@@ -76,6 +76,40 @@ print(json.dumps(job.get('permissions') if job else None))
 "
 }
 
+# step_run JOB NAME_SUBSTRING -- prints the run: script of the first step
+# in JOB whose name contains NAME_SUBSTRING. A shared python helper file
+# (rather than inline python-inside-bash-c) avoids the quote-escaping mess
+# of nesting python source inside a double-quoted bash -c string.
+STEP_RUN_HELPER="$(mktemp)"
+trap 'rm -f "$STEP_RUN_HELPER"' EXIT
+cat > "$STEP_RUN_HELPER" <<'PYEOF'
+import sys, yaml
+workflow, job, needle, field = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(workflow) as f:
+    doc = yaml.safe_load(f)
+steps = doc['jobs'][job]['steps']
+matches = [s for s in steps if needle in s.get('name', '')]
+if not matches:
+    sys.exit(f"no step containing '{needle}' in job '{job}'")
+step = matches[0]
+if field == 'run':
+    print(step['run'])
+elif field.startswith('env:'):
+    print(step.get('env', {}).get(field.split(':', 1)[1], ''))
+else:
+    sys.exit(f"unknown field '{field}'")
+PYEOF
+
+step_run() {
+  local job="$1" needle="$2"
+  python3 "$STEP_RUN_HELPER" "$WORKFLOW" "$job" "$needle" run
+}
+
+step_env() {
+  local job="$1" needle="$2" var="$3"
+  python3 "$STEP_RUN_HELPER" "$WORKFLOW" "$job" "$needle" "env:$var"
+}
+
 echo "== deploy-app.yml: GHCR-consuming jobs have explicit, correctly-scoped permissions =="
 
 assert "workflow file exists" \
@@ -110,6 +144,66 @@ echo "== Jobs with neither a GHCR-login step nor an aos#193 check-run need were 
 for job in resolve-stage validate-env scale-build-slot; do
   assert "$job job: no permissions block added (keeps its actual defaults)" \
     test "$(job_permissions_json "$job")" = "null"
+done
+
+echo "== ci-workflows#204: the stale-PAT-beats-github.token expression is gone =="
+# The bug: `secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN` (and the PUSH
+# equivalent) only falls back when the secret is UNSET, never when it's
+# merely stale -- a SET but stale PAT still won. #204 replaces every one of
+# these with an actual ghcr.io probe (scripts/lib/ghcr-token-select.sh).
+# This asserts the old expression shape is gone from the file entirely, so
+# a future edit can't quietly reintroduce it.
+assert "no lingering 'secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN' expression" \
+  bash -c "! grep -qE 'secrets\.GHCR_PULL_TOKEN[[:space:]]*\|\|[[:space:]]*secrets\.GITHUB_TOKEN' '$WORKFLOW'"
+
+assert "no lingering 'secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN' expression" \
+  bash -c "! grep -qE 'secrets\.GHCR_PUSH_TOKEN[[:space:]]*\|\|[[:space:]]*secrets\.GITHUB_TOKEN' '$WORKFLOW'"
+
+assert "no lingering bare '|| secrets.GITHUB_TOKEN' fallback anywhere (any secret name)" \
+  bash -c "! grep -qE '\|\|[[:space:]]*secrets\.GITHUB_TOKEN' '$WORKFLOW'"
+
+echo "== ci-workflows#204: runner-side GHCR ops (build/verify-provenance/retag) prefer github.token =="
+# build uses github.token UNCONDITIONALLY (no PAT consulted at all, see
+# that job's own header comment for why that's safe there specifically).
+# verify-provenance/retag each call ghcr_select_token with "github.token"
+# listed as the FIRST label/token pair -- ghcr_select_token tries
+# candidates strictly in the order given, so "first" here is the actual
+# preference, not just presence.
+
+# first_ghcr_select_token_label SCRIPT -- the first quoted label argument
+# following the first "ghcr_select_token" call in a run: script.
+first_ghcr_select_token_label() {
+  awk '/ghcr_select_token/{f=1} f && /"[A-Za-z._]+"/{match($0, /"[A-Za-z._]+"/); print substr($0, RSTART+1, RLENGTH-2); exit}'
+}
+
+BUILD_LOGIN_1_TOKEN="$(step_env build "Login to GHCR" GHCR_TOKEN)"
+BUILD_LOGIN_2_TOKEN="$(step_env build "Login to GHCR for base image pull" GHCR_TOKEN)"
+assert "build job: 'Login to GHCR' step uses github.token unconditionally" \
+  test "$BUILD_LOGIN_1_TOKEN" = '${{ github.token }}'
+
+assert "build job: 'Login to GHCR for base image pull' step uses github.token unconditionally" \
+  test "$BUILD_LOGIN_2_TOKEN" = '${{ github.token }}'
+
+assert "build job: neither GHCR-login step references a legacy PAT secret at all" \
+  bash -c '! printf "%s\n%s\n" "$1" "$2" | grep -qF "secrets.GHCR_"' _ "$BUILD_LOGIN_1_TOKEN" "$BUILD_LOGIN_2_TOKEN"
+
+assert "verify-provenance: ghcr_select_token is called with github.token as the FIRST candidate" \
+  bash -c 'test "$1" = "github.token"' _ \
+    "$(step_run verify-provenance "Write GHCR credentials" | first_ghcr_select_token_label)"
+
+assert "retag: ghcr_select_token is called with github.token as the FIRST candidate" \
+  bash -c 'test "$1" = "github.token"' _ \
+    "$(step_run retag "Authenticate to GHCR for retag" | first_ghcr_select_token_label)"
+
+echo "== ci-workflows#204: CapRover-side selection prefers the PAT, falls back to github.token =="
+# deploy-caprover/deploy-stable export a token that overwrites a SHARED
+# CapRover registry entry -- the long-lived PAT is preferred there
+# (opposite order from the runner-side jobs above) precisely because it
+# outlives this one job, per this job's own header comment.
+for job in deploy-caprover deploy-stable; do
+  assert "$job: ghcr_select_token is called with GHCR_PULL_TOKEN as the FIRST candidate" \
+    bash -c 'test "$1" = "GHCR_PULL_TOKEN"' _ \
+      "$(step_run "$job" "Select GHCR pull token" | first_ghcr_select_token_label)"
 done
 
 echo ""

@@ -561,15 +561,24 @@ jobs:
     needs: [resolve-stage]
     if: ${{ needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.build_required == 'true' }}
     runs-on: [self-hosted, macmini]
-    # ci-workflows#137: this job's two GHCR-login steps fall back to
-    # secrets.GITHUB_TOKEN when GHCR_PUSH_TOKEN/GHCR_PULL_TOKEN are unset or
-    # stale. Without an explicit permissions block, GITHUB_TOKEN gets the
-    # org/repo default, which does not include package access on this org --
-    # the fallback was silent dead code, and this exact gap (#136 not being
-    # sufficient on its own) blocked qwickapps/forge#251/#253/#250 from
-    # deploying for 8+ hours. contents: read matches actions/checkout's
-    # existing implicit default (additive, not restrictive); packages: write
-    # covers both the pull-only login and the later push.
+    # ci-workflows#137: without an explicit permissions block, GITHUB_TOKEN
+    # gets the org/repo default, which does not include package access on
+    # this org -- that exact gap (#136 not being sufficient on its own)
+    # blocked qwickapps/forge#251/#253/#250 from deploying for 8+ hours.
+    # contents: read matches actions/checkout's existing implicit default
+    # (additive, not restrictive); packages: write covers both the
+    # pull-only login and the later push.
+    #
+    # ci-workflows#204: both GHCR-login steps below use github.token
+    # UNCONDITIONALLY -- no legacy-PAT fallback, and no ghcr.io probe. This
+    # is deliberately simpler than verify-provenance/retag/deploy-caprover:
+    # this job pushes a BRAND-NEW tag into a package this SAME repo owns
+    # (packages: write above already grants that), and its base-image pull
+    # targets the same package family. There is no real scenario where the
+    # calling repo's own ephemeral github.token can't reach it, so a legacy
+    # PAT (GHCR_PUSH_TOKEN/GHCR_PULL_TOKEN) is never even consulted here --
+    # a stale org-wide PAT literally cannot win over github.token in this
+    # job, because nothing here reads it.
     permissions:
       contents: read
       packages: write
@@ -609,14 +618,14 @@ jobs:
 
       - name: Login to GHCR
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           DOCKER_CONFIG="${RUNNER_TEMP}/.docker-persistent"
           mkdir -p "$DOCKER_CONFIG"
           AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$DOCKER_CONFIG/config.json"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          echo "GHCR credentials wrote to $DOCKER_CONFIG/config.json"
+          echo "GHCR credentials wrote to $DOCKER_CONFIG/config.json (source: github.token)"
 
       - name: Clean up stale buildx builders
         run: |
@@ -628,7 +637,7 @@ jobs:
           _cli="${DOCKER_CLI:-docker}"
           echo "$GHCR_TOKEN" | "$_cli" login ghcr.io -u "${{ github.actor }}" --password-stdin
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           DOCKER_CLI: ${{ env.DOCKER_CLI }}
           DOCKER_CONFIG: ${{ runner.temp }}/.docker-persistent
 
@@ -656,16 +665,63 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
-    # ci-workflows#137: same GITHUB_TOKEN-fallback gap as the build job, but
-    # this job never checks out the repo (no actions/checkout step) and only
-    # pulls/inspects images -- packages: read is enough, no contents: read.
+    # ci-workflows#137: same permissions-gap reasoning as the build job, but
+    # this job only pulls/inspects images -- packages: read is enough, no
+    # contents: read. The "Checkout ci-workflows scripts" step below fetches
+    # ci-workflows' OWN public repo via a `repository:` override (same
+    # pattern validate-env/deploy-caprover/deploy-stable/scale-build-slot
+    # already use with no permissions block at all), not this workflow's
+    # calling repo -- it does not need contents: read on the caller.
     permissions:
       packages: read
     steps:
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
       - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN_EPHEMERAL: ${{ github.token }}
+          GHCR_TOKEN_LEGACY: ${{ secrets.GHCR_PULL_TOKEN }}
         run: |
+          # ci-workflows#204: prefer this job's own ephemeral github.token
+          # over the legacy GHCR_PULL_TOKEN PAT. The old
+          # secrets.GHCR_PULL_TOKEN-falls-back-to-secrets.GITHUB_TOKEN
+          # expression only fell back when the PAT was UNSET, never when it
+          # was merely stale -- a SET but stale PAT still won and 403'd here
+          # even though github.token could pull the image fine (live
+          # example: qwickapps/secrets run 36272536825).
+          # ghcr_select_token probes each candidate, IN THE ORDER GIVEN,
+          # against ghcr.io itself (token endpoint + manifest fetch) and
+          # returns the first label that actually works -- it never
+          # echoes either token value, only which SOURCE was chosen.
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
+          SOURCE=""
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "github.token" "$GHCR_TOKEN_EPHEMERAL" \
+              "GHCR_PULL_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
+            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            exit 1
+          fi
+          echo "GHCR pull token source: $SOURCE"
+          case "$SOURCE" in
+            "github.token") GHCR_TOKEN="$GHCR_TOKEN_EPHEMERAL" ;;
+            "GHCR_PULL_TOKEN") GHCR_TOKEN="$GHCR_TOKEN_LEGACY" ;;
+          esac
+
           # runner.temp isn't usable in a job-level env: block (GitHub rejects
           # the whole reusable workflow at load time), so DOCKER_CONFIG is
           # computed here and exported via GITHUB_ENV instead -- same pattern
@@ -840,9 +896,51 @@ jobs:
           {
             echo "CAPROVER_URL=$CP_URL"
             echo "CAPROVER_PASSWORD=$CP_PASS"
-            echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}"
           } >> "$GITHUB_ENV"
           echo "::add-mask::$CP_PASS"
+
+      - name: Select GHCR pull token for CapRover deploy (ci-workflows#204)
+        env:
+          GH_TOKEN_LEGACY_PAT: ${{ secrets.GHCR_PULL_TOKEN }}
+          GH_TOKEN_EPHEMERAL: ${{ github.token }}
+        run: |
+          # ci-workflows#204: deploy-from-ghcr.sh (the CALLER's own script,
+          # not ci-workflows') takes whatever token this step exports as
+          # GHCR_PULL_TOKEN and OVERWRITES CapRover's SHARED ghcr.io
+          # registry entry with it -- every app on that CapRover cluster
+          # pulls through that one registry credential afterward. Unlike
+          # the runner-side jobs above (build/verify-provenance/retag),
+          # here the long-lived, org-wide PAT is preferred WHEN it actually
+          # works: it stays valid on CapRover long after this job ends,
+          # whereas github.token is only valid for this job's own
+          # lifetime, so writing github.token into the shared registry slot
+          # would just relocate the staleness problem, not fix it.
+          # github.token is only the fallback, and a token that failed
+          # validation is never exported -- so a stale PAT can no longer
+          # poison every app on the shared CapRover the way it did before
+          # #204 (live example: qwickapps/secrets run 36272536825).
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
+          SOURCE=""
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
+              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            exit 1
+          fi
+          echo "GHCR pull token source for CapRover: $SOURCE"
+          case "$SOURCE" in
+            "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
+            "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
+          esac
+          echo "GHCR_PULL_TOKEN=$CHOSEN_TOKEN" >> "$GITHUB_ENV"
+          echo "::add-mask::$CHOSEN_TOKEN"
 
       - name: Make scripts executable
         run: |
@@ -1255,6 +1353,22 @@ jobs:
             exit 1
           fi
 
+          # ci-workflows#204: this step deliberately stays on the PAT --
+          # setup-qwickway-route.sh refreshes registry credentials against
+          # the qwickway GATEWAY package, a DIFFERENT package than the one
+          # this job's own github.token was scoped to pull, so github.token
+          # may not reach it at all. Only a warning (never a failure) if
+          # the PAT itself can't even authenticate to ghcr.io's token
+          # endpoint -- an auth-only check, since no specific package is
+          # known here to run the full pull probe against -- because this
+          # step only refreshes registry credentials; a real pull failure
+          # downstream will surface its own clear error.
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          if ! ghcr_probe_auth_only "${{ github.actor }}" "$GHCR_PULL" "${{ env.OWNER }}"; then
+            echo "::warning::qwickway route update: GHCR_PULL_TOKEN failed ghcr.io's token-endpoint auth check (auth only, no specific package verified) -- setup-qwickway-route.sh may fail to refresh registry credentials if this PAT is genuinely invalid"
+          fi
+
           TARGET_URL="${{ needs.resolve-stage.outputs.target_app_url }}"
           if [ -n "${{ inputs.gateway_live_url }}" ]; then
             TARGET_URL="${{ inputs.gateway_live_url }}"
@@ -1355,16 +1469,61 @@ jobs:
       needs.resolve-stage.outputs.stage != 'stable' &&
       needs.resolve-stage.outputs.next_tag != ''
     runs-on: [self-hosted, macmini]
-    # ci-workflows#137: same GITHUB_TOKEN-fallback gap as the build job. This
-    # job never checks out the repo, and `imagetools create` writes a new
-    # manifest tag, so it needs packages: write (read alone isn't enough).
+    # ci-workflows#137: same permissions-gap reasoning as the build job.
+    # `imagetools create` writes a new manifest tag, so it needs packages:
+    # write (read alone isn't enough). The "Checkout ci-workflows scripts"
+    # step below fetches ci-workflows' OWN public repo via a `repository:`
+    # override (same pattern validate-env/deploy-caprover/deploy-stable/
+    # scale-build-slot already use with no permissions block at all), not
+    # this workflow's calling repo -- it does not need contents: read on
+    # the caller.
     permissions:
       packages: write
     steps:
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
       - name: Authenticate to GHCR for retag (direct config write — no docker login/keychain)
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN_EPHEMERAL: ${{ github.token }}
+          GHCR_TOKEN_LEGACY: ${{ secrets.GHCR_PUSH_TOKEN }}
         run: |
+          # ci-workflows#204: same ephemeral-github.token-first selection
+          # verify-provenance uses (see that job's comment for the full
+          # rationale) -- a set-but-stale GHCR_PUSH_TOKEN must never win
+          # over a github.token that can actually reach this image. The
+          # probe here only proves PULL access (ghcr_select_token's
+          # contract, see scripts/lib/ghcr-token-select.sh); this job's
+          # own packages: write permission is what actually authorizes the
+          # push `imagetools create` performs below.
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          SOURCE_IMAGE="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$SOURCE_IMAGE")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
+          SOURCE=""
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "github.token" "$GHCR_TOKEN_EPHEMERAL" \
+              "GHCR_PUSH_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
+            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            exit 1
+          fi
+          echo "GHCR token source: $SOURCE"
+          case "$SOURCE" in
+            "github.token") GHCR_TOKEN="$GHCR_TOKEN_EPHEMERAL" ;;
+            "GHCR_PUSH_TOKEN") GHCR_TOKEN="$GHCR_TOKEN_LEGACY" ;;
+          esac
+
           DOCKER_CONFIG="${RUNNER_TEMP}/docker-retag-${{ github.run_id }}"
           mkdir -p "$DOCKER_CONFIG"
           AUTH="$(printf '%s:%s' '${{ github.actor }}' "$GHCR_TOKEN" | base64 | tr -d '\n')"
@@ -1688,9 +1847,43 @@ jobs:
           {
             echo "CAPROVER_URL=$CP_URL"
             echo "CAPROVER_PASSWORD=$CP_PASS"
-            echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}"
           } >> "$GITHUB_ENV"
           echo "::add-mask::$CP_PASS"
+
+      - name: Select GHCR pull token for CapRover deploy (ci-workflows#204)
+        env:
+          GH_TOKEN_LEGACY_PAT: ${{ secrets.GHCR_PULL_TOKEN }}
+          GH_TOKEN_EPHEMERAL: ${{ github.token }}
+        run: |
+          # ci-workflows#204: same reasoning as deploy-caprover's identical
+          # step -- deploy-from-ghcr.sh overwrites CapRover's SHARED
+          # ghcr.io registry entry with whatever this exports, so the
+          # long-lived, org-wide PAT is preferred WHEN it actually works
+          # (it outlives this job; github.token doesn't). github.token is
+          # only the fallback, and a token that failed validation is never
+          # exported.
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
+          SOURCE=""
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
+              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            exit 1
+          fi
+          echo "GHCR pull token source for CapRover: $SOURCE"
+          case "$SOURCE" in
+            "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
+            "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
+          esac
+          echo "GHCR_PULL_TOKEN=$CHOSEN_TOKEN" >> "$GITHUB_ENV"
+          echo "::add-mask::$CHOSEN_TOKEN"
 
       - name: Make scripts executable
         run: |
