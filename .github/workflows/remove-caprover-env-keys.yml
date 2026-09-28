@@ -1,0 +1,188 @@
+# Surgical env-key removal for a live CapRover app.
+#
+# configure-caprover-app.sh (the normal deploy path) only MERGES canonical
+# vars in and never deletes stray/unlisted keys, by design (anti-wipe
+# guarantee). That leaves genuinely dead env var references (e.g. a
+# decommissioned provider's URL/token) stuck in CapRover forever with no
+# pipeline mechanism to clean them up. This workflow is that mechanism:
+# dry-run by default, health-checked apply, and automatic rollback (re-add
+# via merge) if the post-apply health check fails.
+#
+# blue-green-exempt: operational config cleanup workflow — does not deploy images.
+
+name: Remove CapRover Env Keys (Reusable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'CapRover app name (e.g. faabzi-uat)'
+        type: string
+        required: true
+      keys:
+        description: 'Comma-separated env var keys to remove (e.g. UPSTASH_REDIS_REST_URL,UPSTASH_REDIS_REST_TOKEN)'
+        type: string
+        required: true
+      health_url:
+        description: 'Full URL to check after apply (must return 200)'
+        type: string
+        required: true
+      confirm_apply:
+        description: 'Set to true to apply the removal. false = dry-run only.'
+        type: boolean
+        required: true
+        default: false
+
+jobs:
+  remove-env-keys:
+    name: Remove Env Keys (${{ inputs.app_name }})
+    runs-on: [self-hosted, macmini]
+    concurrency:
+      group: caprover-env-${{ inputs.app_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Validate inputs
+        run: |
+          if [[ -z "${{ inputs.app_name }}" ]]; then
+            echo "::error::app_name is required"
+            exit 1
+          fi
+          if [[ -z "${{ inputs.keys }}" ]]; then
+            echo "::error::keys is required"
+            exit 1
+          fi
+          case "${{ inputs.health_url }}" in
+            http://*|https://*) ;;
+            *)
+              echo "::error::health_url must be an absolute http(s) URL"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh scripts/lib/*.sh
+
+      - name: Resolve CapRover credentials
+        run: |
+          CAPROVER_URL="${{ secrets.OCI_MAIN_CAPROVER_URL }}"
+          CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+          if [[ -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+            echo "::error::OCI_MAIN_CAPROVER_URL and OCI_MAIN_CAPROVER_PASSWORD are required"
+            exit 1
+          fi
+          echo "::add-mask::$CAPROVER_PASSWORD"
+          {
+            echo "CAPROVER_URL=$CAPROVER_URL"
+            echo "CAPROVER_PASSWORD=$CAPROVER_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Snapshot current values of target keys (for rollback)
+        run: |
+          APP="${{ inputs.app_name }}"
+          KEYS="${{ inputs.keys }}"
+
+          token_resp=$(curl -s -k -X POST "${CAPROVER_URL}/api/v2/login" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg p "$CAPROVER_PASSWORD" '{password:$p}')")
+          TOKEN=$(echo "$token_resp" | jq -r '.data.token')
+          if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
+            echo "::error::CapRover login failed"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+
+          defs=$(curl -s -k -X GET "${CAPROVER_URL}/api/v2/user/apps/appDefinitions" \
+            -H "x-captain-auth: ${TOKEN}")
+          def=$(echo "$defs" | jq --arg name "$APP" '.data.appDefinitions[] | select(.appName == $name)')
+          if [[ -z "$def" || "$def" == "null" ]]; then
+            echo "::error::app ${APP} not found on CapRover"
+            exit 1
+          fi
+
+          : > rollback.env
+          IFS=',' read -ra KEY_ARR <<< "$KEYS"
+          for key in "${KEY_ARR[@]}"; do
+            value=$(echo "$def" | jq -r --arg k "$key" '(.envVars // [])[] | select(.key == $k) | .value // empty')
+            if [[ -n "$value" ]]; then
+              echo "::add-mask::$value"
+              printf '%s=%s\n' "$key" "$value" >> rollback.env
+            fi
+          done
+          echo "Captured $(grep -c '.' rollback.env || true) key(s) for potential rollback."
+
+      - name: Dry-run (always shown)
+        run: |
+          ./scripts/caprover-remove-env-keys.sh \
+            --app-name "${{ inputs.app_name }}" \
+            --keys "${{ inputs.keys }}" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --dry-run true
+
+      - name: Gate on confirm
+        run: |
+          if [[ "${{ inputs.confirm_apply }}" != "true" ]]; then
+            echo "Dry-run complete — no changes applied. Re-run with confirm_apply=true to apply."
+            exit 0
+          fi
+          echo "confirm_apply=true — proceeding with removal."
+
+      - name: Apply removal
+        if: inputs.confirm_apply == true
+        run: |
+          ./scripts/caprover-remove-env-keys.sh \
+            --app-name "${{ inputs.app_name }}" \
+            --keys "${{ inputs.keys }}" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --dry-run false
+
+      - name: Health check after apply
+        if: inputs.confirm_apply == true
+        id: health
+        run: |
+          URL="${{ inputs.health_url }}"
+          ATTEMPT=1
+          MAX=10
+          until code=$(curl -s -k -o /dev/null -w '%{http_code}' --max-time 15 "$URL"); [[ "$code" == "200" ]]; do
+            echo "  attempt ${ATTEMPT}/${MAX}: ${URL} -> ${code:-timeout}"
+            if [[ "$ATTEMPT" -ge "$MAX" ]]; then
+              echo "::error::${URL} did not return 200 after ${MAX} attempts (last: ${code:-timeout})"
+              exit 1
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 10
+          done
+          echo "Health check passed: ${URL} -> 200"
+
+      - name: Rollback on health check failure
+        if: inputs.confirm_apply == true && failure() && steps.health.conclusion == 'failure'
+        run: |
+          if [[ ! -s rollback.env ]]; then
+            echo "::error::No rollback data captured — restore ${{ inputs.app_name }} manually."
+            exit 1
+          fi
+          echo "Health check failed — restoring removed keys on ${{ inputs.app_name }}..."
+          ./scripts/configure-caprover-app.sh \
+            --app-name "${{ inputs.app_name }}" \
+            --caprover-url "$CAPROVER_URL" \
+            --caprover-password "$CAPROVER_PASSWORD" \
+            --env-file rollback.env
+          echo "Rollback complete — removed keys restored."
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Remove CapRover Env Keys: ${{ inputs.app_name }}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| App | \`${{ inputs.app_name }}\` |"
+            echo "| Keys | \`${{ inputs.keys }}\` |"
+            echo "| Confirm Apply | \`${{ inputs.confirm_apply }}\` |"
+            echo "| Health URL | \`${{ inputs.health_url }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
