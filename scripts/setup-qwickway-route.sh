@@ -4,6 +4,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/resolve-ts-env-vars.sh
 source "$SCRIPT_DIR/lib/resolve-ts-env-vars.sh"
+# shellcheck source=lib/ghcr-token-select.sh
+source "$SCRIPT_DIR/lib/ghcr-token-select.sh"
 
 # Setup QwickWay Route Script
 # Provisions a QwickWay gateway app on a CapRover instance (route.qwickforge.com).
@@ -51,11 +53,29 @@ source "$SCRIPT_DIR/lib/resolve-ts-env-vars.sh"
 
 # Retry wrapper for CapRover API calls
 # Usage: caprover_api_call <description> <curl_command...>
+#
+# Retries on two distinct classes of transient response:
+#   - "busy" (CapRover already has an operation in progress for this app)
+#   - status 1112 ("authentication failed") -- CapRover's DockerRegistryHelper
+#     reports a transient `docker daemon -> ghcr.io` network timeout under the
+#     SAME status code as a genuine bad credential (observed live: fm run
+#     36567567640, oci-gateway captain log showed `Get "https://ghcr.io/v2/":
+#     context deadline exceeded` for a registries/update call that CapRover
+#     surfaced to the caller as 1112). Retrying 1112 here does not mask a real
+#     auth failure: a real bad credential also returns 1112 every time, so it
+#     still fails after max_retries -- callers must additionally probe the
+#     credential directly against ghcr.io (see ghcr_probe_auth_only in
+#     lib/ghcr-token-select.sh) before reporting the failure as an auth
+#     problem specifically. On exhaustion, the last response is still printed
+#     to stdout (not just stderr) so callers can inspect its status/description.
 caprover_api_call() {
   local description="$1"
   shift
-  local max_retries=5
-  local retry_delay=10
+  # Overridable via env for tests (mirrors scripts/lib/caprover-api.sh's
+  # CAPROVER_API_MAX_RETRIES/CAPROVER_API_INITIAL_RETRY_DELAY convention) so a
+  # retry-exhaustion test doesn't have to sleep through the real backoff.
+  local max_retries="${CAPROVER_API_MAX_RETRIES:-5}"
+  local retry_delay="${CAPROVER_API_INITIAL_RETRY_DELAY:-10}"
   local attempt=1
 
   while [ $attempt -le $max_retries ]; do
@@ -65,10 +85,20 @@ caprover_api_call() {
     local response
     response=$("$@")
 
-    # Check if CapRover is busy
+    local retry_reason=""
     if echo "$response" | grep -iq "another operation.*in progress\|operation.*still in progress\|please wait"; then
+      retry_reason="busy"
+    elif echo "$response" | jq -e '(.status // empty) == 1112' >/dev/null 2>&1; then
+      retry_reason="1112"
+    fi
+
+    if [ -n "$retry_reason" ]; then
       if [ $attempt -lt $max_retries ]; then
-        echo "  CapRover is busy with another operation" >&2
+        if [ "$retry_reason" = "busy" ]; then
+          echo "  CapRover is busy with another operation" >&2
+        else
+          echo "  CapRover returned status 1112 (authentication failed) -- this can be a transient upstream registry timeout misreported as an auth failure; retrying" >&2
+        fi
         echo "  Waiting ${retry_delay}s before retry..." >&2
         sleep $retry_delay
 
@@ -81,8 +111,13 @@ caprover_api_call() {
         attempt=$((attempt + 1))
         continue
       else
-        echo "  CapRover still busy after $max_retries attempts" >&2
+        if [ "$retry_reason" = "busy" ]; then
+          echo "  CapRover still busy after $max_retries attempts" >&2
+        else
+          echo "  CapRover still returning 1112 after $max_retries attempts" >&2
+        fi
         echo "  Response: $response" >&2
+        echo "$response"
         return 1
       fi
     fi
@@ -169,6 +204,13 @@ TS_HOSTNAME=""
 TS_TAGS=""
 TS_API_KEY=""
 TS_EPHEMERAL_AUTHKEY=""
+# Single source of truth for the GHCR registry username (ci-workflows: username
+# hygiene). Used for both the update and insert registry payloads below, and
+# for the ghcr_probe_auth_only call that validates this exact credential pair
+# on a registry-refresh failure -- the validated pair must equal the stored
+# pair. Callers may override with --registry-user; ghcr.io accepts a classic
+# PAT under any username, so x-access-token is just the conventional default.
+REGISTRY_USER="x-access-token"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -222,6 +264,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ts-ephemeral-authkey)
       TS_EPHEMERAL_AUTHKEY="$2"
+      shift 2
+      ;;
+    --registry-user)
+      REGISTRY_USER="$2"
       shift 2
       ;;
     *)
@@ -363,99 +409,18 @@ else
   exit 1
 fi
 
-# Step 5a: Enable SSL on base domain before the single app-definition update.
-echo ""
-echo "Enabling SSL on gateway base domain..."
-SSL_BASE_RESPONSE=$(caprover_api_call "Enable base domain SSL" \
-  curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/enablebasedomainssl" \
-  -H "Content-Type: application/json" \
-  -H "x-captain-auth: $TOKEN" \
-  -d "$(jq -n --arg app "$GATEWAY_APP_NAME" '{appName: $app}')")
-
-SSL_BASE_STATUS=$(echo "$SSL_BASE_RESPONSE" | jq -r '.status')
-SSL_BASE_DESC=$(echo "$SSL_BASE_RESPONSE" | jq -r '.description // ""')
-if [ "$SSL_BASE_STATUS" = "100" ]; then
-  echo "  SSL enabled on base domain"
-elif echo "$SSL_BASE_DESC" | grep -iq "already\|enabled"; then
-  echo "  SSL already enabled on base domain"
-else
-  echo "  Warning: SSL enable response: $SSL_BASE_DESC (status: $SSL_BASE_STATUS)"
-fi
-
-# Re-fetch after SSL changes so the final update starts from the freshest app definition.
-ALL_DEFS_UPDATED=$(curl -s -k -X GET "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions" \
-  -H "x-captain-auth: $TOKEN")
-CURRENT_DEF_UPDATED=$(echo "$ALL_DEFS_UPDATED" | jq --arg name "$GATEWAY_APP_NAME" '.data.appDefinitions[] | select(.appName == $name)')
-if [ -z "$CURRENT_DEF_UPDATED" ] || [ "$CURRENT_DEF_UPDATED" = "null" ]; then
-  CURRENT_DEF_UPDATED="$CURRENT_DEF"
-fi
-
-# Step 5b: Set env vars, container port, force HTTPS, and websocket support in
-# one app-definition update. Multiple sequential app-definition writes each
-# restart the ephemeral Tailscale gateway container; that creates runaway
-# qwickapps-foo, qwickapps-foo-1, ... registrations while Tailscale catches up.
-# TARGET_APP uses the external URL because the route and app servers are on
-# separate Docker swarms and cannot communicate via internal hostnames.
-echo ""
-echo "Configuring gateway app definition atomically..."
-
-# Read existing Tailscale vars from the current app definition so they survive
-# deploys that do not pass --ts-* flags, and resolve the effective value for
-# each (explicit --ts-* flag wins, otherwise fall back to the existing value,
-# otherwise empty/not-set). Without this, a full envVars replace would wipe
-# TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS, and TS_API_KEY every
-# time the gateway is provisioned, knocking the app off the Tailscale network
-# (TS_API_KEY specifically breaks the gateway's Tailscale cleanup logic, since
-# that logic no-ops without it).
-# (Fixes qwickapps/ci-workflows#22 and qwickapps/ci-workflows#131; resolution
-# logic extracted to scripts/lib/resolve-ts-env-vars.sh and covered by
-# scripts/tests/resolve-ts-env-vars.test.sh — qwickapps/ci-workflows#133.)
-ENV_VARS=$(jq -n \
-  --arg targetApp "$TARGET_APP_URL" \
-  --arg healthPath "$HEALTH_CHECK_PATH" \
-  '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
-
-ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF_UPDATED" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY" "$TS_EPHEMERAL_AUTHKEY")
-EFFECTIVE_TS_HOSTNAME=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_HOSTNAME") | .value // ""' | head -1)
-EFFECTIVE_TS_API_KEY=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_API_KEY") | .value // ""' | head -1)
-
-MERGED=$(echo "$CURRENT_DEF_UPDATED" | jq \
-  --argjson envVars "$ENV_VARS" \
-  --argjson port 80 \
-  '.envVars = $envVars | .containerHttpPort = $port | .instanceCount = 1 | .forceSsl = true | .websocketSupport = true')
-
-echo "  TARGET_APP=$TARGET_APP_URL"
-echo "  HEALTH_CHECK_PATH=$HEALTH_CHECK_PATH"
-echo "  Container port: 80"
-echo "  Tailscale hostname: ${EFFECTIVE_TS_HOSTNAME:-<unset>}"
-
-CURRENT_NORMALIZED=$(echo "$CURRENT_DEF_UPDATED" | jq -S '.envVars = ((.envVars // []) | sort_by(.key))')
-MERGED_NORMALIZED=$(echo "$MERGED" | jq -S '.envVars = ((.envVars // []) | sort_by(.key))')
-if [ "$CURRENT_NORMALIZED" = "$MERGED_NORMALIZED" ]; then
-  echo "  App definition already matches desired state; skipping restart-inducing update"
-else
-  tailscale_reap_hostname_family "$EFFECTIVE_TS_API_KEY" "${EFFECTIVE_TS_HOSTNAME:-$GATEWAY_APP_NAME}" "${TS_TAILNET:-${TAILSCALE_TAILNET:--}}"
-
-  UPDATE_RESPONSE=$(caprover_api_call "Update app definition (env + SSL + websocket)" \
-    curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/update" \
-    -H "Content-Type: application/json" \
-    -H "x-captain-auth: $TOKEN" \
-    -d "$MERGED")
-
-  UPDATE_STATUS=$(echo "$UPDATE_RESPONSE" | jq -r '.status')
-
-  if [ "$UPDATE_STATUS" = "100" ] || [ "$UPDATE_STATUS" = "1000" ]; then
-    echo "  Gateway app definition updated"
-  else
-    echo "  Warning: Update response: $(echo "$UPDATE_RESPONSE" | jq -r '.description')"
-  fi
-fi
-
-# Step 6: Refresh GHCR registry credentials on the route CapRover instance.
+# Step 5: Refresh GHCR registry credentials on the route CapRover instance.
+#
+# Moved to run BEFORE the app-definition update that writes TARGET_APP
+# (formerly Step 5b, now Step 8): a registry-refresh failure must leave the
+# route untouched instead of mutating production first and only then
+# reporting red (live incident: fm run 36567567640 flipped qwickfm-api's
+# TARGET_APP to the blue slot the run deployed even though the run itself
+# failed at this step).
 #
 # Why this is non-trivial: CapRover refuses to delete a registry entry that is
 # currently set as the default push registry (returns status 1110 "Cannot
-# remove the default push. First change the default push."). If we naively
+# remove the default push. First change the default push.") If we naively
 # delete-then-insert, the delete silently fails, then insert appends a NEW
 # entry on top of the stale one, leaving multiple ghcr.io entries with
 # diverging credentials. The subsequent image-deploy call ends up using the
@@ -536,30 +501,38 @@ if [ -n "$PROTECTED_ID" ]; then
   echo "  Updating default-push ghcr.io entry $PROTECTED_ID with fresh credentials"
   UPDATE_REGISTRY_PAYLOAD=$(jq -n \
     --arg id "$PROTECTED_ID" \
-    --arg user "x-access-token" \
+    --arg user "$REGISTRY_USER" \
     --arg pass "$GITHUB_TOKEN" \
     --arg domain "ghcr.io" \
     '{id: $id, registryUser: $user, registryPassword: $pass, registryDomain: $domain, registryImagePrefix: ""}')
 
+  # caprover_api_call returns non-zero once it exhausts retries; run it with
+  # errexit suspended so a persistent failure falls through to the
+  # status/probe handling below instead of killing the script mid-retry
+  # (set -e would otherwise abort on the failing command substitution here).
+  set +e
   REGISTRY_RESPONSE=$(caprover_api_call "Update GHCR registry (default push)" \
     curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/registries/update" \
     -H "Content-Type: application/json" \
     -H "x-captain-auth: $TOKEN" \
     -d "$UPDATE_REGISTRY_PAYLOAD")
+  set -e
 else
   # No default-push ghcr.io entry — insert a fresh one.
   echo "  Inserting fresh ghcr.io credentials"
   INSERT_PAYLOAD=$(jq -n \
-    --arg user "x-access-token" \
+    --arg user "$REGISTRY_USER" \
     --arg pass "$GITHUB_TOKEN" \
     --arg domain "ghcr.io" \
     '{registryUser: $user, registryPassword: $pass, registryDomain: $domain, registryImagePrefix: ""}')
 
+  set +e
   REGISTRY_RESPONSE=$(caprover_api_call "Insert GHCR registry" \
     curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/registries/insert" \
     -H "Content-Type: application/json" \
     -H "x-captain-auth: $TOKEN" \
     -d "$INSERT_PAYLOAD")
+  set -e
 fi
 
 if ! echo "$REGISTRY_RESPONSE" | jq -e . >/dev/null 2>&1; then
@@ -572,6 +545,20 @@ REGISTRY_STATUS=$(echo "$REGISTRY_RESPONSE" | jq -r '.status')
 if [ "$REGISTRY_STATUS" != "100" ]; then
   REGISTRY_DESC=$(echo "$REGISTRY_RESPONSE" | jq -r '.description // "Unknown error"')
   echo "  Error: Failed to refresh registry credentials: $REGISTRY_DESC (status: $REGISTRY_STATUS)"
+  # CapRover status 1112 is "authentication failed", but its
+  # DockerRegistryHelper reports a transient docker-daemon-to-ghcr.io network
+  # timeout under the SAME code (live incident: fm run 36567567640). Probe
+  # the exact same credential pair directly against ghcr.io's token endpoint
+  # (never logging the token value) so the failure is reported accurately
+  # instead of always being blamed on the credential.
+  if [ "$REGISTRY_STATUS" = "1112" ]; then
+    echo "  Probing ghcr.io directly with the same credential pair (actor: $REGISTRY_USER)..."
+    if ghcr_probe_auth_only "$REGISTRY_USER" "$GITHUB_TOKEN" "$GITHUB_OWNER"; then
+      echo "  Error: registry reachability from CapRover host -- the same credential pair authenticates directly against ghcr.io, so this is NOT an auth failure. CapRover's oci-gateway host could not reach ghcr.io in time (a transient network/DNS issue on that host, not a bad token)."
+    else
+      echo "  Error: the credential pair also failed a direct ghcr.io auth probe -- this does look like a genuine authentication failure, not a reachability timeout."
+    fi
+  fi
   exit 1
 fi
 
@@ -640,7 +627,98 @@ else
   fi
 fi
 
-# Step 7: Configure custom domain and SSL (only for new apps)
+# Step 7: Enable SSL on base domain before the single app-definition update.
+echo ""
+echo "Enabling SSL on gateway base domain..."
+SSL_BASE_RESPONSE=$(caprover_api_call "Enable base domain SSL" \
+  curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/enablebasedomainssl" \
+  -H "Content-Type: application/json" \
+  -H "x-captain-auth: $TOKEN" \
+  -d "$(jq -n --arg app "$GATEWAY_APP_NAME" '{appName: $app}')")
+
+SSL_BASE_STATUS=$(echo "$SSL_BASE_RESPONSE" | jq -r '.status')
+SSL_BASE_DESC=$(echo "$SSL_BASE_RESPONSE" | jq -r '.description // ""')
+if [ "$SSL_BASE_STATUS" = "100" ]; then
+  echo "  SSL enabled on base domain"
+elif echo "$SSL_BASE_DESC" | grep -iq "already\|enabled"; then
+  echo "  SSL already enabled on base domain"
+else
+  echo "  Warning: SSL enable response: $SSL_BASE_DESC (status: $SSL_BASE_STATUS)"
+fi
+
+# Re-fetch after SSL changes so the final update starts from the freshest app definition.
+ALL_DEFS_UPDATED=$(curl -s -k -X GET "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions" \
+  -H "x-captain-auth: $TOKEN")
+CURRENT_DEF_UPDATED=$(echo "$ALL_DEFS_UPDATED" | jq --arg name "$GATEWAY_APP_NAME" '.data.appDefinitions[] | select(.appName == $name)')
+if [ -z "$CURRENT_DEF_UPDATED" ] || [ "$CURRENT_DEF_UPDATED" = "null" ]; then
+  CURRENT_DEF_UPDATED="$CURRENT_DEF"
+fi
+
+# Step 8: Set env vars, container port, force HTTPS, and websocket support in
+# one app-definition update. Multiple sequential app-definition writes each
+# restart the ephemeral Tailscale gateway container; that creates runaway
+# qwickapps-foo, qwickapps-foo-1, ... registrations while Tailscale catches up.
+# TARGET_APP uses the external URL because the route and app servers are on
+# separate Docker swarms and cannot communicate via internal hostnames.
+#
+# This step runs AFTER the GHCR registry refresh and image deploy (Steps 5-6)
+# so a registry failure never reaches this point and never flips TARGET_APP.
+echo ""
+echo "Configuring gateway app definition atomically..."
+
+# Read existing Tailscale vars from the current app definition so they survive
+# deploys that do not pass --ts-* flags, and resolve the effective value for
+# each (explicit --ts-* flag wins, otherwise fall back to the existing value,
+# otherwise empty/not-set). Without this, a full envVars replace would wipe
+# TS_AUTHKEY, TS_EPHEMERAL_AUTHKEY, TS_HOSTNAME, TS_TAGS, and TS_API_KEY every
+# time the gateway is provisioned, knocking the app off the Tailscale network
+# (TS_API_KEY specifically breaks the gateway's Tailscale cleanup logic, since
+# that logic no-ops without it).
+# (Fixes qwickapps/ci-workflows#22 and qwickapps/ci-workflows#131; resolution
+# logic extracted to scripts/lib/resolve-ts-env-vars.sh and covered by
+# scripts/tests/resolve-ts-env-vars.test.sh — qwickapps/ci-workflows#133.)
+ENV_VARS=$(jq -n \
+  --arg targetApp "$TARGET_APP_URL" \
+  --arg healthPath "$HEALTH_CHECK_PATH" \
+  '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
+
+ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF_UPDATED" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY" "$TS_EPHEMERAL_AUTHKEY")
+EFFECTIVE_TS_HOSTNAME=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_HOSTNAME") | .value // ""' | head -1)
+EFFECTIVE_TS_API_KEY=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_API_KEY") | .value // ""' | head -1)
+
+MERGED=$(echo "$CURRENT_DEF_UPDATED" | jq \
+  --argjson envVars "$ENV_VARS" \
+  --argjson port 80 \
+  '.envVars = $envVars | .containerHttpPort = $port | .instanceCount = 1 | .forceSsl = true | .websocketSupport = true')
+
+echo "  TARGET_APP=$TARGET_APP_URL"
+echo "  HEALTH_CHECK_PATH=$HEALTH_CHECK_PATH"
+echo "  Container port: 80"
+echo "  Tailscale hostname: ${EFFECTIVE_TS_HOSTNAME:-<unset>}"
+
+CURRENT_NORMALIZED=$(echo "$CURRENT_DEF_UPDATED" | jq -S '.envVars = ((.envVars // []) | sort_by(.key))')
+MERGED_NORMALIZED=$(echo "$MERGED" | jq -S '.envVars = ((.envVars // []) | sort_by(.key))')
+if [ "$CURRENT_NORMALIZED" = "$MERGED_NORMALIZED" ]; then
+  echo "  App definition already matches desired state; skipping restart-inducing update"
+else
+  tailscale_reap_hostname_family "$EFFECTIVE_TS_API_KEY" "${EFFECTIVE_TS_HOSTNAME:-$GATEWAY_APP_NAME}" "${TS_TAILNET:-${TAILSCALE_TAILNET:--}}"
+
+  UPDATE_RESPONSE=$(caprover_api_call "Update app definition (env + SSL + websocket)" \
+    curl -s -k -X POST "$ROUTE_CAPROVER_URL/api/v2/user/apps/appDefinitions/update" \
+    -H "Content-Type: application/json" \
+    -H "x-captain-auth: $TOKEN" \
+    -d "$MERGED")
+
+  UPDATE_STATUS=$(echo "$UPDATE_RESPONSE" | jq -r '.status')
+
+  if [ "$UPDATE_STATUS" = "100" ] || [ "$UPDATE_STATUS" = "1000" ]; then
+    echo "  Gateway app definition updated"
+  else
+    echo "  Warning: Update response: $(echo "$UPDATE_RESPONSE" | jq -r '.description')"
+  fi
+fi
+
+# Step 9: Configure custom domain and SSL (only for new apps)
 # Existing apps keep their existing domain configuration.
 if [ "$APP_ALREADY_EXISTS" = "false" ] && [ -n "$DOMAIN" ]; then
   echo ""

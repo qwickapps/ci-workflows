@@ -166,8 +166,12 @@ caprover_get_app_definitions() {
 
 # Upsert GHCR registry credentials on the target CapRover instance.
 # $3 = GitHub personal access token with packages:read.
+# $4 = registry username (default x-access-token) -- ci-workflows: single
+#      source of truth for the registry username; a caller that probes a
+#      credential with ghcr_select_token must pass the same actor it probed
+#      with here, so the validated pair equals the stored pair.
 caprover_sync_ghcr_registry() {
-  local caprover_url="$1" token="$2" ghcr_token="$3"
+  local caprover_url="$1" token="$2" ghcr_token="$3" registry_user="${4:-x-access-token}"
   local curl_args=()
   caprover_populate_curl_args "$caprover_url" curl_args
 
@@ -182,8 +186,8 @@ caprover_sync_ghcr_registry() {
     ins_resp=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/insert" \
       -H "Content-Type: application/json" \
       -H "x-captain-auth: ${token}" \
-      -d "$(jq -n --arg t "$ghcr_token" \
-        '{registryUser:"x-access-token",registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')")
+      -d "$(jq -n --arg t "$ghcr_token" --arg u "$registry_user" \
+        '{registryUser:$u,registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')")
     ins_status=$(echo "$ins_resp" | jq -r '.status // "null"')
     if [ "$ins_status" = "100" ] || [ "$ins_status" = "1000" ]; then
       echo "  ghcr.io registry inserted"
@@ -201,8 +205,8 @@ caprover_sync_ghcr_registry() {
     upd_resp=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/update" \
       -H "Content-Type: application/json" \
       -H "x-captain-auth: ${token}" \
-      -d "$(jq -n --arg id "$reg_id" --arg t "$ghcr_token" \
-        '{id:$id,registryUser:"x-access-token",registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')")
+    -d "$(jq -n --arg id "$reg_id" --arg t "$ghcr_token" --arg u "$registry_user" \
+        '{id:$id,registryUser:$u,registryPassword:$t,registryDomain:"ghcr.io",registryImagePrefix:""}')")
     upd_status=$(echo "$upd_resp" | jq -r '.status // "null"')
     if [ "$upd_status" = "100" ] || [ "$upd_status" = "1000" ]; then
       echo "  ghcr.io registry ${reg_id} updated"
