@@ -146,5 +146,36 @@ sys.exit(0 if any('Select GHCR pull token' in s.get('name', '') for s in steps) 
 done
 
 echo ""
+echo "== ci-workflows#207 review round 1: qwickway route registry-user consistency =="
+# 'Route qwickway to ordered live/stable for live stage' probes GHCR with
+# ghcr_probe_auth_only using one actor, then calls setup-qwickway-route.sh
+# with --registry-user; if those two ever diverge (e.g. a future edit
+# reverts one call site to a literal "${{ github.actor }}" while the other
+# keeps a shared shell var, or --registry-user is dropped entirely), the
+# credential pair CapRover validates no longer matches the pair it stores.
+ROUTE_STEP="$(python3 -c "
+import sys, yaml
+with open('$WORKFLOW') as f:
+    doc = yaml.safe_load(f)
+steps = doc['jobs']['deploy-caprover']['steps']
+match = [s for s in steps if s.get('name') == 'Route qwickway to ordered live/stable for live stage']
+if not match:
+    print('FAIL: step not found', file=sys.stderr)
+    sys.exit(1)
+print(match[0]['run'])
+")"
+
+assert "route step passes --registry-user to setup-qwickway-route.sh" \
+  bash -c 'printf "%s" "$1" | grep -qF -- "--registry-user "' _ "$ROUTE_STEP"
+
+assert "route step's ghcr_probe_auth_only and --registry-user use the SAME shell variable (not two independent \${{ github.actor }} refs)" \
+  bash -c '
+    step="$1"
+    probe_arg="$(printf "%s" "$step" | grep -oE "ghcr_probe_auth_only \"[^\"]+\"" | sed -E "s/ghcr_probe_auth_only \"([^\"]+)\"/\1/")"
+    flag_arg="$(printf "%s" "$step" | grep -oE -- "--registry-user \"[^\"]+\"" | sed -E "s/--registry-user \"([^\"]+)\"/\1/")"
+    [ -n "$probe_arg" ] && [ -n "$flag_arg" ] && [ "$probe_arg" = "$flag_arg" ]
+  ' _ "$ROUTE_STEP"
+
+echo ""
 echo "Tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
