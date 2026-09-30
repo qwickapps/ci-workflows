@@ -1,0 +1,52 @@
+name: QwickWay Route Health Check Retry Tests
+
+# Regression gate for setup-qwickway-route.sh's gateway health-check retry
+# loop crashing on any transient curl failure instead of retrying (fm run
+# 36736130865, 2026-09-30: curl exit 16 / CURLE_HTTP2, zero retries; a
+# re-run of the same target succeeded cleanly).
+#
+# Root cause: the script runs under `set -euo pipefail`. The health-check
+# loop assigned HTTP_STATUS via command substitution and read $? on the
+# NEXT line to tolerate curl failures -- but if curl itself exits nonzero
+# on the substitution line, `set -e` kills the script before that fallback
+# ever runs, so a transient, self-healing curl blip is reported as a hard
+# deploy failure with zero retries attempted.
+#
+# Test (scripts/tests/setup-qwickway-route-health-check-retry.test.sh),
+# run end-to-end against the real script with a fake curl on PATH: the
+# health endpoint fails once with a nonzero curl exit (no HTTP response at
+# all) then succeeds, and the script is asserted to retry and complete
+# successfully instead of crashing on the first attempt.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/setup-qwickway-route.sh'
+      - 'scripts/tests/setup-qwickway-route-health-check-retry.test.sh'
+      - '.github/workflows/setup-qwickway-route-health-check-retry-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/setup-qwickway-route.sh'
+      - 'scripts/tests/setup-qwickway-route-health-check-retry.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: setup-qwickway-route.sh health-check retry test
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run setup-qwickway-route.sh health-check retry contract test
+        run: bash scripts/tests/setup-qwickway-route-health-check-retry.test.sh

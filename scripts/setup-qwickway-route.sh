@@ -774,8 +774,11 @@ else
 fi
 
 GATEWAY_HEALTH_URL="$GATEWAY_BASE_URL/gateway/health"
-MAX_WAIT=300
-WAIT_INTERVAL=5
+# Overridable via env (same convention as CAPROVER_API_MAX_RETRIES/
+# CAPROVER_API_INITIAL_RETRY_DELAY in lib/caprover-api.sh) so tests can
+# drive the retry loop without waiting the full production timeout.
+MAX_WAIT="${GATEWAY_HEALTH_MAX_WAIT:-300}"
+WAIT_INTERVAL="${GATEWAY_HEALTH_WAIT_INTERVAL:-5}"
 ELAPSED=0
 HEALTH_OK=false
 LAST_REACHABLE_STATUS=""
@@ -786,7 +789,14 @@ echo "  Waiting up to ${MAX_WAIT}s for container to start..."
 while [ $ELAPSED -lt $MAX_WAIT ]; do
   # Follow redirects (-L) and accept any 2xx or 3xx as healthy.
   # QwickWay may redirect /gateway/health depending on its configuration.
-  HTTP_STATUS=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_HEALTH_URL" 2>/dev/null)
+  #
+  # The `|| true` is load-bearing under `set -euo pipefail`: without it, a
+  # non-zero curl exit (connection reset, HTTP/2 framing error, TLS hiccup,
+  # etc.) on this command-substitution assignment kills the whole script
+  # immediately, so the CURL_EXIT fallback below never runs and the
+  # intended retry loop never gets a second attempt (observed live: fm run
+  # 36736130865, curl exit 16 CURLE_HTTP2, zero retries).
+  HTTP_STATUS=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_HEALTH_URL" 2>/dev/null) || true
   CURL_EXIT=$?
   if [ $CURL_EXIT -ne 0 ]; then
     HTTP_STATUS="000"
