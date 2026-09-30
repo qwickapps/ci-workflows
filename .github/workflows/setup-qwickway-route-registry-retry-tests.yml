@@ -1,0 +1,55 @@
+name: QwickWay Route Registry Retry Tests
+
+# Regression gate for setup-qwickway-route.sh's GHCR registry-refresh
+# fail-safety (fm run 36567567640 / job 109403847162 post-mortem, verified
+# live 2026-09-29): CapRover's DockerRegistryHelper reports a transient
+# `docker daemon -> ghcr.io` network timeout under the SAME status code
+# (1112, "authentication failed") as a genuine bad credential, and the
+# pre-fix script wrote the gateway's TARGET_APP env var (flipping the live
+# route) BEFORE refreshing the registry credentials -- so a transient
+# registry timeout still mutated production and then reported red.
+#
+# Tests (scripts/tests/setup-qwickway-route-registry-retry.test.sh), run
+# end-to-end against the real script with a fake curl on PATH:
+#   a. a 1112 on the first registry update followed by 100 on retry leads
+#      to overall success
+#   b. a persistent 1112 exits non-zero, AND the stubbed
+#      appDefinitions/update endpoint (the one that writes TARGET_APP) is
+#      NEVER called -- the route is not flipped
+#   c. the registryUser in both the update and insert payloads equals the
+#      username passed via --registry-user
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/setup-qwickway-route.sh'
+      - 'scripts/lib/ghcr-token-select.sh'
+      - 'scripts/tests/setup-qwickway-route-registry-retry.test.sh'
+      - '.github/workflows/setup-qwickway-route-registry-retry-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/setup-qwickway-route.sh'
+      - 'scripts/lib/ghcr-token-select.sh'
+      - 'scripts/tests/setup-qwickway-route-registry-retry.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: setup-qwickway-route.sh registry retry/reorder/username tests
+    runs-on: [self-hosted, macmini]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted macmini runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run setup-qwickway-route.sh registry retry contract test
+        run: bash scripts/tests/setup-qwickway-route-registry-retry.test.sh

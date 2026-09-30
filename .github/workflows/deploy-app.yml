@@ -1392,9 +1392,16 @@ jobs:
           # known here to run the full pull probe against -- because this
           # step only refreshes registry credentials; a real pull failure
           # downstream will surface its own clear error.
+          # ci-workflows#207 review round 1: the probe below and the
+          # --registry-user flag passed to setup-qwickway-route.sh MUST use
+          # the same actor, or the credential pair CapRover validates
+          # (github.actor) differs from the pair it stores (previously
+          # always x-access-token) -- one shell var for both call sites.
+          REGISTRY_USER="${{ github.actor }}"
+
           # shellcheck source=/dev/null
           source .ci-workflows/scripts/lib/ghcr-token-select.sh
-          if ! ghcr_probe_auth_only "${{ github.actor }}" "$GHCR_PULL" "${{ env.OWNER }}"; then
+          if ! ghcr_probe_auth_only "$REGISTRY_USER" "$GHCR_PULL" "${{ env.OWNER }}"; then
             echo "::warning::qwickway route update: GHCR_PULL_TOKEN failed ghcr.io's token-endpoint auth check (auth only, no specific package verified) -- setup-qwickway-route.sh may fail to refresh registry credentials if this PAT is genuinely invalid"
           fi
 
@@ -1417,6 +1424,7 @@ jobs:
             --health-check-path "${{ inputs.health_path }}" \
             --github-token "$GHCR_PULL" \
             --github-owner "${{ env.OWNER }}" \
+            --registry-user "$REGISTRY_USER" \
             "${STABLE_ARGS[@]}"
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
