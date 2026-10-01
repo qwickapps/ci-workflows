@@ -186,18 +186,21 @@ jobs:
           case "$ENV" in
             dev)
               LIVE_APP="${APP}-live"
+              STABLE_APP="${APP}-stable"
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_DEV_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
               LIVE_APP_URL="https://${LIVE_APP}.dev.qwickforge.com"
               ;;
             prod)
               LIVE_APP="${APP}-live"
+              STABLE_APP="${APP}-stable"
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
               LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
               ;;
             uat)
               LIVE_APP="${APP}-uat"
+              STABLE_APP="${APP}-uat-stable"
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
               LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
@@ -223,6 +226,7 @@ jobs:
           # Tailnet node URL for health checks — CapRover public domain
           # returns 404 before the domain is bound to the slot.
           echo "TAILNET_HEALTH_URL=http://${LIVE_APP}.taile324e7.ts.net:8080" >> "$GITHUB_ENV"
+          echo "STABLE_TAILNET_HEALTH_URL=http://${STABLE_APP}.taile324e7.ts.net:8080" >> "$GITHUB_ENV"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -257,6 +261,25 @@ jobs:
             [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep "$SLEEP_SEC"
           done
           echo "ERROR: Health check failed after ${MAX_ATTEMPTS} attempts."
+          exit 1
+
+      - name: Validate stable slot health after live promotion
+        run: |
+          HEALTH_URL="${STABLE_TAILNET_HEALTH_URL}${HEALTH_PATH}"
+          echo "Verifying sibling stable slot remains healthy at ${HEALTH_URL}..."
+          MAX_ATTEMPTS=3
+          SLEEP_SEC=5
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1
+            rc=$?
+            echo "  Attempt ${attempt}/${MAX_ATTEMPTS}: curl exit ${rc}"
+            if [ $rc -eq 0 ]; then
+              echo "Stable slot health check passed."
+              exit 0
+            fi
+            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep "$SLEEP_SEC"
+          done
+          echo "ERROR: Stable slot health check failed after ${MAX_ATTEMPTS} attempts."
           exit 1
 
       - name: Notify via Telegram

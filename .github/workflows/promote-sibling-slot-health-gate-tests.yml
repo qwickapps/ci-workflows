@@ -1,0 +1,40 @@
+name: Promote Sibling Slot Health Gate Tests
+
+# Regression gate for t_44988586: blue-green promotions are not complete
+# unless BOTH slots are healthy. The test extracts and executes the sibling
+# health checks from promote-to-live.yml and promote-to-stable.yml with mocked
+# curl/sleep, proving a dead opposite slot fails closed after the bounded retry.
+#
+# Test:
+#   bash scripts/tests/promote-sibling-slot-health.test.sh
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/promote-to-live.yml'
+      - '.github/workflows/promote-to-stable.yml'
+      - '.github/workflows/promote-sibling-slot-health-gate-tests.yml'
+      - 'scripts/tests/promote-sibling-slot-health.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/promote-to-live.yml'
+      - '.github/workflows/promote-to-stable.yml'
+      - 'scripts/tests/promote-sibling-slot-health.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: promote sibling slot health gate tests
+    runs-on: [self-hosted, choco]
+    # This repo is public and the job uses a self-hosted runner. Do not run
+    # untrusted fork workflow/script changes on that host.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run sibling slot health gate contract test
+        run: bash scripts/tests/promote-sibling-slot-health.test.sh
