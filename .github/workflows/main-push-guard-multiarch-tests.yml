@@ -37,7 +37,7 @@ permissions:
 jobs:
   package-manager-validation:
     name: main-push-guard-multiarch.yml package_manager validation tests
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout

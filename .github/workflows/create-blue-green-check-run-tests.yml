@@ -33,7 +33,7 @@ permissions:
 jobs:
   contract:
     name: create-blue-green-check-run.sh tests
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     # ci-workflows#184: see the sibling comment in
     # deploy-app-stage-host-gate-tests.yml for why this guard is needed.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
