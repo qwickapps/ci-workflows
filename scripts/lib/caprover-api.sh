@@ -65,9 +65,19 @@ caprover_login() {
   caprover_populate_curl_args "$caprover_url" curl_args
 
   local response token
-  response=$(curl "${curl_args[@]}" -X POST --url "${caprover_url}/api/v2/login" \
+  # t_d093182d: bounded --max-time plus the shared retry wrapper, same as
+  # every other CapRover call -- login can hang just as long as any other
+  # endpoint while CapRover is wedged holding its process-wide build lock
+  # under host resource contention, and used to have neither a timeout nor
+  # a retry, so it either blocked forever or surfaced a confusing non-JSON
+  # error instead of a clear "CapRover busy" retry message.
+  if ! response=$(caprover_api_call "CapRover login" \
+    curl "${curl_args[@]}" --max-time 60 -X POST --url "${caprover_url}/api/v2/login" \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg p "$caprover_pass" '{password:$p}')")
+    -d "$(jq -n --arg p "$caprover_pass" '{password:$p}')"); then
+    echo "Error: CapRover login failed/unreachable after retries" >&2
+    return 1
+  fi
 
   if ! echo "$response" | jq -e . >/dev/null 2>&1; then
     echo "Error: CapRover login returned non-JSON response" >&2
@@ -96,8 +106,38 @@ caprover_api_call() {
   while [[ $attempt -le $max_retries ]]; do
     echo "  Attempt ${attempt}/${max_retries}: ${description}" >&2
 
-    local response
-    response=$("$@")
+    local response rc
+    # `response=$("$@") || rc=$?` (not a bare assignment) so a non-zero curl
+    # exit does not trip `set -e` and abort the whole script before we get a
+    # chance to retry it below.
+    rc=0
+    response=$("$@") || rc=$?
+
+    # ci-workflows wedge fix (2026-10-01, t_d093182d): a curl invocation that
+    # times out (e.g. --max-time expiry while CapRover is wedged holding its
+    # single process-wide build lock under host resource contention) exits
+    # non-zero with little/no stdout. The caller's busy-text grep below never
+    # matches an empty/truncated body, so without this check a hard network
+    # timeout was silently treated as a SUCCESSFUL empty response instead of
+    # a retryable failure -- masking the real "CapRover unreachable/wedged"
+    # condition behind a confusing downstream "Invalid JSON" error from the
+    # caller. Treat any non-zero curl exit as retryable exactly like a busy
+    # response, with the same bounded backoff.
+    if [[ $rc -ne 0 ]]; then
+      if [[ $attempt -lt $max_retries ]]; then
+        echo "  Request failed (curl exit ${rc} -- likely a timeout while CapRover is wedged); retrying in ${retry_delay}s..." >&2
+        sleep "$retry_delay"
+        retry_delay=$((retry_delay * 2))
+        if [[ $retry_delay -gt 60 ]]; then
+          retry_delay=60
+        fi
+        attempt=$((attempt + 1))
+        continue
+      fi
+
+      echo "  Request still failing (curl exit ${rc}) after ${max_retries} attempts -- CapRover may be wedged" >&2
+      return 1
+    fi
 
     if echo "$response" | grep -Eiq "another operation.*in progress|operation.*still in progress|please wait"; then
       if [[ $attempt -lt $max_retries ]]; then
@@ -176,14 +216,16 @@ caprover_sync_ghcr_registry() {
   caprover_populate_curl_args "$caprover_url" curl_args
 
   local ids
-  ids=$(curl "${curl_args[@]}" -s -X GET "${caprover_url}/api/v2/user/registries" \
+  ids=$(curl "${curl_args[@]}" -s --max-time 30 -X GET "${caprover_url}/api/v2/user/registries" \
     -H "x-captain-auth: ${token}" \
     | jq -r '(.data.registries // [])[] | select(.registryDomain == "ghcr.io") | .id // empty' 2>/dev/null || true)
 
   if [ -z "$ids" ]; then
     echo "  Inserting ghcr.io registry entry..."
     local ins_resp ins_status
-    ins_resp=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/insert" \
+    # t_d093182d: bounded --max-time hardening -- same unguarded-hang shape
+    # as the register endpoint fix above, applied defensively here too.
+    ins_resp=$(curl "${curl_args[@]}" -s --max-time 30 -X POST "${caprover_url}/api/v2/user/registries/insert" \
       -H "Content-Type: application/json" \
       -H "x-captain-auth: ${token}" \
       -d "$(jq -n --arg t "$ghcr_token" --arg u "$registry_user" \
@@ -202,7 +244,7 @@ caprover_sync_ghcr_registry() {
     [ -z "$reg_id" ] && continue
     echo "  Updating ghcr.io registry entry ${reg_id}..."
     local upd_resp upd_status
-    upd_resp=$(curl "${curl_args[@]}" -s -X POST "${caprover_url}/api/v2/user/registries/update" \
+    upd_resp=$(curl "${curl_args[@]}" -s --max-time 30 -X POST "${caprover_url}/api/v2/user/registries/update" \
       -H "Content-Type: application/json" \
       -H "x-captain-auth: ${token}" \
     -d "$(jq -n --arg id "$reg_id" --arg t "$ghcr_token" --arg u "$registry_user" \
@@ -357,10 +399,24 @@ caprover_ensure_app() {
   caprover_populate_curl_args "$caprover_url" curl_args
 
   local response
-  response=$(curl "${curl_args[@]}" -X POST "${caprover_url}/api/v2/user/apps/appDefinitions/register" \
+  # t_d093182d root cause: this was a bare curl with no --max-time and no
+  # retry wrapper. When CapRover is wedged holding its single process-wide
+  # build lock (observed: a register+first-create-service call stalled for
+  # ~10 minutes with zero docker-level log output while oci-main was CPU/IO
+  # saturated by a concurrent backup pg_dump sweep), the connection just hung
+  # until nginx's own upstream timeout returned an HTML 504 body -- which
+  # then failed jq parsing as a confusing "Invalid JSON from register
+  # endpoint" instead of a clear, retryable "CapRover busy" message. Bound
+  # the wait and retry through the same backoff every other CapRover call
+  # uses, so register behaves identically to the atomic-update path.
+  if ! response=$(caprover_api_call "Register app ${app_name}" \
+    curl "${curl_args[@]}" --max-time 60 -X POST "${caprover_url}/api/v2/user/apps/appDefinitions/register" \
     -H "Content-Type: application/json" \
     -H "x-captain-auth: ${token}" \
-    -d "{\"appName\":\"${app_name}\",\"hasPersistentData\":${has_persistent_data}}")
+    -d "{\"appName\":\"${app_name}\",\"hasPersistentData\":${has_persistent_data}}"); then
+    echo "Error: CapRover register endpoint still busy/unreachable after retries (app may already be registering server-side -- safe to re-run, register is idempotent)" >&2
+    return 1
+  fi
 
   if ! echo "$response" | jq -e . >/dev/null 2>&1; then
     echo "Error: Invalid JSON from register endpoint" >&2
