@@ -1,0 +1,26 @@
+name: Topology Admission Tests
+on:
+  pull_request:
+    paths:
+      - 'config/service-identities.json'
+      - 'scripts/topology-admission.py'
+      - 'scripts/tests/topology-admission.test.sh'
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/topology-admission-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'config/service-identities.json'
+      - 'scripts/topology-admission.py'
+      - 'scripts/tests/topology-admission.test.sh'
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/topology-admission-tests.yml'
+permissions:
+  contents: read
+jobs:
+  topology-admission:
+    runs-on: [self-hosted, choco]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay topology admission controls
+        run: bash scripts/tests/topology-admission.test.sh
