@@ -101,6 +101,12 @@ jobs:
           path: .ci-workflows
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Enforce persistent node Tailscale entrypoint contract
+        if: ${{ github.repository == 'qwickapps/node' }}
+        run: |
+          chmod +x .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh
+          .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh --source
+
       - name: Check branch target (feature branches must target dev, not main)
         env:
           BASE_REF: ${{ github.base_ref }}

@@ -575,6 +575,16 @@ jobs:
             scripts
           sparse-checkout-cone-mode: false
 
+      - name: Reject ephemeral node production deployment inputs
+        if: ${{ github.repository == 'qwickapps/node' && (needs.resolve-stage.outputs.stage == 'live' || needs.resolve-stage.outputs.stage == 'stable') }}
+        env:
+          APP_NAME: ${{ needs.resolve-stage.outputs.app_name }}
+          DEPLOY_STAGE: ${{ needs.resolve-stage.outputs.stage }}
+          IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
+        run: |
+          chmod +x .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh
+          .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh --production-env
+
       - name: Make scripts executable
         run: chmod +x .ci-workflows/scripts/*.sh
 
