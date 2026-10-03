@@ -3,6 +3,7 @@
 import importlib.util
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -106,7 +107,15 @@ class CleanupSafetyTests(unittest.TestCase):
         self.assert_never_deleted(responses)
 
     def test_default_branch_lookup_error_or_malformed_metadata_fails_closed(self):
-        for value in (hygiene.Result(False, error="HTTP 500"), {}, {"default_branch": None}):
+        for value in (
+            hygiene.Result(False, error="HTTP 500"),
+            {},
+            {"default_branch": None},
+            {"default_branch": True},
+            {"default_branch": 1},
+            {"default_branch": ["main"]},
+            {"default_branch": {"name": "main"}},
+        ):
             with self.subTest(value=value):
                 responses = baseline()
                 responses[f"repos/{REPO}"] = value
@@ -168,6 +177,8 @@ class CleanupSafetyTests(unittest.TestCase):
         malformed = [
             {},
             {"version": 2, "allow": []},
+            {"version": True, "allow": []},
+            {"version": 1.0, "allow": []},
             {"version": 1},
             {"version": 1, "allow": [{"repository": REPO}]},
         ]
@@ -178,6 +189,38 @@ class CleanupSafetyTests(unittest.TestCase):
                 entries, error = hygiene.load_allowlist(path)
                 self.assertEqual([], entries)
                 self.assertTrue(error)
+
+    def test_malformed_allowlist_file_cli_path_makes_zero_api_calls(self):
+        malformed = [
+            {},
+            {"version": True, "allow": []},
+            {"version": 1.0, "allow": []},
+            {"version": 1},
+            {"version": 1, "allow": [{"repository": REPO}]},
+        ]
+        for document in malformed:
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "allowlist.json"
+                output = pathlib.Path(directory) / "report.json"
+                path.write_text(__import__("json").dumps(document))
+
+                class RecordingGitHub(FakeGitHub):
+                    instances = []
+                    def __init__(self):
+                        super().__init__(baseline())
+                        self.__class__.instances.append(self)
+
+                argv = [
+                    "org-branch-hygiene.py", "--repo", REPO, "--pr-number", "42", "--enforce",
+                    "--allowlist", str(path), "--output", str(output),
+                ]
+                with mock.patch.object(hygiene, "GitHub", RecordingGitHub), mock.patch.object(sys, "argv", argv):
+                    hygiene.main()
+                self.assertEqual(1, len(RecordingGitHub.instances))
+                self.assertEqual([], RecordingGitHub.instances[0].calls)
+                report = __import__("json").loads(output.read_text())
+                self.assertEqual("skipped", report["records"][0]["action"])
+                self.assertEqual(0, report["summary"]["deleted"])
 
     def test_refetch_before_delete_prevents_race_deletion(self):
         class RaceGitHub(FakeGitHub):

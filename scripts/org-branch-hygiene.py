@@ -69,7 +69,9 @@ def endpoint_ref(branch):
 def load_allowlist(path):
     try:
         raw = json.loads(Path(path).read_text())
-        if not isinstance(raw, dict) or raw.get("version") != 1:
+        # bool is a subclass of int in Python, so equality alone would accept
+        # JSON true as version 1.  Only the integer literal 1 is supported.
+        if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
             raise ValueError("allowlist version must be exactly 1")
         entries = raw.get("allow")
         error = validate_allow_entries(entries)
@@ -149,7 +151,7 @@ def evaluate_candidate(api, repo, pr_number, allow_entries, enforce):
 
     repo_result = api.request(f"repos/{repo}")
     default_branch = repo_result.value.get("default_branch") if repo_result.ok and isinstance(repo_result.value, dict) else None
-    if not default_branch:
+    if not isinstance(default_branch, str) or not default_branch:
         return skip(repo, pr_number, branch, "could not read repository default branch")
     if branch == default_branch:
         return skip(repo, pr_number, branch, "branch is the default branch")
