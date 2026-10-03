@@ -1,60 +1,92 @@
-name: "Org-Wide Branch Hygiene"
+name: "Closed-Unmerged PR Branch Cleanup"
 
 on:
+  # This same-repository close handler is the only unattended deletion path.
+  pull_request:
+    types: [closed]
+  # The scheduled sweep is audit-only and never performs bulk deletion.
   schedule:
-    # Run daily at 03:00 UTC
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Dry run (report only, no deletions)"
+      repository:
+        description: "Optional owner/name target for a single closed PR"
+        required: false
+        type: string
+      pr_number:
+        description: "Optional closed PR number (requires repository)"
+        required: false
+        type: string
+      enforce:
+        description: "Delete only the explicit target after all safety checks"
         required: false
         type: boolean
         default: false
-      stale_days:
-        description: "Days without commits before a branch is flagged as old (default: 21)"
-        required: false
+  workflow_call:
+    inputs:
+      repository:
+        description: "owner/name target repository"
+        required: true
         type: string
-        default: "21"
+      pr_number:
+        description: "Closed PR number"
+        required: true
+        type: number
+      enforce:
+        description: "Allow deletion after all safety checks"
+        required: false
+        type: boolean
+        default: false
 
-# Minimal permissions: read org repos + write repo contents for branch deletion
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
-  sweep:
-    name: "Sweep all qwickapps repos"
+  cleanup:
+    name: "Clean a merged PR branch safely"
     runs-on: [self-hosted, choco]
+    # Do not run branch-deletion code from a fork-controlled PR workflow.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 30
-
     steps:
-      - name: "Hygiene before checkout"
-        run: |
-          git config --global --add safe.directory '*' 2>/dev/null || true
-          git clean -ffd 2>/dev/null || true
-
-      - name: "Checkout ci-workflows (for scripts)"
+      - name: Checkout scripts
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.ORG_HYGIENE_TOKEN }}
 
-      - name: "Run org-wide branch hygiene sweep"
-        id: sweep
+      - name: Run targeted cleanup or organization audit
         env:
-          GH_TOKEN: ${{ secrets.ORG_HYGIENE_TOKEN }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
-          STALE_DAYS: ${{ inputs.stale_days || '21' }}
-          ORG: qwickapps
-        run: python3 scripts/org-branch-hygiene.py --org "$ORG" --stale-days "$STALE_DAYS" $( [ "$DRY_RUN" = "true" ] && echo "--dry-run" ) --output /tmp/hygiene-report.json
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_ENFORCE: ${{ inputs.enforce }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/org-branch-hygiene.py \
+              --repo "$EVENT_REPOSITORY" --pr-number "$EVENT_PR_NUMBER" --enforce \
+              --output /tmp/hygiene-report.json
+          elif [ -n "$INPUT_REPOSITORY" ] || [ -n "$INPUT_PR_NUMBER" ]; then
+            args=(--repo "$INPUT_REPOSITORY" --pr-number "$INPUT_PR_NUMBER")
+            if [ "$INPUT_ENFORCE" = "true" ]; then
+              args+=(--enforce)
+            fi
+            python3 scripts/org-branch-hygiene.py "${args[@]}" --output /tmp/hygiene-report.json
+          else
+            python3 scripts/org-branch-hygiene.py --org qwickapps --dry-run --output /tmp/hygiene-report.json
+          fi
 
-      - name: "Write job summary"
+      - name: Write job summary
         if: always()
         run: python3 scripts/org-branch-hygiene-summary.py /tmp/hygiene-report.json "$GITHUB_STEP_SUMMARY"
 
-      - name: "Upload report artifact"
+      - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hygiene-report-${{ github.run_id }}
+          name: merged-pr-branch-cleanup-${{ github.run_id }}
           path: /tmp/hygiene-report.json
           retention-days: 30
+          if-no-files-found: warn

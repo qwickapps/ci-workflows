@@ -1,270 +1,214 @@
 #!/usr/bin/env python3
-"""org-branch-hygiene.py — Org-wide branch and PR hygiene sweeper.
+"""Safely clean up head branches of closed, unmerged pull requests.
 
-Safety predicate:
-  A branch is PROVABLY MERGED (safe to delete) if and only if:
-    GET /repos/{org}/{repo}/compare/{default}...{branch}
-    returns status == "behind" OR status == "identical"
-  (i.e. the branch has ZERO commits that are not already in the default branch)
-
-  We additionally skip:
-    - The repo's default branch
-    - Any branch whose name is in PROTECTED_NAMES
-    - Any branch that is the HEAD of an open PR (never delete open PR branches)
-
-  When in doubt — any other compare status — we FLAG, never delete.
+Deletion is deliberately narrow: a closed, unmerged, same-repository PR must
+identify a branch whose current ref still equals the PR head SHA. Protected,
+open-PR, allowlisted, ambiguous, and API-error cases always skip deletion.
 """
-
 import argparse
+import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
-
-PROTECTED_NAMES = {
-    "main", "master", "dev", "staging", "production", "develop",
-    "v5-stable", "docs/readme", "aal-1-bash-intercept",
-}
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote
 
 
-def gh(endpoint, method="GET", accept_not_found=False):
-    """Call `gh api <endpoint>`, return parsed JSON or None on 404."""
-    r = subprocess.run(
-        ["gh", "api", "--paginate", endpoint],
-        capture_output=True, text=True,
+@dataclass
+class Result:
+    ok: bool
+    value: object = None
+    error: str = ""
+    not_found: bool = False
+
+
+class GitHub:
+    def request(self, endpoint, method="GET", paginate=False):
+        args = ["gh", "api", endpoint]
+        if method != "GET":
+            args.extend(["-X", method])
+        if paginate:
+            args.append("--paginate")
+        completed = subprocess.run(args, capture_output=True, text=True)
+        if completed.returncode:
+            message = completed.stderr.strip()
+            return Result(False, error=message, not_found=bool(re.search(r"\b404\b", message)))
+        text = completed.stdout.strip()
+        if not text:
+            return Result(True, None)
+        try:
+            if paginate:
+                decoder, offset, values = json.JSONDecoder(), 0, []
+                while offset < len(text):
+                    stripped = text[offset:].lstrip()
+                    if not stripped:
+                        break
+                    offset += len(text[offset:]) - len(stripped)
+                    item, consumed = decoder.raw_decode(stripped)
+                    offset += consumed
+                    values.extend(item if isinstance(item, list) else [item])
+                return Result(True, values)
+            return Result(True, json.loads(text))
+        except json.JSONDecodeError as exc:
+            return Result(False, error=f"invalid GitHub API JSON: {exc}")
+
+
+def endpoint_ref(branch):
+    return "git/ref/heads/" + quote(branch, safe="")
+
+
+def load_allowlist(path):
+    try:
+        raw = json.loads(Path(path).read_text())
+        entries = raw.get("allow", [])
+        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+            raise ValueError("allow must be a list of objects")
+        return entries, ""
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return [], f"allowlist unavailable or invalid: {exc}"
+
+
+def allowlisted(entries, repo, branch):
+    return any(
+        fnmatch.fnmatchcase(repo, item.get("repository", ""))
+        and fnmatch.fnmatchcase(branch, item.get("branch", ""))
+        for item in entries
     )
-    if r.returncode != 0:
-        if accept_not_found and "404" in r.stderr:
-            return None
-        return None
+
+
+def skip(repo, pr_number, branch, reason):
+    return {"repo": repo, "pr": pr_number, "branch": branch, "action": "skipped", "reason": reason}
+
+
+def evaluate_candidate(api, repo, pr_number, allow_entries, enforce):
+    """Evaluate exactly one PR. Every failed/uncertain check is a skip."""
+    pr_result = api.request(f"repos/{repo}/pulls/{pr_number}")
+    if not pr_result.ok or not isinstance(pr_result.value, dict):
+        return skip(repo, pr_number, "", "could not read PR")
+    pr = pr_result.value
+    head = pr.get("head") or {}
+    base = pr.get("base") or {}
+    branch = head.get("ref", "")
+    head_sha = head.get("sha", "")
+    head_repo = (head.get("repo") or {}).get("full_name")
+    base_repo = (base.get("repo") or {}).get("full_name")
+    if pr.get("state") != "closed" or pr.get("merged"):
+        return skip(repo, pr_number, branch, "PR is not closed and unmerged")
+    if head_repo != repo or base_repo != repo:
+        return skip(repo, pr_number, branch, "PR head/base is not the target repository")
+    if not branch or not head_sha:
+        return skip(repo, pr_number, branch, "PR head ref or SHA is missing")
+    if allowlisted(allow_entries, repo, branch):
+        return skip(repo, pr_number, branch, "branch is explicitly allowlisted")
+
+    repo_result = api.request(f"repos/{repo}")
+    default_branch = repo_result.value.get("default_branch") if repo_result.ok and isinstance(repo_result.value, dict) else None
+    if not default_branch:
+        return skip(repo, pr_number, branch, "could not read repository default branch")
+    if branch == default_branch:
+        return skip(repo, pr_number, branch, "branch is the default branch")
+
+    first_ref = api.request(f"repos/{repo}/{endpoint_ref(branch)}")
+    current_sha = ((first_ref.value or {}).get("object") or {}).get("sha") if first_ref.ok and isinstance(first_ref.value, dict) else None
+    if current_sha != head_sha:
+        return skip(repo, pr_number, branch, "branch ref is missing or differs from merged PR head SHA")
+
+    protection = api.request(f"repos/{repo}/branches/{quote(branch, safe='')}/protection")
+    if protection.ok:
+        return skip(repo, pr_number, branch, "branch is protected")
+    if not protection.not_found:
+        return skip(repo, pr_number, branch, "could not determine branch protection")
+
+    open_prs = api.request(f"repos/{repo}/pulls?state=open&per_page=100", paginate=True)
+    if not open_prs.ok or not isinstance(open_prs.value, list):
+        return skip(repo, pr_number, branch, "could not determine whether branch heads an open PR")
+    for open_pr in open_prs.value:
+        open_head = (open_pr.get("head") or {}) if isinstance(open_pr, dict) else {}
+        if open_head.get("ref") == branch and ((open_head.get("repo") or {}).get("full_name") == repo):
+            return skip(repo, pr_number, branch, "branch heads an open PR")
+
+    # Refetch immediately before deletion to close the branch-recreation race.
+    final_ref = api.request(f"repos/{repo}/{endpoint_ref(branch)}")
+    final_sha = ((final_ref.value or {}).get("object") or {}).get("sha") if final_ref.ok and isinstance(final_ref.value, dict) else None
+    if final_sha != head_sha:
+        return skip(repo, pr_number, branch, "branch changed before deletion")
+    if not enforce:
+        return {"repo": repo, "pr": pr_number, "branch": branch, "action": "candidate", "reason": "all deletion predicates passed; audit only"}
+
+    deletion = api.request(f"repos/{repo}/git/refs/heads/{quote(branch, safe='')}", method="DELETE")
+    if not deletion.ok:
+        return skip(repo, pr_number, branch, "delete request failed")
+    return {"repo": repo, "pr": pr_number, "branch": branch, "action": "deleted", "reason": "all deletion predicates passed"}
+
+
+def recently_closed(pr, cutoff):
+    closed_at = pr.get("closed_at", "") if isinstance(pr, dict) else ""
     try:
-        # gh --paginate can emit multiple JSON arrays; merge them
-        text = r.stdout.strip()
-        if text.startswith("["):
-            # Could be multiple arrays concatenated by --paginate
-            merged = []
-            decoder = json.JSONDecoder()
-            pos = 0
-            while pos < len(text):
-                text_from = text[pos:].lstrip()
-                if not text_from:
-                    break
-                obj, idx = decoder.raw_decode(text_from)
-                pos += len(text) - len(text_from) + idx
-                if isinstance(obj, list):
-                    merged.extend(obj)
-                else:
-                    merged.append(obj)
-            return merged
-        return json.loads(text)
-    except Exception:
-        return None
+        return datetime.fromisoformat(closed_at.replace("Z", "+00:00")) >= cutoff
+    except (TypeError, ValueError):
+        return False
 
 
-def gh_single(endpoint, jq_filter=None):
-    """Call gh api without --paginate, optionally with --jq."""
-    args = ["gh", "api", endpoint]
-    if jq_filter:
-        args += ["--jq", jq_filter]
-    r = subprocess.run(args, capture_output=True, text=True)
-    if r.returncode != 0:
-        return None
-    text = r.stdout.strip()
-    if not text:
-        return None
-    if jq_filter:
-        return text  # raw string output from jq
-    try:
-        return json.loads(text)
-    except Exception:
-        return text
-
-
-def compare_branch(org, repo, default, branch):
-    """Return (status, ahead_by) or (None, None) on error."""
-    r = subprocess.run(
-        ["gh", "api", f"repos/{org}/{repo}/compare/{default}...{branch}",
-         "--jq", "{status:.status,ahead:.ahead_by}"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return None, None
-    try:
-        data = json.loads(r.stdout.strip())
-        return data.get("status"), data.get("ahead", -1)
-    except Exception:
-        return None, None
-
-
-def get_open_pr_heads(org, repo):
-    """Return set of branch names that are heads of open PRs."""
-    prs = gh(f"repos/{org}/{repo}/pulls?state=open&per_page=100")
-    if not prs:
-        return set()
-    return {pr["head"]["ref"] for pr in prs if isinstance(pr, dict)}
+def audit_org(api, org, allow_entries, since_days):
+    repos = api.request(f"orgs/{org}/repos?type=all&per_page=100", paginate=True)
+    if not repos.ok or not isinstance(repos.value, list):
+        raise RuntimeError("could not list organization repositories")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    records = []
+    for repo_info in repos.value:
+        if not isinstance(repo_info, dict) or repo_info.get("archived"):
+            continue
+        repo = repo_info.get("full_name")
+        if not repo:
+            continue
+        prs = api.request(f"repos/{repo}/pulls?state=closed&per_page=100", paginate=True)
+        if not prs.ok or not isinstance(prs.value, list):
+            records.append(skip(repo, None, "", "could not list closed PRs"))
+            continue
+        for pr in prs.value:
+            if recently_closed(pr, cutoff) and not pr.get("merged_at"):
+                records.append(evaluate_candidate(api, repo, pr.get("number"), allow_entries, enforce=False))
+    return records
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--org", default="qwickapps")
-    parser.add_argument("--stale-days", type=int, default=21)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--repo", help="Target repository as owner/name")
+    parser.add_argument("--pr-number", type=int, help="Closed merged PR number in --repo")
+    parser.add_argument("--enforce", action="store_true", help="Delete only after all safety predicates pass")
+    parser.add_argument("--dry-run", action="store_true", help="Audit only (the default for org-wide scans)")
+    parser.add_argument("--since-days", type=int, default=2)
+    parser.add_argument("--allowlist", default=".github/branch-hygiene-allowlist.json")
     parser.add_argument("--output", default="/tmp/hygiene-report.json")
     args = parser.parse_args()
+    if bool(args.repo) != bool(args.pr_number):
+        parser.error("--repo and --pr-number must be supplied together")
+    if args.enforce and not (args.repo and args.pr_number):
+        parser.error("--enforce requires one explicit --repo and --pr-number target")
+    if args.repo and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo):
+        parser.error("--repo must be owner/name")
 
-    org = args.org
-    stale_days = args.stale_days
-    dry_run = args.dry_run or os.environ.get("DRY_RUN", "false").lower() == "true"
-    cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
+    allow_entries, allow_error = load_allowlist(args.allowlist)
+    api = GitHub()
+    if args.repo:
+        records = [skip(args.repo, args.pr_number, "", allow_error)] if allow_error else [evaluate_candidate(api, args.repo, args.pr_number, allow_entries, args.enforce and not args.dry_run)]
+    else:
+        if allow_error:
+            raise SystemExit(allow_error)
+        try:
+            records = audit_org(api, args.org, allow_entries, args.since_days)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
 
-    print(f"[hygiene] org={org} stale_days={stale_days} dry_run={dry_run}")
-
-    # --- Enumerate repos ---
-    repos_raw = gh(f"orgs/{org}/repos?type=all&per_page=100")
-    if not repos_raw:
-        print("[hygiene] ERROR: could not list repos", file=sys.stderr)
-        sys.exit(1)
-
-    active_repos = []
-    for r in repos_raw:
-        if r.get("archived"):
-            continue
-        name = r.get("name", "")
-        default = r.get("default_branch", "")
-        if name and default:
-            active_repos.append((name, default))
-
-    print(f"[hygiene] {len(active_repos)} active repos")
-
-    deleted = []
-    flagged_for_review = []
-    stale_prs = []
-    branches_scanned = 0
-
-    for repo_name, default_branch in active_repos:
-        # Get all open PR heads (to never delete)
-        open_heads = get_open_pr_heads(org, repo_name)
-
-        # Get all branches
-        branches_raw = gh(f"repos/{org}/{repo_name}/branches?per_page=100")
-        if not branches_raw:
-            continue
-
-        for br_obj in branches_raw:
-            if not isinstance(br_obj, dict):
-                continue
-            branch = br_obj.get("name", "")
-            if not branch:
-                continue
-            if branch == default_branch:
-                continue
-            if branch in PROTECTED_NAMES:
-                continue
-            if branch in open_heads:
-                continue
-
-            branches_scanned += 1
-
-            # --- Safety predicate ---
-            cmp_status, ahead_by = compare_branch(org, repo_name, default_branch, branch)
-
-            if cmp_status in ("behind", "identical"):
-                # PROVABLY MERGED — safe to delete
-                if not dry_run:
-                    del_r = subprocess.run(
-                        ["gh", "api", f"repos/{org}/{repo_name}/git/refs/heads/{branch}",
-                         "-X", "DELETE"],
-                        capture_output=True, text=True,
-                    )
-                    success = del_r.returncode == 0
-                else:
-                    success = True  # dry run
-
-                deleted.append({
-                    "repo": repo_name,
-                    "branch": branch,
-                    "default": default_branch,
-                    "status": cmp_status,
-                    "dry_run": dry_run,
-                    "deleted": success,
-                })
-                verb = "[DRY-RUN would delete]" if dry_run else "[DELETED]"
-                print(f"  {verb} {repo_name}/{branch} (compare={cmp_status})")
-            else:
-                # Check last commit date for staleness
-                last_commit_r = subprocess.run(
-                    ["gh", "api",
-                     f"repos/{org}/{repo_name}/commits?sha={branch}&per_page=1",
-                     "--jq", ".[0].commit.committer.date"],
-                    capture_output=True, text=True,
-                )
-                last_date_str = last_commit_r.stdout.strip().strip('"')
-                try:
-                    last_date = datetime.fromisoformat(last_date_str.replace("Z", "+00:00"))
-                    days_old = (datetime.now(timezone.utc) - last_date).days
-                    last_date_short = last_date_str[:10]
-                except Exception:
-                    days_old = 0
-                    last_date_short = "unknown"
-
-                if days_old >= stale_days:
-                    flagged_for_review.append({
-                        "repo": repo_name,
-                        "branch": branch,
-                        "default": default_branch,
-                        "status": cmp_status,
-                        "ahead": ahead_by,
-                        "last_commit": last_date_short,
-                        "days_old": days_old,
-                    })
-
-        # --- Stale open PRs ---
-        prs_raw = gh(f"repos/{org}/{repo_name}/pulls?state=open&per_page=100")
-        if prs_raw:
-            for pr in prs_raw:
-                if not isinstance(pr, dict):
-                    continue
-                updated_str = pr.get("updated_at", "")
-                try:
-                    updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
-                    if updated < cutoff:
-                        days_stale = (datetime.now(timezone.utc) - updated).days
-                        stale_prs.append({
-                            "repo": repo_name,
-                            "number": pr["number"],
-                            "title": pr.get("title", "")[:80],
-                            "author": pr.get("user", {}).get("login", ""),
-                            "head": pr.get("head", {}).get("ref", ""),
-                            "days_stale": days_stale,
-                            "updated_at": updated_str[:10],
-                        })
-                except Exception:
-                    pass
-
-    # --- Write report ---
-    report = {
-        "run_date": datetime.now(timezone.utc).isoformat(),
-        "org": org,
-        "dry_run": dry_run,
-        "stale_days": stale_days,
-        "repos_scanned": len(active_repos),
-        "branches_scanned": branches_scanned,
-        "deleted": deleted,
-        "flagged_for_review": flagged_for_review,
-        "stale_prs": stale_prs,
-        "summary": {
-            "deleted_count": len(deleted),
-            "flagged_count": len(flagged_for_review),
-            "stale_pr_count": len(stale_prs),
-        },
-    }
-
-    with open(args.output, "w") as f:
-        json.dump(report, f, indent=2)
-
-    print(f"\n[hygiene] SUMMARY: deleted={len(deleted)} flagged={len(flagged_for_review)} stale_prs={len(stale_prs)}")
-    print(f"[hygiene] Report written to {args.output}")
+    summary = {key: sum(item["action"] == key for item in records) for key in ("deleted", "candidate", "skipped")}
+    report = {"run_date": datetime.now(timezone.utc).isoformat(), "org": args.org, "enforce": args.enforce and not args.dry_run, "targeted": bool(args.repo), "records": records, "summary": summary}
+    Path(args.output).write_text(json.dumps(report, indent=2) + "\n")
+    print(f"[hygiene] deleted={summary['deleted']} candidates={summary['candidate']} skipped={summary['skipped']}")
 
 
 if __name__ == "__main__":
