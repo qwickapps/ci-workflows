@@ -49,6 +49,16 @@ printf '\nSTATE_MODE="${TS_STATE_MODE:-mem}"\n' >> "$TMP/entrypoint-mem/entrypoi
 git -C "$TMP/entrypoint-mem" add . && git -C "$TMP/entrypoint-mem" commit -qm entrypoint-mem
 assert_fail "memory state default in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
 
+fixture "$TMP/entrypoint-ephemeral-assignment"
+printf '\nexport TS_EPHEMERAL_AUTHKEY=fixture-only\n' >> "$TMP/entrypoint-ephemeral-assignment/entrypoint.sh"
+git -C "$TMP/entrypoint-ephemeral-assignment" add . && git -C "$TMP/entrypoint-ephemeral-assignment" commit -qm entrypoint-ephemeral-assignment
+assert_fail "ephemeral key assignment in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-ephemeral-assignment' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
+fixture "$TMP/entrypoint-mem-assignment"
+printf '\nTS_STATE_MODE=mem\n' >> "$TMP/entrypoint-mem-assignment/entrypoint.sh"
+git -C "$TMP/entrypoint-mem-assignment" add . && git -C "$TMP/entrypoint-mem-assignment" commit -qm entrypoint-mem-assignment
+assert_fail "memory state assignment in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem-assignment' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
 mkdir -p "$TMP/env/.deploy-app-env"
 printf 'TS_EPHEMERAL_AUTHKEY=tskey-client-ignored\n' > "$TMP/env/.deploy-app-env/live.env"
 assert_fail "production ephemeral env fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/img-node:release '$GUARD' --production-env"

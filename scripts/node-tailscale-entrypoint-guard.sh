@@ -46,6 +46,12 @@ case "$mode" in
     if grep -nF '${TS_STATE_MODE:-mem}' entrypoint.sh >/dev/null; then
       fail "canonical entrypoint must not default Tailscale state to memory"
     fi
+    if grep -nE '^[[:space:]]*(export[[:space:]]+)?TS_EPHEMERAL_AUTHKEY([[:space:]]*=|[[:space:]]*$)' entrypoint.sh >/dev/null; then
+      fail "canonical entrypoint must not assign or export TS_EPHEMERAL_AUTHKEY"
+    fi
+    if grep -nE "^[[:space:]]*(export[[:space:]]+)?TS_STATE_MODE[[:space:]]*=[[:space:]]*['\"]?mem['\"]?([[:space:]]*(#.*)?$|;)" entrypoint.sh >/dev/null; then
+      fail "canonical entrypoint must not assign TS_STATE_MODE=mem"
+    fi
     if git grep -nE '(TS_EPHEMERAL_AUTHKEY[[:space:]]*=|TS_STATE_MODE[[:space:]]*=[[:space:]]*mem|--statedir[[:space:]]*=[^[:space:]]*(/tmp|mem))' -- \
       Dockerfile ':!tests/**' ':!entrypoint.sh' '.github/workflows' 2>/dev/null | grep -v '/tests/' >/dev/null; then
       fail "production source config enables ephemeral auth or memory-backed Tailscale state"
