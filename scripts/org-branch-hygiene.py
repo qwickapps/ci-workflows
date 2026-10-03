@@ -50,7 +50,12 @@ class GitHub:
                     offset += len(text[offset:]) - len(stripped)
                     item, consumed = decoder.raw_decode(stripped)
                     offset += consumed
-                    values.extend(item if isinstance(item, list) else [item])
+                    # gh --paginate emits one JSON array per page.  Accepting
+                    # another shape would make an API/proxy error look like a
+                    # safe empty/single-item page, so reject it fail-closed.
+                    if not isinstance(item, list):
+                        return Result(False, error="paginated GitHub API response contains a non-array page")
+                    values.extend(item)
                 return Result(True, values)
             return Result(True, json.loads(text))
         except json.JSONDecodeError as exc:
@@ -64,12 +69,28 @@ def endpoint_ref(branch):
 def load_allowlist(path):
     try:
         raw = json.loads(Path(path).read_text())
-        entries = raw.get("allow", [])
-        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
-            raise ValueError("allow must be a list of objects")
+        if not isinstance(raw, dict) or raw.get("version") != 1:
+            raise ValueError("allowlist version must be exactly 1")
+        entries = raw.get("allow")
+        error = validate_allow_entries(entries)
+        if error:
+            raise ValueError(error)
         return entries, ""
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return [], f"allowlist unavailable or invalid: {exc}"
+
+
+def validate_allow_entries(entries):
+    if not isinstance(entries, list):
+        return "allow must be a list of objects"
+    for item in entries:
+        if not isinstance(item, dict):
+            return "allow entries must be objects"
+        for field in ("repository", "branch"):
+            pattern = item.get(field)
+            if not isinstance(pattern, str) or not pattern:
+                return f"allow entry {field} must be a nonempty string"
+    return ""
 
 
 def allowlisted(entries, repo, branch):
@@ -80,12 +101,33 @@ def allowlisted(entries, repo, branch):
     )
 
 
+def valid_open_pr_head(open_pr):
+    """Open-PR race guards must be complete; ambiguity prevents deletion."""
+    if not isinstance(open_pr, dict):
+        return False
+    head = open_pr.get("head")
+    if not isinstance(head, dict):
+        return False
+    ref = head.get("ref")
+    head_repo = head.get("repo")
+    return (
+        isinstance(ref, str)
+        and bool(ref)
+        and isinstance(head_repo, dict)
+        and isinstance(head_repo.get("full_name"), str)
+        and bool(head_repo["full_name"])
+    )
+
+
 def skip(repo, pr_number, branch, reason):
     return {"repo": repo, "pr": pr_number, "branch": branch, "action": "skipped", "reason": reason}
 
 
 def evaluate_candidate(api, repo, pr_number, allow_entries, enforce):
     """Evaluate exactly one PR. Every failed/uncertain check is a skip."""
+    allow_error = validate_allow_entries(allow_entries)
+    if allow_error:
+        return skip(repo, pr_number, "", f"allowlist unavailable or invalid: {allow_error}")
     pr_result = api.request(f"repos/{repo}/pulls/{pr_number}")
     if not pr_result.ok or not isinstance(pr_result.value, dict):
         return skip(repo, pr_number, "", "could not read PR")
@@ -96,7 +138,7 @@ def evaluate_candidate(api, repo, pr_number, allow_entries, enforce):
     head_sha = head.get("sha", "")
     head_repo = (head.get("repo") or {}).get("full_name")
     base_repo = (base.get("repo") or {}).get("full_name")
-    if pr.get("state") != "closed" or pr.get("merged"):
+    if pr.get("state") != "closed" or pr.get("merged") is not False:
         return skip(repo, pr_number, branch, "PR is not closed and unmerged")
     if head_repo != repo or base_repo != repo:
         return skip(repo, pr_number, branch, "PR head/base is not the target repository")
@@ -127,8 +169,10 @@ def evaluate_candidate(api, repo, pr_number, allow_entries, enforce):
     if not open_prs.ok or not isinstance(open_prs.value, list):
         return skip(repo, pr_number, branch, "could not determine whether branch heads an open PR")
     for open_pr in open_prs.value:
-        open_head = (open_pr.get("head") or {}) if isinstance(open_pr, dict) else {}
-        if open_head.get("ref") == branch and ((open_head.get("repo") or {}).get("full_name") == repo):
+        if not valid_open_pr_head(open_pr):
+            return skip(repo, pr_number, branch, "open PR metadata is incomplete")
+        open_head = open_pr["head"]
+        if open_head["ref"] == branch and open_head["repo"]["full_name"] == repo:
             return skip(repo, pr_number, branch, "branch heads an open PR")
 
     # Refetch immediately before deletion to close the branch-recreation race.
@@ -179,7 +223,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--org", default="qwickapps")
     parser.add_argument("--repo", help="Target repository as owner/name")
-    parser.add_argument("--pr-number", type=int, help="Closed merged PR number in --repo")
+    parser.add_argument("--pr-number", type=int, help="Closed, unmerged PR number in --repo")
     parser.add_argument("--enforce", action="store_true", help="Delete only after all safety predicates pass")
     parser.add_argument("--dry-run", action="store_true", help="Audit only (the default for org-wide scans)")
     parser.add_argument("--since-days", type=int, default=2)

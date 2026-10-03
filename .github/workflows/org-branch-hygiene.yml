@@ -44,7 +44,7 @@ permissions:
 
 jobs:
   cleanup:
-    name: "Clean a merged PR branch safely"
+    name: "Clean a closed-unmerged PR branch safely"
     runs-on: [self-hosted, choco]
     # Do not run branch-deletion code from a fork-controlled PR workflow.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

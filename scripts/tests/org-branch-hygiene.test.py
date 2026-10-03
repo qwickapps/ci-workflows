@@ -3,7 +3,9 @@
 import importlib.util
 import pathlib
 import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("hygiene", ROOT / "scripts/org-branch-hygiene.py")
@@ -71,6 +73,21 @@ class CleanupSafetyTests(unittest.TestCase):
         responses[PR_ENDPOINT]["merged"] = True
         self.assert_never_deleted(responses)
 
+    def test_missing_null_or_nonboolean_merged_metadata_fails_closed(self):
+        for value in ("missing", None, "false", 0):
+            with self.subTest(value=value):
+                responses = baseline()
+                if value == "missing":
+                    del responses[PR_ENDPOINT]["merged"]
+                else:
+                    responses[PR_ENDPOINT]["merged"] = value
+                self.assert_never_deleted(responses)
+
+    def test_pr_lookup_error_fails_closed(self):
+        responses = baseline()
+        responses[PR_ENDPOINT] = hygiene.Result(False, error="HTTP 500")
+        self.assert_never_deleted(responses)
+
     def test_same_repository_is_required(self):
         responses = baseline()
         responses[PR_ENDPOINT]["head"]["repo"]["full_name"] = "fork/example"
@@ -88,6 +105,20 @@ class CleanupSafetyTests(unittest.TestCase):
         responses[f"repos/{REPO}"] = {"default_branch": "main"}
         self.assert_never_deleted(responses)
 
+    def test_default_branch_lookup_error_or_malformed_metadata_fails_closed(self):
+        for value in (hygiene.Result(False, error="HTTP 500"), {}, {"default_branch": None}):
+            with self.subTest(value=value):
+                responses = baseline()
+                responses[f"repos/{REPO}"] = value
+                self.assert_never_deleted(responses)
+
+    def test_initial_ref_lookup_error_or_malformed_metadata_fails_closed(self):
+        for value in (hygiene.Result(False, error="HTTP 500"), {}, {"object": {"sha": None}}):
+            with self.subTest(value=value):
+                responses = baseline()
+                responses[REF_ENDPOINT] = value
+                self.assert_never_deleted(responses)
+
     def test_protected_branch_is_never_deleted(self):
         responses = baseline()
         responses[PROTECTION_ENDPOINT] = {"required_status_checks": {}}
@@ -103,8 +134,50 @@ class CleanupSafetyTests(unittest.TestCase):
         responses[OPEN_ENDPOINT] = [{"head": {"ref": BRANCH, "repo": {"full_name": REPO}}}]
         self.assert_never_deleted(responses)
 
+    def test_open_pr_lookup_error_or_incomplete_metadata_fails_closed(self):
+        incomplete_heads = [
+            {"head": {"ref": BRANCH}},
+            {"head": {"ref": BRANCH, "repo": {}}},
+            {"head": {"ref": "", "repo": {"full_name": REPO}}},
+            {"head": None},
+            None,
+        ]
+        for value in [hygiene.Result(False, error="HTTP 500"), *incomplete_heads]:
+            with self.subTest(value=value):
+                responses = baseline()
+                responses[OPEN_ENDPOINT] = value if isinstance(value, hygiene.Result) else [value]
+                self.assert_never_deleted(responses)
+
+    def test_non_list_open_pr_response_fails_closed(self):
+        responses = baseline()
+        responses[OPEN_ENDPOINT] = {"head": {"ref": BRANCH, "repo": {"full_name": REPO}}}
+        self.assert_never_deleted(responses)
+
     def test_allowlist_is_never_deleted(self):
         self.assert_never_deleted(allow=[{"repository": REPO, "branch": "feature/*"}])
+
+    def test_malformed_allowlist_entries_disable_deletion_before_api_lookup(self):
+        for entries in (None, [{"repository": REPO}], [{"repository": "", "branch": "*"}], [{"repository": REPO, "branch": None}]):
+            with self.subTest(entries=entries):
+                api = FakeGitHub(baseline())
+                record = hygiene.evaluate_candidate(api, REPO, 42, entries, True)
+                self.assertEqual("skipped", record["action"])
+                self.assertEqual([], api.calls)
+
+    def test_allowlist_file_requires_version_and_complete_patterns(self):
+        malformed = [
+            {},
+            {"version": 2, "allow": []},
+            {"version": 1},
+            {"version": 1, "allow": [{"repository": REPO}]},
+        ]
+        for document in malformed:
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "allowlist.json"
+                path.write_text(__import__("json").dumps(document))
+                entries, error = hygiene.load_allowlist(path)
+                self.assertEqual([], entries)
+                self.assertTrue(error)
 
     def test_refetch_before_delete_prevents_race_deletion(self):
         class RaceGitHub(FakeGitHub):
@@ -122,6 +195,37 @@ class CleanupSafetyTests(unittest.TestCase):
         record = hygiene.evaluate_candidate(api, REPO, 42, [], True)
         self.assertEqual("skipped", record["action"])
         self.assertNotIn((DELETE_ENDPOINT, "DELETE", False), api.calls)
+
+    def test_final_ref_lookup_error_fails_closed(self):
+        class FinalReadErrorGitHub(FakeGitHub):
+            def __init__(self):
+                super().__init__(baseline())
+                self.ref_reads = 0
+            def request(self, endpoint, method="GET", paginate=False):
+                if endpoint == REF_ENDPOINT and method == "GET":
+                    self.ref_reads += 1
+                    if self.ref_reads == 2:
+                        self.calls.append((endpoint, method, paginate))
+                        return hygiene.Result(False, error="HTTP 500")
+                return super().request(endpoint, method, paginate)
+        api = FinalReadErrorGitHub()
+        record = hygiene.evaluate_candidate(api, REPO, 42, [], True)
+        self.assertEqual("skipped", record["action"])
+        self.assertNotIn((DELETE_ENDPOINT, "DELETE", False), api.calls)
+
+    def test_delete_api_failure_is_not_reported_as_deleted(self):
+        responses = baseline()
+        responses[(DELETE_ENDPOINT, "DELETE")] = hygiene.Result(False, error="HTTP 500")
+        api, record = self.run_candidate(responses)
+        self.assertEqual("skipped", record["action"])
+        self.assertIn((DELETE_ENDPOINT, "DELETE", False), api.calls)
+
+    def test_paginated_non_array_page_is_rejected(self):
+        completed = subprocess.CompletedProcess(["gh"], 0, stdout='[{"number": 1}]\n{"number": 2}\n', stderr="")
+        with mock.patch.object(hygiene.subprocess, "run", return_value=completed):
+            result = hygiene.GitHub().request("repos/example/pulls", paginate=True)
+        self.assertFalse(result.ok)
+        self.assertIn("non-array page", result.error)
 
     def test_positive_path_deletes_exact_ref_only_after_all_checks(self):
         api, record = self.run_candidate()
