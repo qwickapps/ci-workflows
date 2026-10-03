@@ -50,14 +50,39 @@ git -C "$TMP/entrypoint-mem" add . && git -C "$TMP/entrypoint-mem" commit -qm en
 assert_fail "memory state default in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
 
 fixture "$TMP/entrypoint-ephemeral-assignment"
-printf '\nexport TS_EPHEMERAL_AUTHKEY=fixture-only\n' >> "$TMP/entrypoint-ephemeral-assignment/entrypoint.sh"
+printf '\nexport TS_EPHEMERAL_AUTHKEY=[redacted: assigned secret]' >> "$TMP/entrypoint-ephemeral-assignment/entrypoint.sh"
 git -C "$TMP/entrypoint-ephemeral-assignment" add . && git -C "$TMP/entrypoint-ephemeral-assignment" commit -qm entrypoint-ephemeral-assignment
 assert_fail "ephemeral key assignment in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-ephemeral-assignment' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
+fixture "$TMP/entrypoint-ephemeral-readonly"
+printf '\nreadonly TS_EPHEMERAL_AUTHKEY=[redacted: assigned secret]\n' >> "$TMP/entrypoint-ephemeral-readonly/entrypoint.sh"
+git -C "$TMP/entrypoint-ephemeral-readonly" add . && git -C "$TMP/entrypoint-ephemeral-readonly" commit -qm entrypoint-ephemeral-readonly
+assert_fail "readonly ephemeral key declaration in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-ephemeral-readonly' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
+fixture "$TMP/entrypoint-ephemeral-declare"
+printf '\ndeclare TS_EPHEMERAL_AUTHKEY=[redacted: assigned secret]\n' >> "$TMP/entrypoint-ephemeral-declare/entrypoint.sh"
+git -C "$TMP/entrypoint-ephemeral-declare" add . && git -C "$TMP/entrypoint-ephemeral-declare" commit -qm entrypoint-ephemeral-declare
+assert_fail "declare ephemeral key declaration in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-ephemeral-declare' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
+fixture "$TMP/entrypoint-ephemeral-local"
+printf '\nf(){ local TS_EPHEMERAL_AUTHKEY=[redacted: assigned secret] }\n' >> "$TMP/entrypoint-ephemeral-local/entrypoint.sh"
+git -C "$TMP/entrypoint-ephemeral-local" add . && git -C "$TMP/entrypoint-ephemeral-local" commit -qm entrypoint-ephemeral-local
+assert_fail "local ephemeral key declaration in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-ephemeral-local' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
 
 fixture "$TMP/entrypoint-mem-assignment"
 printf '\nTS_STATE_MODE=mem\n' >> "$TMP/entrypoint-mem-assignment/entrypoint.sh"
 git -C "$TMP/entrypoint-mem-assignment" add . && git -C "$TMP/entrypoint-mem-assignment" commit -qm entrypoint-mem-assignment
 assert_fail "memory state assignment in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem-assignment' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
+fixture "$TMP/entrypoint-mem-readonly"
+printf '\nreadonly TS_STATE_MODE=mem\n' >> "$TMP/entrypoint-mem-readonly/entrypoint.sh"
+git -C "$TMP/entrypoint-mem-readonly" add . && git -C "$TMP/entrypoint-mem-readonly" commit -qm entrypoint-mem-readonly
+assert_fail "readonly memory state declaration in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem-readonly' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
+fixture "$TMP/entrypoint-mem-declare"
+printf '\ndeclare TS_STATE_MODE=mem\n' >> "$TMP/entrypoint-mem-declare/entrypoint.sh"
+git -C "$TMP/entrypoint-mem-declare" add . && git -C "$TMP/entrypoint-mem-declare" commit -qm entrypoint-mem-declare
+assert_fail "declare memory state declaration in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem-declare' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
 
 mkdir -p "$TMP/env/.deploy-app-env"
 printf 'TS_EPHEMERAL_AUTHKEY=tskey-client-ignored\n' > "$TMP/env/.deploy-app-env/live.env"

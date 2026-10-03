@@ -46,11 +46,13 @@ case "$mode" in
     if grep -nF '${TS_STATE_MODE:-mem}' entrypoint.sh >/dev/null; then
       fail "canonical entrypoint must not default Tailscale state to memory"
     fi
-    if grep -nE '^[[:space:]]*(export[[:space:]]+)?TS_EPHEMERAL_AUTHKEY([[:space:]]*=|[[:space:]]*$)' entrypoint.sh >/dev/null; then
-      fail "canonical entrypoint must not assign or export TS_EPHEMERAL_AUTHKEY"
+    if grep -nE '(^|[;{][[:space:]]*|^[[:space:]]*)(export|readonly|declare|typeset|local)([[:space:]]+(-[[:alnum:]-]+|--))*[[:space:]]+TS_EPHEMERAL_AUTHKEY([[:space:]]*=|[[:space:];}]|$)' entrypoint.sh >/dev/null \
+      || grep -nE '(^|[;{][[:space:]]*)TS_EPHEMERAL_AUTHKEY[[:space:]]*=' entrypoint.sh >/dev/null; then
+      fail "canonical entrypoint must not assign or declare TS_EPHEMERAL_AUTHKEY"
     fi
-    if grep -nE "^[[:space:]]*(export[[:space:]]+)?TS_STATE_MODE[[:space:]]*=[[:space:]]*['\"]?mem['\"]?([[:space:]]*(#.*)?$|;)" entrypoint.sh >/dev/null; then
-      fail "canonical entrypoint must not assign TS_STATE_MODE=mem"
+    if grep -nE "(^|[;{][[:space:]]*|^[[:space:]]*)(export|readonly|declare|typeset|local)([[:space:]]+(-[[:alnum:]-]+|--))*[[:space:]]+TS_STATE_MODE[[:space:]]*=[[:space:]]*['\"]?mem['\"]?([[:space:]]*(#.*)?$|[;}])" entrypoint.sh >/dev/null \
+      || grep -nE "(^|[;{][[:space:]]*)TS_STATE_MODE[[:space:]]*=[[:space:]]*['\"]?mem['\"]?([[:space:]]*(#.*)?$|[;}])" entrypoint.sh >/dev/null; then
+      fail "canonical entrypoint must not assign or declare TS_STATE_MODE=mem"
     fi
     if git grep -nE '(TS_EPHEMERAL_AUTHKEY[[:space:]]*=|TS_STATE_MODE[[:space:]]*=[[:space:]]*mem|--statedir[[:space:]]*=[^[:space:]]*(/tmp|mem))' -- \
       Dockerfile ':!tests/**' ':!entrypoint.sh' '.github/workflows' 2>/dev/null | grep -v '/tests/' >/dev/null; then
