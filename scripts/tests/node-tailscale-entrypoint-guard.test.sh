@@ -44,6 +44,11 @@ printf 'TS_STATE_MODE=mem\n' > "$TMP/mem/.github/workflows/deploy.yml"
 git -C "$TMP/mem" add . && git -C "$TMP/mem" commit -qm mem
 assert_fail "memory state in production workflow fails" bash -c "cd '$TMP/mem' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
 
+fixture "$TMP/entrypoint-mem"
+printf '\nSTATE_MODE="${TS_STATE_MODE:-mem}"\n' >> "$TMP/entrypoint-mem/entrypoint.sh"
+git -C "$TMP/entrypoint-mem" add . && git -C "$TMP/entrypoint-mem" commit -qm entrypoint-mem
+assert_fail "memory state default in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
+
 mkdir -p "$TMP/env/.deploy-app-env"
 printf 'TS_EPHEMERAL_AUTHKEY=tskey-client-ignored\n' > "$TMP/env/.deploy-app-env/live.env"
 assert_fail "production ephemeral env fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/img-node:release '$GUARD' --production-env"
