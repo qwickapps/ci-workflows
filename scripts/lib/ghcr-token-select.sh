@@ -93,24 +93,44 @@ ghcr_parse_image_ref() {
 ghcr_probe_pull_token() {
   local actor="$1" token="$2" owner="$3" package="$4" tag="$5"
 
+  # Caller-visible diagnostic only; never contains a credential value.
+  GHCR_PROBE_REASON="unknown"
+
   if [ -z "$token" ]; then
+    GHCR_PROBE_REASON="empty_token"
     return 1
   fi
 
   local scope="repository:${owner}/${package}:pull"
-  local token_resp bearer
-  token_resp="$(curl -fsS --max-time 10 -u "${actor}:${token}" \
-    "https://ghcr.io/token?service=ghcr.io&scope=${scope}" 2>/dev/null)" || return 1
-  bearer="$(printf '%s' "$token_resp" | jq -r '.token // empty' 2>/dev/null)" || return 1
-  [ -n "$bearer" ] || return 1
+  local token_with_status token_resp token_status bearer
+  if ! token_with_status="$(curl -sS --max-time 10 -u "${actor}:${token}" -w $'\n%{http_code}' \
+    "https://ghcr.io/token?service=ghcr.io&scope=${scope}" 2>/dev/null)"; then
+    GHCR_PROBE_REASON="token_endpoint_unreachable"
+    return 1
+  fi
+  token_status="${token_with_status##*$'\n'}"
+  token_resp="${token_with_status%$'\n'*}"
+  case "$token_status" in
+    200) ;;
+    401|403) GHCR_PROBE_REASON="token_auth_failed"; return 1 ;;
+    *) GHCR_PROBE_REASON="token_http_${token_status}"; return 1 ;;
+  esac
+  bearer="$(printf '%s' "$token_resp" | jq -r '.token // empty' 2>/dev/null)" || { GHCR_PROBE_REASON="token_response_invalid"; return 1; }
+  [ -n "$bearer" ] || { GHCR_PROBE_REASON="token_response_invalid"; return 1; }
 
   local accept="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
   local status
-  status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+  status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
     -H "Authorization: Bearer ${bearer}" \
     -H "Accept: ${accept}" \
     "https://ghcr.io/v2/${owner}/${package}/manifests/${tag}" 2>/dev/null)" || return 1
-  [ "$status" = "200" ]
+  case "$status" in
+    200) GHCR_PROBE_REASON="ok"; return 0 ;;
+    404) GHCR_PROBE_REASON="manifest_missing"; return 1 ;;
+    401|403) GHCR_PROBE_REASON="manifest_auth_failed"; return 1 ;;
+    000) GHCR_PROBE_REASON="manifest_unreachable"; return 1 ;;
+    *) GHCR_PROBE_REASON="manifest_http_${status}"; return 1 ;;
+  esac
 }
 
 # ghcr_probe_auth_only <actor> <token> <owner>
@@ -156,4 +176,17 @@ ghcr_select_token() {
   done
 
   return 1
+}
+
+# ghcr_describe_probe_failure
+# Prints a non-secret, operator-actionable explanation of the most recent
+# ghcr_probe_pull_token failure.  In particular, a 404 is a missing image/tag,
+# not an authorization failure.
+ghcr_describe_probe_failure() {
+  case "${GHCR_PROBE_REASON:-unknown}" in
+    manifest_missing) printf '%s\n' 'manifest is missing (image/tag does not exist)' ;;
+    token_auth_failed|manifest_auth_failed) printf '%s\n' 'credential is not authorized to pull this image' ;;
+    empty_token) printf '%s\n' 'credential is empty' ;;
+    *) printf '%s\n' "registry probe failed (${GHCR_PROBE_REASON:-unknown})" ;;
+  esac
 }

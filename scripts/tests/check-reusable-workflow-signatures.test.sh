@@ -89,20 +89,23 @@ else
   echo "  SKIP: historical fixture commits not present in this checkout (need full history)"
 fi
 
-# --- Test 2: false positive check on the current repo state ----------------
+# --- Test 2: false-positive check on the current repo state ----------------
+# The implementation PR may intentionally carry a signature change from an
+# earlier commit. Compare this guard change only with its immediate parent,
+# which preserves that interface change while proving guard-only edits do not
+# create a false positive.
 echo ""
-echo "-- Test 2: false-positive check (current branch vs origin/main) --"
+echo "-- Test 2: false-positive check (current guard change vs parent) --"
 
 cd "$ROOT_DIR"
-if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  merge_base="$(git merge-base origin/main HEAD 2>/dev/null || echo origin/main)"
-  clean_out="$(BASE_REF="$merge_base" bash "$GUARD" 2>&1)" && clean_rc=0 || clean_rc=$?
+if git rev-parse --verify --quiet HEAD^ >/dev/null 2>&1; then
+  clean_out="$(BASE_REF=HEAD^ bash "$GUARD" 2>&1)" && clean_rc=0 || clean_rc=$?
   printf '%s\n' "$clean_out" | indent
 
-  assert "current repo state: guard exits zero (PASSes)" \
+  assert "current guard change: exits zero (PASSes)" \
     test "$clean_rc" -eq 0
 else
-  echo "  SKIP: origin/main not available in this checkout"
+  echo "  SKIP: HEAD parent not available in this checkout"
 fi
 
 # --- Test 3 & 4: synthetic fixtures in a scratch git repo -------------------
@@ -187,6 +190,50 @@ reformat_out="$(cd "$SCRATCH_DIR" && BASE_REF=fixture-renamed HEAD_REF=fixture-r
 printf '%s\n' "$reformat_out" | indent
 assert "synthetic reformat-only: guard exits zero (PASSes)" \
   test "$reformat_rc" -eq 0
+
+# --- Test 5: exact auditable PR-comment approval ---------------------------
+echo ""
+echo "-- Test 5: exact PR-comment approval marker --"
+MOCK_BIN="$SCRATCH_DIR/mock-bin"
+mkdir -p "$MOCK_BIN"
+cat > "$MOCK_BIN/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "api" ] && [[ "$2" == repos/example/repo/issues/42/comments ]]; then
+  cat "$MOCK_COMMENTS"
+  exit 0
+fi
+exit 2
+SH
+chmod +x "$MOCK_BIN/gh"
+fixture_base_sha="$(cd "$SCRATCH_DIR" && git rev-parse fixture-base)"
+fixture_head_sha="$(cd "$SCRATCH_DIR" && git rev-parse fixture-renamed)"
+EVENT_JSON="$SCRATCH_DIR/event.json"
+COMMENTS_JSON="$SCRATCH_DIR/comments.json"
+python3 - "$EVENT_JSON" "$fixture_base_sha" "$fixture_head_sha" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump({"pull_request": {"number": 42, "base": {"sha": sys.argv[2]}, "head": {"sha": sys.argv[3]}}}, fh)
+PY
+printf '[]\n' > "$COMMENTS_JSON"
+approval_missing_out="$(cd "$SCRATCH_DIR" && PATH="$MOCK_BIN:$PATH" MOCK_COMMENTS="$COMMENTS_JSON" GITHUB_EVENT_PATH="$EVENT_JSON" GITHUB_REPOSITORY=example/repo GH_TOKEN=test SIGNATURE_APPROVAL_LOGIN=approver BASE_REF=fixture-base HEAD_REF=fixture-renamed bash "$GUARD" 2>&1)" && approval_missing_rc=0 || approval_missing_rc=$?
+printf '%s\n' "$approval_missing_out" | indent
+assert "synthetic approval: missing marker exits non-zero (FAILs)" \
+  test "$approval_missing_rc" -ne 0
+approval_marker="$(grep -F 'Required auditable PR-comment marker: ' <<<"$approval_missing_out" | sed 's/^.*marker: //')"
+assert "synthetic approval: guard emits an exact marker" \
+  test -n "$approval_marker"
+python3 - "$COMMENTS_JSON" "$approval_marker" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump([{"user": {"login": "approver"}, "body": sys.argv[2]}], fh)
+PY
+approval_ok_out="$(cd "$SCRATCH_DIR" && PATH="$MOCK_BIN:$PATH" MOCK_COMMENTS="$COMMENTS_JSON" GITHUB_EVENT_PATH="$EVENT_JSON" GITHUB_REPOSITORY=example/repo GH_TOKEN=test SIGNATURE_APPROVAL_LOGIN=approver BASE_REF=fixture-base HEAD_REF=fixture-renamed bash "$GUARD" 2>&1)" && approval_ok_rc=0 || approval_ok_rc=$?
+printf '%s\n' "$approval_ok_out" | indent
+assert "synthetic approval: exact trusted marker exits zero (PASSes)" \
+  test "$approval_ok_rc" -eq 0
+assert "synthetic approval: reports accepted approval" \
+  grep -q 'APPROVED: exact reusable-workflow signature diff' <<<"$approval_ok_out"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
