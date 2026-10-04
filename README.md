@@ -265,6 +265,31 @@ export CHECK_OUTPUT="$(./scripts/attribution-check.sh $BASE $HEAD 2>&1)"
 
 ---
 
+### `scripts/caprover-slot-admin.sh remove-env`
+
+Removes only explicitly named environment variables from a CapRover app while
+preserving the rest of the app definition. It is dry-run by default, applies a
+single atomic update when `--dry-run false` is supplied, and reads the app back
+to verify the exact resulting `envVars` array.
+
+```bash
+./scripts/caprover-slot-admin.sh remove-env \
+  --app-name my-app \
+  --keys OLD_API_KEY,LEGACY_URL \
+  --caprover-url https://captain.example.com \
+  --caprover-password "$CAPROVER_PASSWORD"
+
+# Apply after reviewing the dry-run output:
+./scripts/caprover-slot-admin.sh remove-env \
+  --app-name my-app \
+  --keys OLD_API_KEY,LEGACY_URL \
+  --caprover-url https://captain.example.com \
+  --caprover-password "$CAPROVER_PASSWORD" \
+  --dry-run false
+```
+
+---
+
 ## Contributing
 
 1. All changes go through a PR on `main`.
