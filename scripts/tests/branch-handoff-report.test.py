@@ -78,6 +78,27 @@ class BranchHandoffReportTests(unittest.TestCase):
         )
         self.assert_error(report, inventory, "cite this exact branch")
 
+    def test_exact_branch_and_exact_sha_citations_are_accepted(self):
+        for action in (
+            "Task t_ab12cd34 must verify PR #90 for branch anika/example and decide whether to reopen it.",
+            "Agent @anika must check unique commits at SHA " + "a" * 40 + " and decide whether to preserve them.",
+        ):
+            with self.subTest(action=action):
+                report, inventory = valid_pair()
+                report["repositories"][0]["branches"][0]["next_action"] = action
+                self.assertEqual([], self.validate(report, inventory))
+
+    def test_branch_suffix_collisions_are_not_exact_citations(self):
+        for suffix in ("+other", "@other", "=other", "é"):
+            with self.subTest(suffix=suffix):
+                report, inventory = valid_pair()
+                report["repositories"][0]["branches"][0]["next_action"] = (
+                    "Task t_ab12cd34 must verify PR #90 for branch anika/example"
+                    + suffix
+                    + " and decide whether to reopen it."
+                )
+                self.assert_error(report, inventory, "cite this exact branch")
+
     def test_malformed_and_stale_generated_at_are_rejected(self):
         report, inventory = valid_pair()
         report["generated_at"] = "not-a-timestamp"
@@ -85,6 +106,13 @@ class BranchHandoffReportTests(unittest.TestCase):
         report, inventory = valid_pair()
         report["generated_at"] = (NOW - timedelta(seconds=checker.MAX_FRESHNESS_SECONDS + 1)).isoformat()
         self.assert_error(report, inventory, "generated_at exceeds")
+
+    def test_generated_at_utc_conversion_range_edges_return_clean_errors(self):
+        for value in ("0001-01-01T00:00:00+23:00", "9999-12-31T23:59:59-23:00"):
+            with self.subTest(value=value):
+                report, inventory = valid_pair()
+                report["generated_at"] = value
+                self.assert_error(report, inventory, "generated_at must be a valid ISO-8601 timestamp")
 
     def test_malformed_identity_values_return_errors_without_exception(self):
         for field, value, expected in (
@@ -134,6 +162,13 @@ class BranchHandoffReportTests(unittest.TestCase):
         report, inventory = valid_pair()
         inventory["observed_at"] = (NOW - timedelta(seconds=checker.MAX_FRESHNESS_SECONDS + 1)).isoformat()
         self.assert_error(report, inventory, "inventory observed_at exceeds")
+
+    def test_inventory_timestamp_utc_conversion_range_edges_return_clean_errors(self):
+        for value in ("0001-01-01T00:00:00+23:00", "9999-12-31T23:59:59-23:00"):
+            with self.subTest(value=value):
+                report, inventory = valid_pair()
+                inventory["observed_at"] = value
+                self.assert_error(report, inventory, "inventory observed_at must be a valid ISO-8601 timestamp")
 
     def test_valid_cli_path_uses_a_fresh_pair(self):
         current = datetime.now(timezone.utc).isoformat()

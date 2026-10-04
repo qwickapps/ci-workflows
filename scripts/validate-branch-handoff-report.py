@@ -34,7 +34,8 @@ UNIQUE_COMMIT_DECISION = re.compile(
     re.IGNORECASE,
 )
 SHA = re.compile(r"^[0-9a-f]{40}$")
-IDENTITY_CHARS = r"A-Za-z0-9_./-"
+BRANCH_CITATION = re.compile(r"\bbranch[ \t]+(?P<identity>\S+)", re.IGNORECASE)
+SHA_CITATION = re.compile(r"\bsha[ \t]+(?P<identity>\S+)", re.IGNORECASE)
 MAX_FRESHNESS_SECONDS = 60 * 60
 
 
@@ -55,7 +56,11 @@ def parse_timestamp(value, field, errors):
     if parsed.tzinfo is None:
         fail(errors, f"{field} must include a timezone")
         return None
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        fail(errors, f"{field} must be a valid ISO-8601 timestamp within the supported range")
+        return None
 
 
 def require_fresh(timestamp, field, now, errors):
@@ -68,14 +73,15 @@ def require_fresh(timestamp, field, now, errors):
         fail(errors, f"{field} exceeds {MAX_FRESHNESS_SECONDS}-second freshness window")
 
 
-def exact_identity_in_action(value, action):
-    return bool(re.search(rf"(?<![{IDENTITY_CHARS}]){re.escape(value)}(?![{IDENTITY_CHARS}])", action))
+def exact_identity_cited(pattern, value, action):
+    """Require a whitespace-delimited identity after an explicit branch/SHA label."""
+    return any(match.group("identity") == value for match in pattern.finditer(action))
 
 
 def handoff_is_specific(branch, action):
     cited_branch_or_sha = (
-        exact_identity_in_action(branch["branch"], action)
-        or exact_identity_in_action(branch["observed_sha"], action)
+        exact_identity_cited(BRANCH_CITATION, branch["branch"], action)
+        or exact_identity_cited(SHA_CITATION, branch["observed_sha"], action)
     )
     decision = PR_DECISION.search(action) or UNIQUE_COMMIT_DECISION.search(action)
     return bool(TASK_OR_AGENT.search(action) and cited_branch_or_sha and decision)
