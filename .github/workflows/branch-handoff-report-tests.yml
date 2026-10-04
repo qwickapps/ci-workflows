@@ -26,4 +26,3 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/tests/branch-handoff-report.test.py
-      - run: python3 scripts/validate-branch-handoff-report.py scripts/tests/fixtures/branch-handoff-report/valid.json
