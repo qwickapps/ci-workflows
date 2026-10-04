@@ -16,10 +16,7 @@
 #   1. The real historical incident: comparing 28e9f941 (base) against
 #      90e0adf9 (breaking commit) must FAIL, and must name
 #      main-push-guard.yml and the removed workflow_call interface.
-#   2. False positive check: comparing the merge-base with origin/main
-#      against the current working tree (this branch, including this very
-#      guard's own new files) must PASS -- adding unrelated new files, or a
-#      brand-new reusable workflow, must never trip the guard.
+#   2. Control check: comparing the current exact commit to itself must PASS.
 #   3. Synthetic unit test: a reusable workflow file that keeps
 #      on.workflow_call but renames one input key (add + remove within the
 #      same section, net key count unchanged) must FAIL -- proving this
@@ -89,23 +86,22 @@ else
   echo "  SKIP: historical fixture commits not present in this checkout (need full history)"
 fi
 
-# --- Test 2: false-positive check on the current repo state ----------------
-# The implementation PR may intentionally carry a signature change from an
-# earlier commit. Compare this guard change only with its immediate parent,
-# which preserves that interface change while proving guard-only edits do not
-# create a false positive.
+# --- Test 2: unchanged exact-commit control --------------------------------
+# The implementation PR intentionally changes deploy-app.yml's callable
+# signature, so comparing it to its base should fail without approval.  An
+# exact same-commit comparison remains a useful no-false-positive control.
 echo ""
-echo "-- Test 2: false-positive check (current guard change vs parent) --"
+echo "-- Test 2: unchanged exact-commit control --"
 
 cd "$ROOT_DIR"
-if git rev-parse --verify --quiet HEAD^ >/dev/null 2>&1; then
-  clean_out="$(BASE_REF=HEAD^ bash "$GUARD" 2>&1)" && clean_rc=0 || clean_rc=$?
+if git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  clean_out="$(BASE_REF=HEAD HEAD_REF=HEAD bash "$GUARD" 2>&1)" && clean_rc=0 || clean_rc=$?
   printf '%s\n' "$clean_out" | indent
 
-  assert "current guard change: exits zero (PASSes)" \
+  assert "unchanged exact commit: exits zero (PASSes)" \
     test "$clean_rc" -eq 0
 else
-  echo "  SKIP: HEAD parent not available in this checkout"
+  echo "  SKIP: HEAD not available in this checkout"
 fi
 
 # --- Test 3 & 4: synthetic fixtures in a scratch git repo -------------------
@@ -234,6 +230,90 @@ assert "synthetic approval: exact trusted marker exits zero (PASSes)" \
   test "$approval_ok_rc" -eq 0
 assert "synthetic approval: reports accepted approval" \
   grep -q 'APPROVED: exact reusable-workflow signature diff' <<<"$approval_ok_out"
+
+# --- Test 6: PR-event-shaped exact base/head integration -------------------
+# GitHub's pull_request checkout defaults to a synthetic merge ref.  This
+# integration drives the guard with the exact event-shaped base/head pair used
+# by the workflows, and proves every approval binding fails closed except the
+# exact marker from the approved login.
+echo ""
+echo "-- Test 6: PR-event-shaped exact base/head approval integration --"
+pr_base_sha="${PR_EVENT_BASE_SHA:-}"
+pr_head_sha="${PR_EVENT_HEAD_SHA:-}"
+if [ -z "$pr_base_sha" ]; then
+  pr_base_sha="$(cd "$ROOT_DIR" && git merge-base origin/main HEAD)"
+fi
+if [ -z "$pr_head_sha" ]; then
+  pr_head_sha="$(cd "$ROOT_DIR" && git rev-parse HEAD)"
+fi
+
+if git -C "$ROOT_DIR" rev-parse --verify --quiet "${pr_base_sha}^{commit}" >/dev/null \
+  && git -C "$ROOT_DIR" rev-parse --verify --quiet "${pr_head_sha}^{commit}" >/dev/null; then
+  PR_EVENT_JSON="$SCRATCH_DIR/pr-event.json"
+  STALE_EVENT_JSON="$SCRATCH_DIR/pr-event-stale-head.json"
+  python3 - "$PR_EVENT_JSON" "$STALE_EVENT_JSON" "$pr_base_sha" "$pr_head_sha" <<'PY'
+import json, sys
+event = {"number": 42, "pull_request": {"number": 42, "base": {"sha": sys.argv[3]}, "head": {"sha": sys.argv[4]}}}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(event, fh)
+event["pull_request"]["head"]["sha"] = sys.argv[3]
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    json.dump(event, fh)
+PY
+
+  run_pr_event_guard() {
+    (cd "$ROOT_DIR" && PATH="$MOCK_BIN:$PATH" MOCK_COMMENTS="$COMMENTS_JSON" \
+      GITHUB_EVENT_PATH="$1" GITHUB_REPOSITORY=example/repo GH_TOKEN=test \
+      SIGNATURE_APPROVAL_LOGIN=approver BASE_REF="$pr_base_sha" \
+      HEAD_REF="$pr_head_sha" bash "$GUARD" 2>&1)
+  }
+
+  printf '[]\n' > "$COMMENTS_JSON"
+  pr_missing_out="$(run_pr_event_guard "$PR_EVENT_JSON")" && pr_missing_rc=0 || pr_missing_rc=$?
+  printf '%s\n' "$pr_missing_out" | indent
+  assert "PR event: absent marker exits non-zero (FAILs)" \
+    test "$pr_missing_rc" -ne 0
+  pr_marker="$(grep -F 'Required auditable PR-comment marker: ' <<<"$pr_missing_out" | sed 's/^.*marker: //')"
+  assert "PR event: emits an exact base/head marker" \
+    test -n "$pr_marker"
+
+  python3 - "$COMMENTS_JSON" "${pr_marker%?}x" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump([{"user": {"login": "approver"}, "body": sys.argv[2]}], fh)
+PY
+  pr_wrong_digest_out="$(run_pr_event_guard "$PR_EVENT_JSON")" && pr_wrong_digest_rc=0 || pr_wrong_digest_rc=$?
+  printf '%s\n' "$pr_wrong_digest_out" | indent
+  assert "PR event: wrong-digest marker exits non-zero (FAILs)" \
+    test "$pr_wrong_digest_rc" -ne 0
+
+  python3 - "$COMMENTS_JSON" "$pr_marker" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump([{"user": {"login": "untrusted-reviewer"}, "body": sys.argv[2]}], fh)
+PY
+  pr_wrong_author_out="$(run_pr_event_guard "$PR_EVENT_JSON")" && pr_wrong_author_rc=0 || pr_wrong_author_rc=$?
+  printf '%s\n' "$pr_wrong_author_out" | indent
+  assert "PR event: wrong-author marker exits non-zero (FAILs)" \
+    test "$pr_wrong_author_rc" -ne 0
+
+  python3 - "$COMMENTS_JSON" "$pr_marker" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump([{"user": {"login": "approver"}, "body": sys.argv[2]}], fh)
+PY
+  pr_stale_head_out="$(run_pr_event_guard "$STALE_EVENT_JSON")" && pr_stale_head_rc=0 || pr_stale_head_rc=$?
+  printf '%s\n' "$pr_stale_head_out" | indent
+  assert "PR event: stale-head context exits non-zero (FAILs)" \
+    test "$pr_stale_head_rc" -ne 0
+
+  pr_exact_out="$(run_pr_event_guard "$PR_EVENT_JSON")" && pr_exact_rc=0 || pr_exact_rc=$?
+  printf '%s\n' "$pr_exact_out" | indent
+  assert "PR event: exact head/digest/approved-login marker exits zero (PASSes)" \
+    test "$pr_exact_rc" -eq 0
+else
+  echo "  SKIP: PR base/head commits are not available in this checkout"
+fi
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

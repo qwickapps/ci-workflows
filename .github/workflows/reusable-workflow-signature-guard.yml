@@ -44,6 +44,9 @@ jobs:
       - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
+          # pull_request defaults to the synthetic merge ref; the guard must
+          # compare the actual reviewed PR head to the event payload.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Install PyYAML
