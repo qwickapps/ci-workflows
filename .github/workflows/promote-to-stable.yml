@@ -219,6 +219,7 @@ jobs:
               STABLE_APP="${APP}-stable"
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_DEV_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
+              LIVE_APP_URL="https://${LIVE_APP}.dev.qwickforge.com"
               STABLE_APP_URL="https://${STABLE_APP}.dev.qwickforge.com"
               ;;
             prod)
@@ -226,6 +227,7 @@ jobs:
               STABLE_APP="${APP}-stable"
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
               STABLE_APP_URL="https://${STABLE_APP}.app.qwickforge.com"
               ;;
             uat)
@@ -233,6 +235,7 @@ jobs:
               STABLE_APP="${APP}-uat-stable"
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
+              LIVE_APP_URL="https://${LIVE_APP}.app.qwickforge.com"
               STABLE_APP_URL="https://${STABLE_APP}.app.qwickforge.com"
               ;;
           esac
@@ -253,6 +256,7 @@ jobs:
           echo "STABLE_APP=${STABLE_APP}"               >> "$GITHUB_ENV"
           echo "CAPROVER_URL=${CAPROVER_URL}"           >> "$GITHUB_ENV"
           echo "CAPROVER_PASSWORD=${CAPROVER_PASSWORD}" >> "$GITHUB_ENV"
+          echo "LIVE_APP_URL=${LIVE_APP_URL}"           >> "$GITHUB_ENV"
           echo "STABLE_APP_URL=${STABLE_APP_URL}"       >> "$GITHUB_ENV"
           echo "GHCR_PUSH_TOKEN=${{ secrets.GHCR_PUSH_TOKEN }}" >> "$GITHUB_ENV"
           echo "GHCR_PULL_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}" >> "$GITHUB_ENV"
@@ -417,6 +421,25 @@ jobs:
             [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep "$SLEEP_SEC"
           done
           echo "ERROR: Stable slot health check failed after ${MAX_ATTEMPTS} attempts."
+          exit 1
+
+      - name: Validate live slot health after stable promotion
+        run: |
+          HEALTH_URL="${LIVE_APP_URL}${HEALTH_PATH}"
+          echo "Verifying sibling live slot remains healthy at ${HEALTH_URL}..."
+          MAX_ATTEMPTS=3
+          SLEEP_SEC=5
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1
+            rc=$?
+            echo "  Attempt ${attempt}/${MAX_ATTEMPTS}: curl exit ${rc}"
+            if [ $rc -eq 0 ]; then
+              echo "Live slot health check passed."
+              exit 0
+            fi
+            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep "$SLEEP_SEC"
+          done
+          echo "ERROR: Live slot health check failed after ${MAX_ATTEMPTS} attempts."
           exit 1
 
       - name: Notify via Telegram
