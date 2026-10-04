@@ -146,6 +146,11 @@ on:
         type: string
         default: ''
 
+      route_gateway:
+        description: 'Whether a live-stage deployment may update qwickway routing after health checks'
+        type: boolean
+        default: true
+
       # -- CMD override ----------------------------------------------------
       cmd:
         description: 'Container CMD override sent to configure-caprover-app'
@@ -742,7 +747,8 @@ jobs:
           if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "github.token" "$GHCR_TOKEN_EPHEMERAL" \
               "GHCR_PULL_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
-            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            ghcr_probe_pull_token "${{ github.actor }}" "$GHCR_TOKEN_LEGACY" "$REF_OWNER" "$PACKAGE" "$TAG" || true
+            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to write an unusable GHCR credential"
             exit 1
           fi
           echo "GHCR pull token source: $SOURCE"
@@ -960,7 +966,8 @@ jobs:
           if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
               "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            ghcr_probe_pull_token "${{ github.actor }}" "$GH_TOKEN_EPHEMERAL" "$REF_OWNER" "$PACKAGE" "$TAG" || true
+            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
@@ -1370,7 +1377,7 @@ jobs:
             --on-permission-denied skip
 
       - name: Route qwickway to ordered live/stable for live stage
-        if: needs.resolve-stage.outputs.stage == 'live'
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.route_gateway == true
         run: |
           set -euo pipefail
           GW_URL="${{ secrets.OCI_GATEWAY_CAPROVER_URL }}"
@@ -1428,7 +1435,7 @@ jobs:
             "${STABLE_ARGS[@]}"
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
-        if: needs.resolve-stage.outputs.stage == 'live'
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.route_gateway == true
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
@@ -1552,7 +1559,8 @@ jobs:
           if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "github.token" "$GHCR_TOKEN_EPHEMERAL" \
               "GHCR_PUSH_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
-            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            ghcr_probe_pull_token "${{ github.actor }}" "$GHCR_TOKEN_LEGACY" "$REF_OWNER" "$PACKAGE" "$TAG" || true
+            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to write an unusable GHCR credential"
             exit 1
           fi
           echo "GHCR token source: $SOURCE"
@@ -1930,7 +1938,8 @@ jobs:
           if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
               "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            ghcr_probe_pull_token "${{ github.actor }}" "$GH_TOKEN_EPHEMERAL" "$REF_OWNER" "$PACKAGE" "$TAG" || true
+            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"

@@ -77,6 +77,8 @@ if ! python3 -c "import yaml" >/dev/null 2>&1; then
 fi
 
 python3 - "$BASE_REF" "$HEAD_REF" <<'PY'
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -159,6 +161,7 @@ head_files = set(git_ls_workflow_files(head_ref))
 all_files = sorted(base_files | head_files)
 
 failures = []
+approval_changes = []
 checked = 0
 new_count = 0
 
@@ -190,6 +193,15 @@ for path in all_files:
             f"    Dependent repos still calling this workflow with `uses:` "
             f"plus `with:`/`secrets:` for the old signature will break."
         )
+        approval_changes.append(
+            {
+                "path": path,
+                "kind": "removed",
+                "reason": reason,
+                "before": {section: sorted(base_sig[section]) for section in ("inputs", "outputs", "secrets")},
+                "after": {},
+            }
+        )
         continue
 
     section_diffs = []
@@ -210,6 +222,14 @@ for path in all_files:
             f"{path}: on.workflow_call signature CHANGED between {base_ref} and "
             f"{head_ref or 'working tree'}:\n" + "\n".join(section_diffs)
         )
+        approval_changes.append(
+            {
+                "path": path,
+                "kind": "changed",
+                "before": {section: sorted(base_sig[section]) for section in ("inputs", "outputs", "secrets")},
+                "after": {section: sorted(head_sig[section]) for section in ("inputs", "outputs", "secrets")},
+            }
+        )
     else:
         print(f"OK: {path} (signature unchanged)")
 
@@ -225,15 +245,75 @@ if failures:
     for f in failures:
         print(f"\n- {f}")
     print("")
-    print(
-        "A reusable workflow's on.workflow_call.inputs/outputs/secrets keys "
-        "changed. This is treated as a breaking change regardless of whether "
-        "it looks additive, because an added-looking key can be a silent "
-        "rename that orphans callers still using the old name. If this is "
-        "intentional: update every consuming repo in the same change (or "
-        "keep both old and new keys during a migration window), then have a "
-        "human consciously approve this diff."
+    # An exception remains fail-closed unless a trusted reviewer leaves the
+    # exact marker on this PR. The marker hashes the canonical base/head/diff,
+    # so it cannot approve a later commit, a new base, or a changed interface.
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    approver = os.environ.get("SIGNATURE_APPROVAL_LOGIN", "raajkumars")
+    token = os.environ.get("GH_TOKEN")
+    if not event_path or not repository or not token:
+        print("No GitHub PR approval context is available; retaining signature failure.")
+        sys.exit(1)
+
+    try:
+        with open(event_path, "r", encoding="utf-8") as fh:
+            event = json.load(fh)
+        pr_number = event.get("number", event["pull_request"].get("number"))
+        event_base_sha = event["pull_request"]["base"]["sha"]
+        event_head_sha = event["pull_request"]["head"]["sha"]
+        actual_base_sha = subprocess.run(
+            ["git", "rev-parse", base_ref], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        actual_head_sha = subprocess.run(
+            ["git", "rev-parse", head_ref or "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (KeyError, OSError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
+        print(f"::warning::could not establish PR approval context ({exc}); retaining signature failure.")
+        sys.exit(1)
+
+    if event_base_sha != actual_base_sha or event_head_sha != actual_head_sha:
+        print("::warning::PR approval context does not match the compared base/head; retaining signature failure.")
+        sys.exit(1)
+
+    approval_payload = {
+        "base_sha": actual_base_sha,
+        "changes": approval_changes,
+        "head_sha": actual_head_sha,
+        "version": 1,
+    }
+    approval_digest = hashlib.sha256(
+        json.dumps(approval_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    marker = f"reusable-workflow-signature-approval:v1:{actual_head_sha}:{approval_digest}"
+    print(f"Required auditable PR-comment marker: {marker}")
+    print(f"Required approver login: {approver}")
+
+    api_env = os.environ.copy()
+    api_env["GH_TOKEN"] = token
+    comments = subprocess.run(
+        ["gh", "api", f"repos/{repository}/issues/{pr_number}/comments", "--paginate"],
+        capture_output=True, text=True, env=api_env,
     )
+    if comments.returncode != 0:
+        print("::warning::could not read PR comments; retaining signature failure.")
+        sys.exit(1)
+    try:
+        comment_items = json.loads(comments.stdout)
+    except json.JSONDecodeError:
+        print("::warning::PR comments response was not valid JSON; retaining signature failure.")
+        sys.exit(1)
+
+    approved = any(
+        isinstance(comment, dict)
+        and comment.get("user", {}).get("login") == approver
+        and marker in str(comment.get("body", ""))
+        for comment in comment_items
+    )
+    if approved:
+        print(f"APPROVED: exact reusable-workflow signature diff has an auditable PR-comment approval from {approver}.")
+        sys.exit(0)
+    print("No exact auditable PR-comment approval was found; retaining signature failure.")
     sys.exit(1)
 
 print("PASS: no reusable-workflow signature changes detected.")
