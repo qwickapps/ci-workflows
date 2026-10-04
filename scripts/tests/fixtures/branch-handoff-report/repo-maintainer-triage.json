@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-04T03:00:00+00:00",
+  "coverage": {"qwickapps/example": 1},
+  "total_non_default_branches": 1,
+  "repositories": [{"repository": "qwickapps/example", "branches": [{"branch": "anika/example", "observed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "disposition": "preserve", "ownership_evidence": {}, "next_action": "A repo maintainer must triage branch anika/example and PR #90."}]}]
+}
