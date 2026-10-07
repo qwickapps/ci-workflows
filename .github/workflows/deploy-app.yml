@@ -578,6 +578,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Make scripts executable
@@ -717,6 +718,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
@@ -880,6 +882,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Resolve CapRover credentials
@@ -1012,6 +1015,36 @@ jobs:
 
           echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
           exit 1
+
+      - name: Topology admission before mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+          TS_HOSTNAME="$(grep -E '^[[:space:]]*TS_HOSTNAME=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          if [ -z "$TS_HOSTNAME" ] && [[ "${IMAGE_REF,,}" != *qwickway* ]]; then
+            echo "No Tailscale/QwickWay configuration in this deploy; topology admission not applicable."
+            exit 0
+          fi
+          [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
+          case "${CAPROVER_URL,,}" in
+            *route.qwickforge.com*|*oci-gateway*) HOST_KEY=oci"-"gateway ;;
+            *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
+            *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; topology admission fails closed"; exit 1 ;;
+          esac
+          SOURCE_MERGED=true
+          if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
+            DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}" || SOURCE_MERGED=false
+          fi
+          ARGS=(--registry .ci-workflows/config/service-identities.json --host "$HOST_KEY" --platform caprover --app "${{ needs.resolve-stage.outputs.target_app }}" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
+          if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
+            ARGS+=(--production --source-sha "${GITHUB_SHA}" --source-merged "$SOURCE_MERGED")
+          fi
+          python3 .ci-workflows/scripts/topology-admission.py "${ARGS[@]}"
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
         # aos#193 review finding #2: gated behind require_live_approval_check
@@ -1532,6 +1565,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Authenticate to GHCR for retag (direct config write — no docker login/keychain)
@@ -1600,6 +1634,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Resolve CapRover credentials
@@ -1695,6 +1730,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Verify live-e2e-approved + directive signature (aos#193 Phase 1 §1/§5)
