@@ -208,6 +208,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # t_a4d33238: run-scoped name under the "builder-" prefix (matches
+          # qwick-guard sop-074's allow-regex and the fleet reaper's filter)
+          # plus cleanup: true.
+          name: builder-${{ github.run_id }}
+          cleanup: true
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -220,3 +226,8 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      # t_a4d33238: second-chance teardown (see deploy-app.yml for rationale).
+      - name: Tear down buildx builder
+        if: always()
+        run: docker buildx rm "builder-${{ github.run_id }}" || true

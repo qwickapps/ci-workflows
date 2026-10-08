@@ -145,6 +145,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          # t_a4d33238: run-scoped name under the "builder-" prefix (matches
+          # qwick-guard sop-074's allow-regex and the fleet reaper's filter)
+          # plus cleanup: true.
+          name: builder-${{ github.run_id }}
+          cleanup: true
 
       - name: Validate inputs
         run: |
@@ -303,6 +308,15 @@ jobs:
             --ref "$STABLE_IMAGE_LATEST" \
             --source-ref "$image_ref"
           rm -rf "$TMPDIR_DOCKER"
+
+      # t_a4d33238: second-chance teardown (see deploy-app.yml for
+      # rationale). Placed with if: always() right after the buildx-using
+      # steps rather than at the very end of the job, so it still runs even
+      # if the manifest-platform verification above fails and skips the
+      # rest of this job.
+      - name: Tear down buildx builder
+        if: always()
+        run: docker buildx rm "builder-${{ github.run_id }}" || true
 
       - name: Obtain CapRover auth token
         run: |
