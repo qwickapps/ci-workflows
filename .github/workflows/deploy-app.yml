@@ -679,6 +679,13 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          # t_a4d33238: run-scoped name (kept under the "builder-" prefix so
+          # the resulting buildx_buildkit_builder-<run_id>0_state volume
+          # still matches the qwick-guard sop-074 allow-regex and the fleet
+          # reaper's filter) plus cleanup: true, so this builder is torn
+          # down even when setup-buildx-action's own post-step runs.
+          name: builder-${{ github.run_id }}
+          cleanup: true
 
       - name: Build and push immutable image
         uses: docker/build-push-action@v6
@@ -690,6 +697,13 @@ jobs:
           provenance: false
           tags: |
             ${{ needs.resolve-stage.outputs.image_ref }}
+
+      # t_a4d33238: second-chance teardown for when the job process survives
+      # (failed build step) but setup-buildx-action's post-step cleanup
+      # mechanism doesn't get a chance to run; harmless if already gone.
+      - name: Tear down buildx builder
+        if: always()
+        run: docker buildx rm "builder-${{ github.run_id }}" || true
 
   # -- Provenance gate (all stages require stage image; non-build requires prior)
   verify-provenance:

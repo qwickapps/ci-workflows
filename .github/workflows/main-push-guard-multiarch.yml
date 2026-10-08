@@ -333,6 +333,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          # t_a4d33238: run-scoped name under the "builder-" prefix (matches
+          # qwick-guard sop-074's allow-regex and the fleet reaper's filter)
+          # plus cleanup: true.
+          name: builder-${{ github.run_id }}
+          cleanup: true
 
       - name: Authenticate to GHCR (direct config write — no docker login/keychain)
         # See main-push-guard.yml's build-push job for why: docker/login-action
@@ -364,3 +369,8 @@ jobs:
             -t "$IMAGE_REF" \
             -f "$DOCKERFILE_PATH" \
             .
+
+      # t_a4d33238: second-chance teardown (see deploy-app.yml for rationale).
+      - name: Tear down buildx builder
+        if: always()
+        run: docker buildx rm "builder-${{ github.run_id }}" || true
