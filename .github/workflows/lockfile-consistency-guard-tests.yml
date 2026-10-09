@@ -1,0 +1,50 @@
+name: Lockfile Consistency Guard Tests
+
+# Regression gate for qwickapps/ci-workflows#165: a repo's Dockerfile can
+# install dependencies from a different lockfile/package manager than CI
+# actually validates. Found independently in qwickapps/mcp#363 (fixed
+# mcp#365) and qwickapps/secrets#86 (fixed secrets#89) -- both needed BOTH
+# Dockerfile stages fixed, not just the first -- and mirrored in
+# ci-workflows#139, where this repo's own main-push-guard.yml hardcoded pnpm
+# for an npm repo (qwickapps/agents). Nothing detected the next one until
+# scripts/lockfile-consistency-guard.sh. This gate exists so a future edit
+# that breaks the guard's detection logic fails loudly on the PR instead of
+# the defect reappearing silently a fourth time.
+#
+# Tests:
+#   bash scripts/tests/lockfile-consistency-guard.test.sh
+#     - no-op for non-Node repos
+#     - passes when a Dockerfile's install manager matches CI's lockfile
+#     - rejects the mcp#365 / secrets#89 shape (Dockerfile installs via a
+#       manager whose lockfile CI never validated), including when only the
+#       SECOND stage of a multi-stage Dockerfile is wrong
+#     - rejects the ci-workflows#139 mirror shape (CI's assumed package
+#       manager has no matching lockfile in the repo at all)
+#     - does not mistake a global tool install (`npm install -g pnpm`) for a
+#       project dependency install
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lockfile-consistency-guard.sh'
+      - 'scripts/tests/lockfile-consistency-guard.test.sh'
+      - '.github/workflows/lockfile-consistency-guard-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/lockfile-consistency-guard.sh'
+      - 'scripts/tests/lockfile-consistency-guard.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  guard-tests:
+    name: lockfile-consistency-guard.sh behavior tests
+    runs-on: [self-hosted, macmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run lockfile-consistency-guard.sh tests
+        run: bash scripts/tests/lockfile-consistency-guard.test.sh
