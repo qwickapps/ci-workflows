@@ -34,8 +34,18 @@ UNIQUE_COMMIT_DECISION = re.compile(
     re.IGNORECASE,
 )
 SHA = re.compile(r"^[0-9a-f]{40}$")
-BRANCH_CITATION = re.compile(r"\bbranch[ \t]+(?P<identity>\S+)", re.IGNORECASE)
-SHA_CITATION = re.compile(r"\bsha[ \t]+(?P<identity>\S+)", re.IGNORECASE)
+# Citation grammar: a `branch` or `sha` label, ASCII space/tab, then the identity
+# token.  The token ends ONLY at a byte Git forbids inside every ref name: ASCII
+# control characters (U+0000-U+001F), space (U+0020) or DEL (U+007F).  Regex
+# word boundaries and Unicode-aware `\S`/`\s` are NOT Git ref token boundaries:
+# Git refs may legally contain `+`, `@`, `=`, letters such as `é`, and Unicode
+# whitespace such as U+00A0 or U+2028, so any of those would truncate a longer,
+# different ref into an apparent exact citation.  The whole token must then
+# equal the observed identity exactly.
+GIT_REF_DELIMITER = r"\x00-\x20\x7f"
+IDENTITY_TOKEN = rf"(?P<identity>[^{GIT_REF_DELIMITER}]+)(?=[{GIT_REF_DELIMITER}]|\Z)"
+BRANCH_CITATION = re.compile(rf"\bbranch[ \t]+{IDENTITY_TOKEN}", re.IGNORECASE)
+SHA_CITATION = re.compile(rf"\bsha[ \t]+{IDENTITY_TOKEN}", re.IGNORECASE)
 MAX_FRESHNESS_SECONDS = 60 * 60
 
 
@@ -74,7 +84,7 @@ def require_fresh(timestamp, field, now, errors):
 
 
 def exact_identity_cited(pattern, value, action):
-    """Require a whitespace-delimited identity after an explicit branch/SHA label."""
+    """Require a Git-delimited identity token after a label to equal value exactly."""
     return any(match.group("identity") == value for match in pattern.finditer(action))
 
 

@@ -99,6 +99,44 @@ class BranchHandoffReportTests(unittest.TestCase):
                 )
                 self.assert_error(report, inventory, "cite this exact branch")
 
+    def test_unicode_whitespace_suffix_collisions_are_not_exact_citations(self):
+        # Every non-ASCII whitespace code point is legal inside a Git ref, so
+        # `anika/example<ws>other` names a different branch and must not match.
+        unicode_spaces = [chr(c) for c in range(0x80, 0x110000) if chr(c).isspace()]
+        for required in ("\u0085", "\u00a0", "\u1680", "\u2000", "\u2003", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"):
+            self.assertIn(required, unicode_spaces)
+        for space in unicode_spaces:
+            for template in (
+                "Task t_ab12cd34 must verify PR #90 for branch anika/example{ws}other and decide whether to reopen it.",
+                "Agent @anika must check unique commits at SHA " + "a" * 40 + "{ws}other and decide whether to preserve them.",
+            ):
+                with self.subTest(codepoint=f"U+{ord(space):04X}", template=template[:30]):
+                    report, inventory = valid_pair()
+                    report["repositories"][0]["branches"][0]["next_action"] = template.format(ws=space)
+                    self.assert_error(report, inventory, "cite this exact branch")
+
+    def test_exact_unicode_branch_citations_are_accepted(self):
+        for name in ("anika/exampleé", "anika/ex\u00a0ample", "anika/ex\u2028ample"):
+            with self.subTest(branch=name):
+                report, inventory = valid_pair()
+                report["repositories"][0]["branches"][0]["branch"] = name
+                inventory["repositories"][0]["branches"][0]["branch"] = name
+                report["repositories"][0]["branches"][0]["next_action"] = (
+                    f"Task t_ab12cd34 must verify PR #90 for branch {name} and decide whether to reopen it."
+                )
+                self.assertEqual([], self.validate(report, inventory))
+
+    def test_citation_token_ends_at_git_forbidden_ascii_delimiters(self):
+        for delimiter in (" ", "\t", "\n", "\r", "\x0b", "\x0c", "\x7f"):
+            with self.subTest(delimiter=repr(delimiter)):
+                report, inventory = valid_pair()
+                report["repositories"][0]["branches"][0]["next_action"] = (
+                    "Task t_ab12cd34 must verify PR #90 for branch anika/example"
+                    + delimiter
+                    + "and decide whether to reopen it."
+                )
+                self.assertEqual([], self.validate(report, inventory))
+
     def test_malformed_and_stale_generated_at_are_rejected(self):
         report, inventory = valid_pair()
         report["generated_at"] = "not-a-timestamp"
