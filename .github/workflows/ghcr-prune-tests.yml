@@ -1,0 +1,42 @@
+name: GHCR Prune Tests
+
+# Regression gate for scripts/ghcr-prune.py (ci-workflows#220), mirroring
+# deploy-app-ghcr-cleanup-safety-tests.yml's pattern. The hyphenated
+# filename scripts/tests/ghcr-prune.test.py breaks `python3 -m unittest`
+# discovery, so the test file is invoked directly.
+#
+# Test: python3 scripts/tests/ghcr-prune.test.py
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ghcr-prune.py'
+      - 'scripts/tests/ghcr-prune.test.py'
+      - '.github/workflows/ghcr-prune.yml'
+      - '.github/workflows/ghcr-prune-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'scripts/ghcr-prune.py'
+      - 'scripts/tests/ghcr-prune.test.py'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: ghcr-prune.py unit tests
+    runs-on: [self-hosted, choco]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted choco runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ghcr-prune.py test suite
+        run: python3 scripts/tests/ghcr-prune.test.py
