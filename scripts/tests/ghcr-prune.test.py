@@ -341,11 +341,12 @@ class RepoDigestBatchMisalignmentTests(unittest.TestCase):
         self.assertEqual(calls["batch"], 1)
 
 
-class WorkflowCredentialContractTests(unittest.TestCase):
-    def test_prune_workflow_prefers_the_org_pat_with_a_github_token_fallback(self):
+class WorkflowRetentionContractTests(unittest.TestCase):
+    def test_prune_workflow_uses_the_retention_runner_contract(self):
         workflow = (ROOT / ".github/workflows/ghcr-prune.yml").read_text()
+        self.assertIn("runs-on: [self-hosted, macmini]", workflow)
         self.assertIn(
-            "GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}",
+            'if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; }; then',
             workflow,
         )
 

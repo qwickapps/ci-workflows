@@ -1,22 +1,20 @@
 name: "Org GHCR Prune"
 
 # Scheduled, live-ref-aware GHCR prune for the qwickapps org
-# (scripts/ghcr-prune.py, ci-workflows#220). Dry-run by default: the
-# scheduled sweep only ever writes a JSONL report and never deletes
-# anything, mirroring org-branch-hygiene.yml's audit-only pattern. A real
-# deletion run requires an explicit workflow_dispatch with enforce=true,
-# and must only happen after a human has reviewed the dry-run report
-# (see PR #220's description for the last full-org dry-run: 653
-# versions, keep=527/delete=126, 0 false positives).
+# (scripts/ghcr-prune.py, ci-workflows#220). The weekly scheduled sweep
+# enforces the decided retention policy: keep the five newest versions per
+# package and delete only versions that pass every safety predicate. Manual
+# workflow_dispatch remains dry-run by default so humans can inspect a JSONL
+# report before choosing an explicit enforcing run.
 
 on:
-  # The scheduled sweep is audit-only and never performs deletion.
+  # The scheduled sweep enforces retention; manual runs default to dry-run.
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
       enforce:
-        description: "Actually delete after all safety checks (default: dry-run only)"
+        description: "Actually delete after safety checks (manual runs default to dry-run)"
         required: false
         type: boolean
         default: false
@@ -33,7 +31,7 @@ permissions:
 jobs:
   prune:
     name: "Live-ref-aware GHCR prune"
-    runs-on: [self-hosted, choco]
+    runs-on: [self-hosted, macmini]
     timeout-minutes: 60
     steps:
       - name: Checkout scripts
@@ -41,17 +39,14 @@ jobs:
 
       - name: Run org-wide GHCR prune
         env:
-          # github.token cannot enumerate org-owned packages; prefer the
-          # org PAT while retaining github.token for deployments where the
-          # secret has not been configured yet.
-          GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_ENFORCE: ${{ inputs.enforce }}
           INPUT_KEEP: ${{ inputs.keep }}
         run: |
           set -euo pipefail
           args=(--org qwickapps --keep "${INPUT_KEEP:-5}" --output /tmp/ghcr-prune-report.jsonl)
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; then
+          if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; }; then
             args+=(--enforce)
           fi
           python3 scripts/ghcr-prune.py "${args[@]}"
