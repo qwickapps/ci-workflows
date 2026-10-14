@@ -39,7 +39,10 @@ jobs:
 
       - name: Run org-wide GHCR prune
         env:
-          GH_TOKEN: ${{ github.token }}
+          # github.token cannot enumerate org-owned packages. Prefer the
+          # configured org PAT; retain the fallback only for environments
+          # where the secret has not yet been configured.
+          GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_ENFORCE: ${{ inputs.enforce }}
           INPUT_KEEP: ${{ inputs.keep }}
