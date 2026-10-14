@@ -341,6 +341,15 @@ class RepoDigestBatchMisalignmentTests(unittest.TestCase):
         self.assertEqual(calls["batch"], 1)
 
 
+class WorkflowCredentialContractTests(unittest.TestCase):
+    def test_prune_workflow_prefers_the_org_pat_with_a_github_token_fallback(self):
+        workflow = (ROOT / ".github/workflows/ghcr-prune.yml").read_text()
+        self.assertIn(
+            "GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}",
+            workflow,
+        )
+
+
 class ScriptSelfChecksTests(unittest.TestCase):
     """Guards against silently losing a safety property in a future edit."""
 
