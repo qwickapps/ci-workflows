@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "services": [
+    {
+      "hostname": "qwickapps-mcp",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-mcp",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/mcp"
+    }
+  ]
+}

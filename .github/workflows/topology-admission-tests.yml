@@ -1,0 +1,30 @@
+name: Topology Admission Tests
+on:
+  pull_request:
+    paths:
+      - 'config/service-identities.json'
+      - 'scripts/topology-admission.py'
+      - 'scripts/tests/topology-admission.test.sh'
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/topology-admission-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'config/service-identities.json'
+      - 'scripts/topology-admission.py'
+      - 'scripts/tests/topology-admission.test.sh'
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/topology-admission-tests.yml'
+permissions:
+  contents: read
+jobs:
+  topology-admission:
+    runs-on: [self-hosted, choco]
+    # This public-repo job executes test scripts from pull requests on the
+    # fleet's self-hosted choco runner. Keep the canonical guard exact: the
+    # repo-wide fork-PR guard test rejects altered expressions.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay topology admission controls
+        run: bash scripts/tests/topology-admission.test.sh

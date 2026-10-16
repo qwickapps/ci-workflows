@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "change_control": "Architecture changes to this registry require a reviewed PR. A task, issue, or deploy input cannot override it.",
+  "services": [
+    {
+      "canonical_hostname": "qwickapps-mcp",
+      "workload_owner": "mcp-platform",
+      "repo": "qwickapps/mcp",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-mcp",
+      "required_host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
+      "images": ["ghcr.io/qwickapps/qwickway"]
+    }
+  ]
+}
