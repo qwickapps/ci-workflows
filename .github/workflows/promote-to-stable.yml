@@ -141,6 +141,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The caller checkout above intentionally supplies caller-owned
+      # deployment assets. The shared helpers below must instead come from
+      # this reusable workflow's immutable revision, not whatever files a
+      # caller happens to carry at its own SHA.
+      - name: Checkout reusable workflow helpers
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: ${{ github.job_workflow_sha }}
+          path: .qwickapps/ci-workflows
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -293,12 +304,12 @@ jobs:
         # step reported success even while silently flattening the image,
         # which is exactly why the bug went unnoticed.
         run: |
-          chmod +x scripts/verify-multiarch-manifest.sh
-          scripts/verify-multiarch-manifest.sh \
+          chmod +x .qwickapps/ci-workflows/scripts/verify-multiarch-manifest.sh
+          .qwickapps/ci-workflows/scripts/verify-multiarch-manifest.sh \
             --config "$TMPDIR_DOCKER" \
             --ref "$STABLE_IMAGE_VERSIONED" \
             --source-ref "$image_ref"
-          scripts/verify-multiarch-manifest.sh \
+          .qwickapps/ci-workflows/scripts/verify-multiarch-manifest.sh \
             --config "$TMPDIR_DOCKER" \
             --ref "$STABLE_IMAGE_LATEST" \
             --source-ref "$image_ref"
@@ -367,8 +378,8 @@ jobs:
           # would introduce TS_HOSTNAME into callers like ide/forge/crew
           # that never set it at all. See that script's own header and
           # scripts/tests/rescope-ts-hostname.test.sh for the covered cases.
-          chmod +x scripts/rescope-ts-hostname.sh
-          MERGED=$(scripts/rescope-ts-hostname.sh "$STABLE_DEF" "$ENV_VARS" "$STABLE_APP")
+          chmod +x .qwickapps/ci-workflows/scripts/rescope-ts-hostname.sh
+          MERGED=$(.qwickapps/ci-workflows/scripts/rescope-ts-hostname.sh "$STABLE_DEF" "$ENV_VARS" "$STABLE_APP")
           if [ -n "$SVC_OVERRIDE" ]; then
             MERGED=$(echo "$MERGED" | jq --arg override "$SVC_OVERRIDE" '.serviceUpdateOverride = $override')
           fi

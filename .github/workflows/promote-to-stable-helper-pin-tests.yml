@@ -1,0 +1,28 @@
+name: Promote-to-stable Helper Pin Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/promote-to-stable.yml'
+      - '.github/workflows/promote-to-stable-helper-pin-tests.yml'
+      - 'scripts/tests/promote-to-stable-helper-pin.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/promote-to-stable.yml'
+      - 'scripts/tests/promote-to-stable-helper-pin.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: promote-to-stable helper pin contract
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run helper pin contract test
+        run: bash scripts/tests/promote-to-stable-helper-pin.test.sh
