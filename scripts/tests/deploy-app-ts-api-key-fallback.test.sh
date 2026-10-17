@@ -40,7 +40,7 @@ assert() {
   fi
 }
 
-echo "== deploy-app.yml: TS_API_KEY resolves via secrets-service fallback at every live-state consumer =="
+echo "== deploy-app.yml: live-state credentials resolve through the correct sources =="
 
 assert "workflow file exists" \
   test -f "$WORKFLOW"
@@ -75,6 +75,18 @@ assert "fetches the same secrets-service path mcp's deploy.yml uses for TS_API_K
 SERVICE_KEY_ENV_COUNT=$(grep -c 'SECRETS_SERVICE_KEY: \${{ secrets.SECRETS_SERVICE_KEY }}' "$WORKFLOW" || true)
 assert "SECRETS_SERVICE_KEY threaded into all four live-state-check step environments" \
   test "$SERVICE_KEY_ENV_COUNT" -eq 4
+
+COOLIFY_SECRET_COUNT=$(grep -c 'COOLIFY_TOKEN: \${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}' "$WORKFLOW" || true)
+assert "the live momo scoped deploy token is threaded into both Coolify checks" \
+  test "$COOLIFY_SECRET_COUNT" -eq 2
+
+COOLIFY_PATH_COUNT=$(grep -c '\${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN' "$WORKFLOW" || true)
+assert "Coolify fallback reads the live scoped momo deploy token, not unprovisioned/stale aliases" \
+  test "$COOLIFY_PATH_COUNT" -eq 2
+
+COOLIFY_BAD_ALIAS_COUNT=$(grep -c 'secrets.COOLIFY_API_TOKEN\|/coolify/COOLIFY_API_TOKEN' "$WORKFLOW" || true)
+assert "no unprovisioned COOLIFY_API_TOKEN secret reference or fallback path remains" \
+  test "$COOLIFY_BAD_ALIAS_COUNT" -eq 0
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

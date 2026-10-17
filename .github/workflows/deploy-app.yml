@@ -1051,7 +1051,9 @@ jobs:
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          # The live momo API token is the scoped deploy token. Do not use
+          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           ENV_FILE="${{ steps.env-file.outputs.path }}"
@@ -1103,7 +1105,7 @@ jobs:
           if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
             if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
               _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
-              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/coolify/COOLIFY_API_TOKEN" \
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
                 -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
               if [ -n "$_SEC_RESP" ]; then
                 _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
@@ -1285,7 +1287,9 @@ jobs:
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          # The live momo API token is the scoped deploy token. Do not use
+          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
@@ -1311,7 +1315,7 @@ jobs:
           if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
             if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
               _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
-              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/coolify/COOLIFY_API_TOKEN" \
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
                 -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
               if [ -n "$_SEC_RESP" ]; then
                 _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
