@@ -44,6 +44,32 @@ on:
         required: false
         default: 'build'
 
+      # -- Env rendering (t_ffaf9f03) ------------------------------------------
+      # The caller's rendered app env file used to be produced by a separate
+      # job/workflow and handed to validate-env/deploy-caprover/deploy-stable
+      # via actions/upload-artifact + actions/download-artifact, with /tmp
+      # fallback paths. Two problems killed that: (1) the file holds secret
+      # values, and a GitHub Actions artifact is retained and downloadable by
+      # anyone with repo read access -- secrets at rest outside QwickSecrets;
+      # (2) the org's Actions artifact-storage quota sits at/near its cap, so
+      # the upload step itself routinely fails ("Failed to CreateArtifact:
+      # Artifact storage quota has been hit"), breaking every dev deploy.
+      # env_render_script closes both: the caller provides an executable that
+      # renders the env file IN the same job that consumes it, so the
+      # contents never leave that job's filesystem and nothing is ever
+      # uploaded as an artifact. There is no /tmp fallback -- an env_render_script
+      # that produces no file (or an empty one) fails the job loudly.
+      env_render_script:
+        description: >-
+          Path (from the caller repo root) to an executable script this
+          workflow runs IN-JOB to render the app env file. Invoked as
+          `env_render_script <environment> <app_name> <output_path>` inside
+          validate-env, deploy-caprover, and deploy-stable (each renders its
+          own copy independently -- nothing is shared across jobs). Must
+          write a non-empty file to <output_path> or exit non-zero.
+        type: string
+        required: true
+
       # -- Build --------------------------------------------------------------
       dockerfile_path:
         description: 'Path to Dockerfile from repo root'
@@ -540,35 +566,29 @@ jobs:
     needs: [resolve-stage]
     runs-on: [self-hosted, macmini]
     steps:
-      - name: Download rendered env file artifact (if present)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
-          path: .deploy-app-env
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Resolve env file path
+      - name: Render app env file (in-job, no artifact handoff)
         id: env-file
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/app-env-${{ inputs.environment }}-${{ inputs.app_name }}.env"
 
-          for candidate in \
-            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
-            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${ENV}-${APP}.env" \
-            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${APP}.env"; do
-            if [ -f "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
 
-          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
-          exit 1
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; there is no artifact or /tmp fallback"
+            exit 1
+          fi
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
@@ -645,10 +665,27 @@ jobs:
             --product "$CLIENT_DIR" \
             --packages "${{ inputs.workspace_packages }}"
 
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
+      # t_ffaf9f03: this used to run `.github/scripts/resolve-docker-endpoint.sh`
+      # FROM THE CALLER REPO unconditionally, but no caller ships that script
+      # -- the step only ever worked by accident, when the runner's default
+      # Docker client already happened to be reachable. Ship the canonical
+      # copy inside ci-workflows (same pattern validate-env-values.sh and
+      # configure-caprover-app.sh already use) so every caller gets it for
+      # free instead of needing to fork it in.
       - name: Ensure Docker endpoint
         run: |
-          chmod +x .github/scripts/resolve-docker-endpoint.sh
-          .github/scripts/resolve-docker-endpoint.sh
+          chmod +x .ci-workflows/scripts/resolve-docker-endpoint.sh
+          .ci-workflows/scripts/resolve-docker-endpoint.sh
 
       - name: Login to GHCR
         env:
@@ -983,35 +1020,26 @@ jobs:
           chmod +x .github/scripts/*.sh
           chmod +x .ci-workflows/scripts/*.sh
 
-      - name: Download rendered env file artifact (if present)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
-          path: .deploy-app-env
-
-      - name: Resolve env file path
+      - name: Render app env file (in-job, no artifact handoff)
         id: env-file
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/app-env-${{ inputs.environment }}-${{ inputs.app_name }}.env"
 
-          for candidate in \
-            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
-            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${ENV}-${APP}.env" \
-            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${APP}.env"; do
-            if [ -f "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
 
-          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
-          exit 1
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; there is no artifact or /tmp fallback"
+            exit 1
+          fi
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
         # aos#193 review finding #2: gated behind require_live_approval_check
@@ -1955,43 +1983,26 @@ jobs:
           chmod +x .github/scripts/*.sh
           chmod +x .ci-workflows/scripts/*.sh
 
-      - name: Download rendered env file artifact (if present)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
-          path: .deploy-app-env
-
-      - name: Resolve env file path
+      - name: Render app env file (in-job, no artifact handoff)
         id: env-file
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/app-env-${{ inputs.environment }}-${{ inputs.app_name }}.env"
 
-          for candidate in \
-            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
-            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${ENV}-${APP}.env" \
-            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${APP}.env"; do
-            if [ -f "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-
-          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
-          exit 1
-
-      - name: Validate stable env file
-        run: |
-          ENV_FILE="${{ steps.env-file.outputs.path }}"
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "ERROR: missing required stable env file ${ENV_FILE}"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
             exit 1
           fi
+          chmod +x "$SCRIPT"
+
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; there is no artifact or /tmp fallback"
+            exit 1
+          fi
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Configure target slot (atomic env + config)
         run: |
