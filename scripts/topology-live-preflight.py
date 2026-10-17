@@ -266,7 +266,11 @@ def main() -> int:
 
     other_claimants = [
         s for s in live_services
-        if matches_hostname_or_ghost(s.get("ts_hostname"), args.hostname) and s.get("name") != args.app
+        if (
+            matches_hostname_or_ghost(s.get("ts_hostname"), args.hostname)
+            or matches_hostname_or_ghost(s.get("name"), args.hostname)
+        )
+        and s.get("name") != args.app
     ]
     live_conflicts = [s for s in other_claimants if (s.get("replicas") or 0) > 0]
     if live_conflicts:

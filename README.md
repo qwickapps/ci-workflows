@@ -437,21 +437,26 @@ design, by design, but with no way to ever pass).
 
 ### Coolify (momo) coverage
 
-Coolify apps on momo CAN set `TS_HOSTNAME` directly in their own env (prior
-investigation found `agent-mail-clamd`, `health-ingest`, and
-`qwickapps-projects-backup` doing exactly this) -- so a Coolify app could
-silently hold a canonical hostname this registry never sees via CapRover or
-Tailscale ghosts alone. Both new CapRover-side steps above pass
-`--coolify-token` to `topology-live-preflight.py`, which queries the
-Coolify API and denies the CapRover deploy if any Coolify app already
-claims the target canonical hostname. This closes the CapRover-side half of
-the gap (a CapRover deploy can no longer silently collide with a Coolify
-app). The reverse direction -- a **Coolify** deploy colliding with a
-CapRover-registered hostname -- is NOT covered: Coolify deploys on momo do
-not go through `deploy-app.yml` and have no equivalent preflight today. No
-Coolify app is currently known to target a CapRover-registered canonical
-hostname (`qwickapps-mcp` is the only registry entry and no Coolify app
-claims it), so there is no live collision today, but this is an open gap,
-not a closed one. Follow-up: add an equivalent fail-closed preflight to
-whatever deploys Coolify apps on momo if/when a Coolify app is ever meant
-to carry a canonical hostname.
+Coolify is queried as a required live claimant source by both CapRover-side
+checks above: `--coolify-token` makes `topology-live-preflight.py` read every
+momo application and its `TS_HOSTNAME` environment setting. Any Coolify
+claimant of a registry hostname denies the CapRover deploy before mutation.
+
+Read-only API evidence, rechecked on **2026-10-17** with the scoped momo
+Coolify deploy token:
+
+- all 32 current momo applications returned no `TS_HOSTNAME` environment
+  value;
+- their application-detail records had no `docker_registry_image_name`
+  containing `qwickway` or `qwickapps-mcp`; and
+- an organization-wide GitHub code search found no controlled Coolify deploy
+  workflow/API caller other than the retired generic Coolify compatibility
+  paths in this repository.
+
+Therefore no current Coolify workload holds or is configured to claim the
+only registered canonical hostname, `qwickapps-mcp`; a new Coolify deployment
+cannot silently collide with it from the CapRover direction because the
+CapRover preflight queries Coolify live state. Before any future Coolify app
+is configured with a registry canonical hostname or a QwickWay image, its
+deployment entry point must gain the same fail-closed preflight before that
+configuration is applied.

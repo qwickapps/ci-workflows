@@ -66,6 +66,23 @@ JSON
       [[ "$cmd" == *"service ls"* ]] && echo -n ""
     fi
     ;;
+  name_conflict)
+    if [[ "$host" == "oci-gateway" ]]; then
+      if [[ "$cmd" == *"service ls"* ]]; then
+        echo "qwickapps-mcp"
+        echo "srv-captain--qwickapps-mcp"
+      elif [[ "$cmd" == *"service inspect"* ]]; then
+        cat <<'JSON'
+[
+  {"Spec":{"Name":"qwickapps-mcp","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/example/plain-service:latest","Env":[]}}}},
+  {"Spec":{"Name":"srv-captain--qwickapps-mcp","Mode":{"Replicated":{"Replicas":0}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
+]
+JSON
+      fi
+    else
+      [[ "$cmd" == *"service ls"* ]] && echo -n ""
+    fi
+    ;;
   unreachable)
     echo "ssh: connect to host $host port 22: Connection timed out" >&2
     exit 255
@@ -200,6 +217,13 @@ PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live
   --coolify-base-url "http://127.0.0.1:18906" \
   && { echo "FAIL expected deny: no coolify token"; fail=$((fail+1)); } \
   || { echo "PASS denied no coolify token (fail-closed)"; pass=$((pass+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== non-CapRover service name equals canonical hostname without TS_HOSTNAME => deny =="
+start_mock clean 18907
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=name_conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18907" --coolify-base-url "http://127.0.0.1:18907" \
+  && { echo "FAIL expected deny: service-name claimant"; fail=$((fail+1)); } \
+  || { echo "PASS denied service-name claimant"; pass=$((pass+1)); }
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "Tests: $pass passed, $fail failed"
