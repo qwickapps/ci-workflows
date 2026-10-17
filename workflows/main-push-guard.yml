@@ -188,7 +188,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/.docker-persistent"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/.docker-persistent" >> "$GITHUB_ENV"
 
-      - name: Pre-flight: verify ghcr.io reachability
+      - name: "Pre-flight: verify ghcr.io reachability"
         run: |
           if curl --fail --max-time 10 --retry 2 --retry-delay 3 -sI https://ghcr.io 2>/dev/null; then
             echo "ghcr.io reachable"
