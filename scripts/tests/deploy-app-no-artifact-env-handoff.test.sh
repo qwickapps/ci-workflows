@@ -73,6 +73,19 @@ out['env_render_script_type'] = inputs.get('env_render_script', {}).get('type')
 def job_steps(name):
     return jobs.get(name, {}).get('steps', [])
 
+required_renderer_secret_names = {
+    'DATABASE_URL', 'SERVICE_KEY',
+    'QWICKSECRETS_DATABASE_URL', 'QWICKSECRETS_DATABASE_URL_DEV',
+    'QWICKSECRETS_DATABASE_URL_BACKUP', 'QWICKSECRETS_DATABASE_URL_PROD',
+    'QWICKSECRETS_SERVICE_KEY', 'QWICKSECRETS_SERVICE_KEY_DEV',
+    'QWICKSECRETS_SERVICE_KEY_BACKUP', 'QWICKSECRETS_SERVICE_KEY_PROD',
+    'QWICKSECRETS_MASTER_ENCRYPTION_KEY',
+    'QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV',
+    'QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP',
+    'QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD',
+    'QWICKSECRETS_DEPLOY_READ_TOKEN', 'TS_EPHEMERAL_AUTHKEY', 'TS_API_KEY',
+}
+
 for job in ('validate-env', 'deploy-caprover', 'deploy-stable'):
     steps = job_steps(job)
     names = [s.get('name', '') for s in steps]
@@ -85,6 +98,21 @@ for job in ('validate-env', 'deploy-caprover', 'deploy-stable'):
     # must NOT contain any artifact/tmp fallback.
     render_step = next((s for s in steps if 'Render app env file' in s.get('name', '')), None)
     out[f'{job}_render_uses_input'] = bool(render_step) and 'inputs.env_render_script' in render_step.get('run', '')
+    render_env = render_step.get('env', {}) if render_step else {}
+    out[f'{job}_renderer_secret_env_names_match'] = set(render_env) == required_renderer_secret_names
+    out[f'{job}_renderer_secret_env_values_match'] = all(
+        render_env.get(name) == '$' + '{{ secrets.' + name + ' }}'
+        for name in required_renderer_secret_names
+    )
+    out[f'{job}_renderer_secrets_step_local'] = all(
+        name not in jobs.get(job, {}).get('env', {})
+        for name in required_renderer_secret_names
+    )
+    run_body = render_step.get('run', '') if render_step else ''
+    out[f'{job}_renderer_run_does_not_persist_secrets'] = not any(
+        name in run_body and ('GITHUB_ENV' in run_body or 'GITHUB_OUTPUT' in run_body)
+        for name in required_renderer_secret_names
+    )
 
 build_steps = job_steps('build')
 build_names = [s.get('name', '') for s in build_steps]
@@ -110,6 +138,14 @@ for job in validate-env deploy-caprover deploy-stable; do
     test "$(get_field "${job}_has_checkout")" = "True"
   assert "$job's render step actually invokes inputs.env_render_script" \
     test "$(get_field "${job}_render_uses_input")" = "True"
+  assert "$job binds exactly the required QwickSecrets renderer secrets" \
+    test "$(get_field "${job}_renderer_secret_env_names_match")" = "True"
+  assert "$job maps every renderer env name directly from its matching secret" \
+    test "$(get_field "${job}_renderer_secret_env_values_match")" = "True"
+  assert "$job does not expose renderer secrets at job scope" \
+    test "$(get_field "${job}_renderer_secrets_step_local")" = "True"
+  assert "$job does not persist renderer secrets through GITHUB_ENV or GITHUB_OUTPUT" \
+    test "$(get_field "${job}_renderer_run_does_not_persist_secrets")" = "True"
 done
 
 assert "build job checks out ci-workflows scripts (for resolve-docker-endpoint.sh)" \
