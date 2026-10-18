@@ -415,25 +415,14 @@ layers consume it in `deploy-app.yml`'s `deploy-caprover` job:
    previous owner's recorded replica count/image. It never renames or
    edits the registry's own canonical app identity.
 
-### CapRover hosts actually covered today
+### CapRover hosts covered
 
-Both new steps pass `--caprover-hosts oci-gateway oci-main` explicitly --
-**not** `server1-qwickforge`, even though
-`topology-live-preflight.py`'s own default host list names it. Evidence
-checked before deciding this (2026-10-08, t_fbb1ae02):
-- `scripts/sync-authorized-keys.sh` and
-  `workflows/verify-ssh-connectivity.yml` only provision/verify SSH access
-  to `oci-main`, `oci-gateway`, and `oci-dev` (oci-dev is itself retired,
-  per t_049aa13a).
-- `gh search code server1-qwickforge --owner qwickapps` returns zero hits
-  anywhere in the org.
-- A live SSH attempt to `server1-qwickforge` times out.
-
-If a third CapRover host by that name is real, it needs
-`scripts/sync-authorized-keys.sh` coverage (SSH key provisioning) before it
-can safely be added to `--caprover-hosts` in both steps above -- adding it
-unprovisioned would fail-close every deploy unconditionally (fail-closed
-design, by design, but with no way to ever pass).
+Both new steps pass every registered CapRover host explicitly:
+`oci-gateway`, `oci-main`, and `server1-qwickforge`. This is intentional:
+a claimant on a different host is the incident shape this guard prevents.
+If any of those SSH reads is unreachable or cannot return Docker service
+state, the deploy is denied before mutation; coverage is never silently
+reduced to make a deploy pass.
 
 ### Coolify (momo) coverage
 

@@ -1123,26 +1123,17 @@ jobs:
           PRE_STATE="${RUNNER_TEMP}/topology-pre-mutation-state-${{ github.run_id }}-${{ github.run_attempt }}.json"
           echo "pre-mutation-state-path=$PRE_STATE" >> "$GITHUB_OUTPUT"
 
-          # t_fbb1ae02 decision #1(a): every registered CapRover host, not
-          # just the one being deployed to -- a conflicting claimant on a
-          # DIFFERENT host is exactly the 2026-10-08 incident shape. Limited
-          # here to the two hosts this fleet's own SSH tooling
-          # (scripts/sync-authorized-keys.sh, workflows/verify-ssh-connectivity.yml)
-          # actually has configured access to. "server1-qwickforge" --
-          # named in topology-live-preflight.py's own default host list --
-          # has no SSH key provisioning anywhere in this org, is absent
-          # from every host-list in this repo, and returns zero hits from
-          # `gh search code` org-wide: it is not a confirmed, reachable
-          # CapRover host today. Treating it as a mandatory live source
-          # here would fail-close every deploy unconditionally. Add it to
-          # --caprover-hosts once that host is confirmed to exist and SSH
-          # access to it is provisioned (see PR description / card comment).
+          # t_fbb1ae02 decision #1(a): inspect every registered CapRover
+          # host, not just the one being deployed to. A conflicting claimant
+          # on a different host is exactly the 2026-10-08 incident shape.
+          # server1-qwickforge is deliberately included: unreachable live
+          # state is a deny, never a reason to silently reduce coverage.
           python3 .ci-workflows/scripts/topology-live-preflight.py \
             --registry .ci-workflows/config/service-identities.json \
             --hostname "$TS_HOSTNAME" \
             --app "${{ needs.resolve-stage.outputs.target_app }}" \
             --target-host "$HOST_KEY" \
-            --caprover-hosts oci-gateway oci-main \
+            --caprover-hosts oci-gateway oci-main server1-qwickforge \
             --ts-api-key "$TS_API_KEY_RESOLVED" \
             --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
             --pre-mutation-state-out "$PRE_STATE"
@@ -1331,7 +1322,7 @@ jobs:
               --hostname "$TS_HOSTNAME" \
               --app "${{ needs.resolve-stage.outputs.target_app }}" \
               --target-host "$HOST_KEY" \
-              --caprover-hosts oci-gateway oci-main \
+              --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
               --coolify-token "$COOLIFY_TOKEN_RESOLVED"; then
             echo "No post-deploy topology conflict detected."

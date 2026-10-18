@@ -168,7 +168,7 @@ JSON
 
 PREFLIGHT=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
   --hostname qwickapps-mcp --app srv-captain--qwickapps-mcp --target-host oci-gateway
-  --caprover-hosts oci-gateway oci-main --ts-api-key dummy --coolify-token dummy)
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
 
 echo "== real 2026-10-08 finding: hand-made canary owns hostname live, registered app r=0 =="
 start_mock clean 18901
@@ -213,7 +213,7 @@ echo "== missing Coolify token => fail closed (deny), never skip the 3rd source 
 start_mock clean 18906
 PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE" \
   --hostname qwickapps-mcp --app srv-captain--qwickapps-mcp --target-host oci-gateway \
-  --caprover-hosts oci-gateway oci-main --ts-api-key dummy --tailscale-base-url "http://127.0.0.1:18906" \
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --tailscale-base-url "http://127.0.0.1:18906" \
   --coolify-base-url "http://127.0.0.1:18906" \
   && { echo "FAIL expected deny: no coolify token"; fail=$((fail+1)); } \
   || { echo "PASS denied no coolify token (fail-closed)"; pass=$((pass+1)); }
