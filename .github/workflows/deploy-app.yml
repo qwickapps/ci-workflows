@@ -571,6 +571,26 @@ jobs:
 
       - name: Render app env file (in-job, no artifact handoff)
         id: env-file
+        # Inherited caller secrets are only exposed to this renderer process.
+        # Do not promote them to job/workflow scope or persist them as output.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
           set -euo pipefail
           SCRIPT="${{ inputs.env_render_script }}"
@@ -1036,6 +1056,26 @@ jobs:
 
       - name: Render app env file (in-job, no artifact handoff)
         id: env-file
+        # These inherited secrets are intentionally available only while this
+        # caller-provided renderer runs; empty inherited values are permitted.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
           set -euo pipefail
           SCRIPT="${{ inputs.env_render_script }}"
@@ -1999,6 +2039,26 @@ jobs:
 
       - name: Render app env file (in-job, no artifact handoff)
         id: env-file
+        # These inherited secrets are intentionally available only while this
+        # caller-provided renderer runs; empty inherited values are permitted.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
           set -euo pipefail
           SCRIPT="${{ inputs.env_render_script }}"
