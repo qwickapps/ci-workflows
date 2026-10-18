@@ -26,3 +26,9 @@ jobs:
 
       - name: Run helper pin contract test
         run: bash scripts/tests/promote-to-stable-helper-pin.test.sh
+
+      - name: Run multiarch manifest helper tests
+        run: bash scripts/tests/verify-multiarch-manifest.test.sh
+
+      - name: Run hostname rescope helper tests
+        run: bash scripts/tests/rescope-ts-hostname.test.sh
