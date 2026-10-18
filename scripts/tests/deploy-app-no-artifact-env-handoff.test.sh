@@ -70,6 +70,20 @@ out['env_render_script_present'] = 'env_render_script' in inputs
 out['env_render_script_required'] = inputs.get('env_render_script', {}).get('required')
 out['env_render_script_type'] = inputs.get('env_render_script', {}).get('type')
 
+workflow_secrets = doc[True]['workflow_call'].get('secrets', {})
+out['renderer_secret_declarations_match'] = set(workflow_secrets) == {
+    'ENV_RENDER_SOPS_AGE_KEY', 'ENV_RENDER_ENVIRONMENTS_YML',
+    'ENV_RENDER_GOOGLE_CLIENT_ID', 'ENV_RENDER_GOOGLE_CLIENT_SECRET',
+    'ENV_RENDER_LINKEDIN_CLIENT_ID', 'ENV_RENDER_LINKEDIN_CLIENT_SECRET',
+    'ENV_RENDER_STRIPE_EDIT_PACK_PRICE_ID',
+    'ENV_RENDER_STRIPE_EXPERT_REVIEW_PRICE_ID',
+}
+out['renderer_secret_declarations_optional'] = all(
+    workflow_secrets.get(name, {}).get('required') is False
+    for name in workflow_secrets
+)
+
+
 def job_steps(name):
     return jobs.get(name, {}).get('steps', [])
 
@@ -84,6 +98,11 @@ required_renderer_secret_names = {
     'QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP',
     'QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD',
     'QWICKSECRETS_DEPLOY_READ_TOKEN', 'TS_EPHEMERAL_AUTHKEY', 'TS_API_KEY',
+    'ENV_RENDER_SOPS_AGE_KEY', 'ENV_RENDER_ENVIRONMENTS_YML',
+    'ENV_RENDER_GOOGLE_CLIENT_ID', 'ENV_RENDER_GOOGLE_CLIENT_SECRET',
+    'ENV_RENDER_LINKEDIN_CLIENT_ID', 'ENV_RENDER_LINKEDIN_CLIENT_SECRET',
+    'ENV_RENDER_STRIPE_EDIT_PACK_PRICE_ID',
+    'ENV_RENDER_STRIPE_EXPERT_REVIEW_PRICE_ID',
 }
 
 for job in ('validate-env', 'deploy-caprover', 'deploy-stable'):
@@ -130,6 +149,10 @@ get_field() {
 assert "env_render_script input is present" test "$(get_field env_render_script_present)" = "True"
 assert "env_render_script input is required" test "$(get_field env_render_script_required)" = "True"
 assert "env_render_script input is type string" test "$(get_field env_render_script_type)" = "string"
+assert "renderer secret declarations exactly match the step-local contract" \
+  test "$(get_field renderer_secret_declarations_match)" = "True"
+assert "renderer secret declarations are all optional" \
+  test "$(get_field renderer_secret_declarations_optional)" = "True"
 
 for job in validate-env deploy-caprover deploy-stable; do
   assert "$job has an in-job 'Render app env file' step" \
