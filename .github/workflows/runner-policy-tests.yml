@@ -1,0 +1,29 @@
+name: Runner Policy Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/runner-policy.json'
+      - '.github/workflows/**'
+      - 'scripts/runner-policy.py'
+      - 'scripts/tests/runner-policy.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/runner-policy.json'
+      - '.github/workflows/**'
+      - 'scripts/runner-policy.py'
+      - 'scripts/tests/runner-policy.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  runner-policy-tests:
+    name: owner-approved runner policy tests
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate runner policy and negative fixtures
+        run: bash scripts/tests/runner-policy.test.sh

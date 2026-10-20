@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "description": "Owner-approved GitHub Actions runner selection and provenance policy. Label sets control scheduling; group and runner name controls validate the runner that actually executed a job.",
+  "repositories": {
+    "*": {
+      "visibility": "private",
+      "job_classes": {
+        "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "arm": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]},
+        "deploy": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]}
+      }
+    },
+    "qwickapps/ci-workflows": {
+      "visibility": "public",
+      "job_classes": {
+        "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "arm": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]},
+        "deploy": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]}
+      }
+    },
+    "qwickapps/fm": {
+      "visibility": "private",
+      "job_classes": {
+        "build": {"allowed": [{"labels": ["self-hosted", "Linux"], "runner_groups": ["oci-fallback"], "runner_names": ["critical-oci-dev"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "Linux"], "runner_groups": ["oci-fallback"], "runner_names": ["critical-oci-dev"]}]},
+        "deploy": {"allowed": [{"labels": ["self-hosted", "Linux"], "runner_groups": ["oci-fallback"], "runner_names": ["critical-oci-dev"]}]}
+      }
+    }
+  }
+}

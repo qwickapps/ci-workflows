@@ -30,7 +30,7 @@ on:
         description: 'Runner label(s) as a JSON array string'
         required: false
         type: string
-        default: '["self-hosted", "macmini"]'
+        default: '["self-hosted", "choco"]'
       enforce_blue_green_deploy_contract:
         description: 'Fail changed .github/workflows/*deploy*.yml files unless they call the canonical blue-green reusable workflow or carry an exemption.'
         required: false
