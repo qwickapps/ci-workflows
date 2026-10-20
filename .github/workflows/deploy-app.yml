@@ -591,6 +591,12 @@ jobs:
           QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
           TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          # App-specific runtime secrets (e.g. memories' READ/WRITE tokens)
+          # are caller-owned and not in the fixed list above. The caller's
+          # renderer -- its own code, already trusted via `secrets: inherit`
+          # -- picks an explicit allowlist out of this JSON object. Values are
+          # still individually log-masked; this stays step-local like the rest.
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           set -euo pipefail
           SCRIPT="${{ inputs.env_render_script }}"
@@ -1076,6 +1082,12 @@ jobs:
           QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
           TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          # App-specific runtime secrets (e.g. memories' READ/WRITE tokens)
+          # are caller-owned and not in the fixed list above. The caller's
+          # renderer -- its own code, already trusted via `secrets: inherit`
+          # -- picks an explicit allowlist out of this JSON object. Values are
+          # still individually log-masked; this stays step-local like the rest.
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           set -euo pipefail
           SCRIPT="${{ inputs.env_render_script }}"
@@ -2059,6 +2071,12 @@ jobs:
           QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
           TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          # App-specific runtime secrets (e.g. memories' READ/WRITE tokens)
+          # are caller-owned and not in the fixed list above. The caller's
+          # renderer -- its own code, already trusted via `secrets: inherit`
+          # -- picks an explicit allowlist out of this JSON object. Values are
+          # still individually log-masked; this stays step-local like the rest.
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           set -euo pipefail
           SCRIPT="${{ inputs.env_render_script }}"
