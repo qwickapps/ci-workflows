@@ -99,19 +99,22 @@ for job in ('validate-env', 'deploy-caprover', 'deploy-stable'):
     render_step = next((s for s in steps if 'Render app env file' in s.get('name', '')), None)
     out[f'{job}_render_uses_input'] = bool(render_step) and 'inputs.env_render_script' in render_step.get('run', '')
     render_env = render_step.get('env', {}) if render_step else {}
-    out[f'{job}_renderer_secret_env_names_match'] = set(render_env) == required_renderer_secret_names
+    out[f'{job}_renderer_secret_env_names_match'] = set(render_env) == required_renderer_secret_names | {'CALLER_SECRETS_JSON'}
     out[f'{job}_renderer_secret_env_values_match'] = all(
         render_env.get(name) == '$' + '{{ secrets.' + name + ' }}'
         for name in required_renderer_secret_names
     )
+    # Caller-owned app secrets reach the renderer only as this step-local
+    # JSON object; the caller's renderer allowlists the keys it writes.
+    out[f'{job}_renderer_caller_secrets_json'] = render_env.get('CALLER_SECRETS_JSON') == '$' + '{{ toJSON(secrets) }}'
     out[f'{job}_renderer_secrets_step_local'] = all(
         name not in jobs.get(job, {}).get('env', {})
-        for name in required_renderer_secret_names
-    )
+        for name in required_renderer_secret_names | {'CALLER_SECRETS_JSON'}
+    ) and 'CALLER_SECRETS_JSON' not in json.dumps(doc.get('env', {}))
     run_body = render_step.get('run', '') if render_step else ''
     out[f'{job}_renderer_run_does_not_persist_secrets'] = not any(
         name in run_body and ('GITHUB_ENV' in run_body or 'GITHUB_OUTPUT' in run_body)
-        for name in required_renderer_secret_names
+        for name in required_renderer_secret_names | {'CALLER_SECRETS_JSON'}
     )
 
 build_steps = job_steps('build')
@@ -142,6 +145,8 @@ for job in validate-env deploy-caprover deploy-stable; do
     test "$(get_field "${job}_renderer_secret_env_names_match")" = "True"
   assert "$job maps every renderer env name directly from its matching secret" \
     test "$(get_field "${job}_renderer_secret_env_values_match")" = "True"
+  assert "$job passes caller secrets to the renderer only as step-local toJSON(secrets)" \
+    test "$(get_field "${job}_renderer_caller_secrets_json")" = "True"
   assert "$job does not expose renderer secrets at job scope" \
     test "$(get_field "${job}_renderer_secrets_step_local")" = "True"
   assert "$job does not persist renderer secrets through GITHUB_ENV or GITHUB_OUTPUT" \
