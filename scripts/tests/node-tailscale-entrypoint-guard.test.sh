@@ -84,12 +84,17 @@ printf '\ndeclare TS_STATE_MODE=mem\n' >> "$TMP/entrypoint-mem-declare/entrypoin
 git -C "$TMP/entrypoint-mem-declare" add . && git -C "$TMP/entrypoint-mem-declare" commit -qm entrypoint-mem-declare
 assert_fail "declare memory state declaration in canonical entrypoint fails" bash -c "cd '$TMP/entrypoint-mem-declare' && GITHUB_REPOSITORY=qwickapps/node '$GUARD' --source"
 
-mkdir -p "$TMP/env/.deploy-app-env"
-printf 'TS_EPHEMERAL_AUTHKEY=tskey-client-ignored\n' > "$TMP/env/.deploy-app-env/live.env"
-assert_fail "production ephemeral env fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/img-node:release '$GUARD' --production-env"
-assert_fail "unapproved production image fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/node:latest '$GUARD' --production-env"
-rm -f "$TMP/env/.deploy-app-env/live.env"
-assert_pass "approved clean production input passes" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=stable IMAGE_REF=ghcr.io/qwickapps/img-node:stable '$GUARD' --production-env"
+mkdir -p "$TMP/env"
+printf 'TS_EPHEMERAL_AUTHKEY=[redacted: tailscale key]\n' > "$TMP/env/rendered-live.env"
+assert_fail "rendered production ephemeral env fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/img-node:release '$GUARD' --production-env '$TMP/env/rendered-live.env'"
+printf 'TS_STATE_MODE=mem\n' > "$TMP/env/rendered-live.env"
+assert_fail "rendered production memory state fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/img-node:release '$GUARD' --production-env '$TMP/env/rendered-live.env'"
+assert_fail "missing rendered production env fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/img-node:release '$GUARD' --production-env"
+assert_fail "unapproved production image fails" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=live IMAGE_REF=ghcr.io/qwickapps/node:latest '$GUARD' --production-env '$TMP/env/rendered-live.env'"
+printf 'TS_STATE_MODE=stateful\n' > "$TMP/env/rendered-live.env"
+assert_pass "approved clean rendered production input passes" bash -c "cd '$TMP/env' && APP_NAME=node DEPLOY_STAGE=stable IMAGE_REF=ghcr.io/qwickapps/img-node:stable '$GUARD' --production-env '$TMP/env/rendered-live.env'"
+
+assert_pass "workflow passes rendered env output to production guard" bash -c "grep -q 'ENV_FILE: \${{ steps.env-file.outputs.path }}' '$ROOT/.github/workflows/deploy-app.yml' && grep -q 'node-tailscale-entrypoint-guard.sh --production-env \"\$ENV_FILE\"' '$ROOT/.github/workflows/deploy-app.yml'"
 
 [[ "$failures" -eq 0 ]] || exit 1
 echo "PASS: $pass node persistent-entrypoint guard assertions"
