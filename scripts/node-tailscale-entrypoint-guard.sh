@@ -5,6 +5,7 @@
 set -euo pipefail
 
 mode="${1:---source}"
+rendered_env_file="${2:-}"
 repo="${GITHUB_REPOSITORY:-}"
 app_name="${APP_NAME:-}"
 stage="${DEPLOY_STAGE:-}"
@@ -64,7 +65,10 @@ case "$mode" in
     [[ "$stage" == "live" || "$stage" == "stable" ]] || { echo "node production guard skipped for stage '$stage'"; exit 0; }
     [[ "$image_ref" =~ ^ghcr\.io/qwickapps/img-node:(release|stable)$ || "$image_ref" =~ ^ghcr\.io/qwickapps/img-node@sha256:[0-9a-f]{64}$ ]] \
       || fail "live/stable node deploy must use approved qwickapps img-node release/stable tag or immutable digest, got '$image_ref'"
-    if [[ -d .deploy-app-env ]] && grep -RInE '^[[:space:]]*(TS_EPHEMERAL_AUTHKEY|TS_STATE_MODE)[[:space:]]*=[[:space:]]*(.+|mem)[[:space:]]*$' .deploy-app-env 2>/dev/null; then
+    [[ -n "$rendered_env_file" && -f "$rendered_env_file" ]] \
+      || fail "rendered production env file is required"
+    if grep -qE '^[[:space:]]*TS_EPHEMERAL_AUTHKEY[[:space:]]*=[[:space:]]*[^[:space:]#].*$' "$rendered_env_file" \
+      || grep -qE '^[[:space:]]*TS_STATE_MODE[[:space:]]*=[[:space:]]*["'"'"']?mem["'"'"']?[[:space:]]*(#.*)?$' "$rendered_env_file"; then
       fail "rendered production env enables TS_EPHEMERAL_AUTHKEY or TS_STATE_MODE=mem"
     fi
     echo "node persistent-entrypoint production contract passed"
