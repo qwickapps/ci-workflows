@@ -77,12 +77,15 @@ curl() {
       done
       local presented_token="${user_pass#*:}"
       if [ "$presented_token" = "$VALID_TOKEN" ]; then
-        printf '{"token":"bearer-for-valid"}'
+        printf '{"token":"bearer-for-valid"}\n200'
         return 0
       elif [ "$presented_token" = "$INVALID_TOKEN" ]; then
-        # Real ghcr.io returns 401 for a genuinely bad credential; -f
-        # makes curl itself fail (non-zero exit, no stdout) on that, same
-        # as the real binary would.
+        # ghcr_probe_pull_token asks curl to append an HTTP status via -w;
+        # ghcr_probe_auth_only uses curl -f and must fail on the same 401.
+        if [[ " ${args[*]} " == *" -w "* ]]; then
+          printf '{"errors":[{"code":"UNAUTHORIZED"}]}\n401'
+          return 0
+        fi
         return 22
       else
         return 22
@@ -116,6 +119,12 @@ assert "valid token probes successfully" \
 
 refute "invalid (stale) token fails the probe" \
   ghcr_probe_pull_token "actor" "$INVALID_TOKEN" "qwickapps" "img-secrets" "sha-abc123"
+
+assert "401 token endpoint failure is classified as authorization, not a missing manifest" \
+  test "$GHCR_PROBE_REASON" = "token_auth_failed"
+
+assert "401 diagnostic is credential authorization, not missing image/tag" \
+  test "$(ghcr_describe_probe_failure)" = "credential is not authorized to pull this image"
 
 refute "empty token fails the probe without ever calling curl" \
   ghcr_probe_pull_token "actor" "" "qwickapps" "img-secrets" "sha-abc123"
@@ -240,7 +249,7 @@ curl() {
 
   case "$url" in
     https://ghcr.io/token\?*)
-      printf '{"token":"bearer-oci-probe"}'
+      printf '{"token":"bearer-oci-probe"}\n200'
       return 0
       ;;
     https://ghcr.io/v2/*/manifests/*)
@@ -260,6 +269,27 @@ curl() {
 
 assert "probe succeeds for a single-arch OCI image once Accept includes application/vnd.oci.image.manifest.v1+json" \
   ghcr_probe_pull_token "actor" "some-token" "qwickapps" "img-secrets" "sha-e5b8c6f"
+
+echo "== ghcr_probe_pull_token: manifest 404 is not auth failure =="
+curl() {
+  local url=""
+  for arg in "$@"; do
+    case "$arg" in https://*) url="$arg" ;; esac
+  done
+  case "$url" in
+    https://ghcr.io/token\?*) printf '{"token":"bearer-missing"}\n200' ;;
+    https://ghcr.io/v2/*/manifests/*) printf '404' ;;
+    *) return 1 ;;
+  esac
+}
+set +e
+ghcr_probe_pull_token "actor" "some-token" "qwickapps" "img-secrets" "release"
+RC=$?
+set -e
+assert "404 manifest probe fails" test "$RC" -ne 0
+assert "404 manifest is classified as missing image/tag" test "$GHCR_PROBE_REASON" = "manifest_missing"
+assert "404 diagnostic says missing image/tag, not authorization" \
+  test "$(ghcr_describe_probe_failure)" = "manifest is missing (image/tag does not exist)"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

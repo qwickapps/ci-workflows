@@ -56,7 +56,7 @@ jobs can reference individual values with
 | `project` | yes | — | QwickApps project name (e.g. `memories`, `forge`). |
 | `env` | yes | — | Target environment (e.g. `prod`, `uat`, `dev`). |
 | `keys` | yes | — | JSON array of secret key names to fetch (e.g. `["TS_AUTHKEY"]`). |
-| `secrets_url` | no | `https://secrets.qwickapps.com` | Base URL of the secrets service. |
+| `secrets_url` | yes | — | API base URL of the secrets service. This must be explicit; `https://secrets.qwickapps.com` is a landing site, not an API. |
 | `runs_on` | no | `["self-hosted","macmini"]` | Runner labels as a JSON array string. |
 
 #### Output
@@ -76,6 +76,7 @@ jobs:
       project: memories
       env: prod
       keys: '["TS_AUTHKEY","SOME_OTHER_KEY"]'
+      secrets_url: http://qwickapps-secrets.taile324e7.ts.net
 
   deploy:
     needs: [build, fetch-secrets]

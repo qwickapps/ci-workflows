@@ -87,7 +87,7 @@ on:
 jobs:
   validate-commits:
     name: "Gate 1 · Validate Commits"
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     steps:
       - name: Checkout calling repo (full history)
         uses: actions/checkout@v4
@@ -154,7 +154,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   lint-and-typecheck:
     name: "Gate 2a · Lint & Type-check"
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     needs: [validate-commits]
     steps:
       - name: Checkout
@@ -203,7 +203,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: "Gate 2b · Test"
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     needs: [validate-commits]
     steps:
       - name: Checkout
@@ -230,7 +230,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   build:
     name: "Gate 3 · Build"
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     needs: [lint-and-typecheck, test]
     steps:
       - name: Checkout
@@ -320,7 +320,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   push-image:
     name: "Gate 4 · Push Image to GHCR"
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     needs: [build]
     if: ${{ inputs.has_dockerfile }}
     outputs:
@@ -388,7 +388,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   report-status:
     name: "Gate 5 · Report Status"
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     if: always()
     needs: [validate-commits, lint-and-typecheck, test, build, push-image, definition-of-done]
     steps:

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-04T03:00:00+00:00",
+  "repositories": [
+    {
+      "repository": "qwickapps/example",
+      "default_branch": "main",
+      "branches": [
+        {
+          "branch": "anika/example",
+          "observed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  ]
+}
