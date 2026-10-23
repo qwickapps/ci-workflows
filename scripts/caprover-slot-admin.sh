@@ -11,6 +11,7 @@ set -euo pipefail
 #   enable-ssl  — enable base-domain SSL + forceSsl on a slot
 #   copy-config — copy env vars and CMD override from one slot to another
 #   env-dump    — dump live env vars as sorted KEY=VALUE lines to stdout
+#   remove-env  — remove explicitly named env vars (dry-run by default)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/caprover-api.sh
@@ -28,9 +29,14 @@ Usage:
     --source-caprover-url URL --source-caprover-password PASS \
     --target-caprover-url URL --target-caprover-password PASS
   caprover-slot-admin.sh env-dump --app-name APP --caprover-url URL --caprover-password PASS
+  caprover-slot-admin.sh remove-env --app-name APP --keys KEY1,KEY2 \
+    --caprover-url URL --caprover-password PASS [--dry-run true|false]
 
 env-dump outputs sorted KEY=VALUE lines to stdout and emits ::add-mask:: for
 each non-empty value so secret values are masked in GitHub Actions logs.
+
+remove-env reports only key names and defaults to --dry-run true. Apply mode
+performs one atomic app-definition update and verifies the exact envVars array.
 EOF
 }
 
@@ -51,6 +57,8 @@ SOURCE_CAPROVER_PASSWORD=""
 TARGET_CAPROVER_URL=""
 TARGET_CAPROVER_PASSWORD=""
 INSTANCE_COUNT=""
+KEYS_CSV=""
+DRY_RUN="true"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -94,6 +102,14 @@ while [[ $# -gt 0 ]]; do
       INSTANCE_COUNT="$2"
       shift 2
       ;;
+    --keys)
+      KEYS_CSV="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
       usage
@@ -106,12 +122,23 @@ get_definition() {
   local url="$1"
   local token="$2"
   local app="$3"
-  local curl_args=()
+  local curl_args=() response status
   caprover_populate_curl_args "$url" curl_args
 
-  curl "${curl_args[@]}" -X GET "${url}/api/v2/user/apps/appDefinitions" \
-    -H "x-captain-auth: ${token}" \
-    | jq --arg name "$app" '.data.appDefinitions[] | select(.appName == $name)'
+  response=$(caprover_api_call "Fetch app definition for ${app}" \
+    curl "${curl_args[@]}" --max-time 60 -X GET "${url}/api/v2/user/apps/appDefinitions" \
+    -H "x-captain-auth: ${token}")
+  if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    echo "Error: CapRover appDefinitions returned non-JSON response" >&2
+    return 1
+  fi
+  status="$(echo "$response" | jq -r '.status // "null"')"
+  if [[ "$status" != "100" ]] || ! echo "$response" | jq -e '(.data.appDefinitions // null) | type == "array"' >/dev/null 2>&1; then
+    echo "Error: CapRover appDefinitions returned an invalid app list (status=${status})" >&2
+    return 1
+  fi
+
+  echo "$response" | jq --arg name "$app" '.data.appDefinitions[] | select(.appName == $name)'
 }
 
 ensure_app() {
@@ -149,7 +176,7 @@ update_definition() {
 
   local response status desc
   response=$(caprover_api_call "$description" \
-    curl "${curl_args[@]}" -X POST "${url}/api/v2/user/apps/appDefinitions/update" \
+    curl "${curl_args[@]}" --max-time 60 -X POST "${url}/api/v2/user/apps/appDefinitions/update" \
     -H "Content-Type: application/json" \
     -H "x-captain-auth: ${token}" \
     -d "$payload")
@@ -359,6 +386,70 @@ case "$command" in
 
     # Output sorted KEY=VALUE pairs to stdout.
     printf '%s\n' "$env_vars_json"
+    ;;
+
+  remove-env)
+    if [[ -z "$APP_NAME" || -z "$KEYS_CSV" || -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+      usage
+      exit 1
+    fi
+    if [[ "$DRY_RUN" != "true" && "$DRY_RUN" != "false" ]]; then
+      echo "Error: --dry-run must be true or false" >&2
+      exit 1
+    fi
+
+    keys_json="$(printf '%s' "$KEYS_CSV" | jq -Rsc '
+      split(",")
+      | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+      | if any(. == "") then error("empty key") else . end
+      | if any(test("^[A-Za-z_][A-Za-z0-9_]*$") | not) then error("invalid key") else . end
+      | unique
+    ' 2>/dev/null)" || {
+      echo "Error: --keys must be a comma-separated list of valid environment variable names" >&2
+      exit 1
+    }
+
+    token="$(caprover_login "$CAPROVER_URL" "$CAPROVER_PASSWORD")"
+    current="$(get_definition "$CAPROVER_URL" "$token" "$APP_NAME")"
+    if [[ -z "$current" || "$current" == "null" ]]; then
+      echo "Error: app ${APP_NAME} was not found; cannot remove env keys" >&2
+      exit 1
+    fi
+
+    existing_env="$(echo "$current" | jq -c '.envVars // []')"
+    present_keys="$(echo "$existing_env" | jq -c --argjson keys "$keys_json" \
+      '[.[] | select(.key as $key | $keys | index($key)) | .key] | unique')"
+
+    while IFS= read -r key; do
+      if echo "$present_keys" | jq -e --arg key "$key" 'index($key) != null' >/dev/null; then
+        echo "PRESENT: ${key} (would be removed)"
+      else
+        echo "ABSENT: ${key} (no-op)"
+      fi
+    done < <(echo "$keys_json" | jq -r '.[]')
+
+    if [[ "$(echo "$present_keys" | jq 'length')" -eq 0 ]]; then
+      echo "No requested keys are present; nothing to do."
+      exit 0
+    fi
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "Dry-run complete; no changes applied. Re-run with --dry-run false to apply."
+      exit 0
+    fi
+
+    filtered_env="$(echo "$existing_env" | jq -c --argjson keys "$keys_json" \
+      '[.[] | select(.key as $key | ($keys | index($key)) == null)]')"
+    updated="$(echo "$current" | jq --argjson env "$filtered_env" '.envVars = $env')"
+    update_definition "$CAPROVER_URL" "$token" "$updated" "Remove env keys from ${APP_NAME}"
+
+    verified="$(get_definition "$CAPROVER_URL" "$token" "$APP_NAME")"
+    verified_env="$(echo "$verified" | jq -c '.envVars // []')"
+    if [[ "$verified_env" != "$filtered_env" ]]; then
+      echo "Error: env key removal verification failed; live envVars do not exactly match the requested result" >&2
+      exit 1
+    fi
+
+    echo "Removed and verified env keys on ${APP_NAME}: $(echo "$present_keys" | jq -r 'join(",")')"
     ;;
 
   *)
