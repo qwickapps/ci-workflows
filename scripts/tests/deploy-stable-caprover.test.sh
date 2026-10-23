@@ -79,6 +79,12 @@ result = {
         and 'qwickapps-forge|*-forge' in forge_gate_run
         and 'exit 1' in forge_gate_run
     ),
+    'forge_gate_normalizes_aliases': (
+        'POLICY_APP=' in forge_gate_run
+        and '*-live)' in forge_gate_run
+        and '*-uat)' in forge_gate_run
+        and '*-stable)' in forge_gate_run
+    ),
     'uses_resolved_target_app': 'needs.resolve-stage.outputs.target_app' in all_text,
     'no_hardcoded_app_stable_suffix': (\"inputs.app_name }}-stable\" not in all_text) and (\"inputs.app_name}}-stable\" not in all_text),
     # aos#193 Phase 1 review (round 2): deploy-stable carries NO explicit
@@ -166,6 +172,9 @@ assert "deploy-stable: has a 'Resolve CapRover credentials'-style step" \
 
 assert "infra#41: Forge stable refusal precedes CapRover credentials and exits" \
   test "$(get forge_gate_before_caprover_credentials)" = "True"
+
+assert "infra#41: Forge stable refusal normalizes stable-slot aliases before CapRover credentials" \
+  test "$(get forge_gate_normalizes_aliases)" = "True"
 
 assert "deploy-stable: resolves its target app name via resolve-stage's target_app output" \
   test "$(get uses_resolved_target_app)" = "True"

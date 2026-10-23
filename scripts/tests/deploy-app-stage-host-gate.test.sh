@@ -188,6 +188,15 @@ IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=macmini-devserver \
   IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \
   assert_succeeds "infra#41: Forge stable resolves only to macmini-devserver"
 
+# The explicit URL override must be classified against the canonical OCI-main
+# hostname, not against itself. Otherwise a valid macmini URL override would
+# be mislabeled OCI_MAIN and rejected before the later unsupported-mechanism
+# guard can fail closed.
+IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  IN_CAPROVER_URL=https://macmini-devserver \
+  IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \
+  assert_succeeds "infra#41: Forge stable explicit macmini caprover_url is classified as MACMINI_DEVSERVER"
+
 echo ""
 echo "== Check 2: no per-environment build slots =="
 

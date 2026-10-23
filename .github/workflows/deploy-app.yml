@@ -352,8 +352,7 @@ jobs:
           # point for future placement exceptions.
           FORGE_STABLE_HOST="macmini-devserver"
           if [ "$STAGE_INPUT" = "stable" ]; then
-            OCI_MAIN_CAPROVER_URL="${{ inputs.caprover_url }}" \
-              bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP_NAME" prod "$RESOLVED_HOST"
+            bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP_NAME" prod "$RESOLVED_HOST"
           fi
           case "$STAGE_INPUT" in
             build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
@@ -1827,7 +1826,16 @@ jobs:
           # only has the oci-main CapRover credential/deploy implementation;
           # it must never fall back to that cluster and create the forbidden
           # slot while the macmini deployment mechanism is absent.
-          case "${{ inputs.app_name }}" in
+          POLICY_APP="${{ inputs.app_name }}"
+          while :; do
+            case "$POLICY_APP" in
+              *-live) POLICY_APP="${POLICY_APP%-live}" ;;
+              *-uat) POLICY_APP="${POLICY_APP%-uat}" ;;
+              *-stable) POLICY_APP="${POLICY_APP%-stable}" ;;
+              *) break ;;
+            esac
+          done
+          case "$POLICY_APP" in
             qwickapps-forge|*-forge)
               echo "::error::infra#41: forge-stable must run on macmini-devserver; deploy-app has no supported macmini stable deployment mechanism"
               exit 1
