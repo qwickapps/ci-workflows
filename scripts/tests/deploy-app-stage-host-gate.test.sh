@@ -158,12 +158,8 @@ IN_STAGE=live IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
 IN_STAGE=live IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_succeeds "live stage targeting oci-main host succeeds"
 
-# RED: ci-workflows#187 -- stable stage pointed at oci-dev must now be
-# refused too. Before #187's fix, stable was exempt from check 1 entirely
-# (it deployed through Coolify, never through deploy-caprover's gate); now
-# that deploy-stable deploys through CapRover using the caller's own
-# caprover_host (mcp#392, ci-workflows#186), the same faabzi-uat-build-shaped
-# mistake is possible for stable too if it stays exempt.
+# RED: ordinary stable slots remain on oci-main, so a non-Forge stable slot
+# may not target the retired oci-dev host.
 IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
   IN_GATEWAY_STABLE_URL=http://demo-stable.taile324e7.ts.net:8080 \
   assert_fails_with "ci-workflows#187: stable stage targeting oci-dev host is refused" \
@@ -173,6 +169,18 @@ IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.dev.qwickforge.com \
 IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
   IN_GATEWAY_STABLE_URL=http://demo-stable.taile324e7.ts.net:8080 \
   assert_succeeds "ci-workflows#187: stable stage targeting oci-main host succeeds"
+
+# infra#41: Forge stable is the explicit placement exception. It must never
+# use oci-main, and the resolver must instead require the macmini host before
+# deploy-stable's own fail-closed unsupported-mechanism guard runs.
+IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \
+  assert_fails_with "infra#41: Forge stable targeting oci-main is refused" \
+  "infra#41: forge stable must deploy to 'macmini-devserver'"
+
+IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=macmini-devserver \
+  IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \
+  assert_succeeds "infra#41: Forge stable resolves only to macmini-devserver"
 
 echo ""
 echo "== Check 2: no per-environment build slots =="

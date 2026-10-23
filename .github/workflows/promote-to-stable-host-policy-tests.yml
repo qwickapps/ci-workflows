@@ -1,0 +1,26 @@
+name: Promote-to-Stable Host Policy Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/promote-to-stable.yml'
+      - '.github/workflows/promote-to-stable-host-policy-tests.yml'
+      - 'scripts/tests/promote-to-stable-host-policy.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/promote-to-stable.yml'
+      - 'scripts/tests/promote-to-stable-host-policy.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: promote-to-stable host policy
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host policy contract test
+        run: bash scripts/tests/promote-to-stable-host-policy.test.sh

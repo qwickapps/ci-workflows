@@ -45,6 +45,17 @@ with open('$WORKFLOW') as f:
 
 job = doc['jobs']['deploy-stable']
 steps = job.get('steps', [])
+forge_gate_index = next(
+    (i for i, s in enumerate(steps)
+     if (s.get('name') or '').startswith('Refuse unsupported Forge stable deployment')),
+    None,
+)
+caprover_credentials_index = next(
+    (i for i, s in enumerate(steps)
+     if 'caprover credentials' in (s.get('name') or '').lower()),
+    None,
+)
+forge_gate_run = '' if forge_gate_index is None else (steps[forge_gate_index].get('run') or '')
 
 def step_texts():
     for s in steps:
@@ -61,6 +72,13 @@ result = {
     'has_deploy_from_ghcr': 'deploy-from-ghcr.sh' in all_text,
     'has_validate_deployment_health': 'validate-deployment-health.sh' in all_text,
     'has_caprover_credentials_step': any('caprover credentials' in (s.get('name','') or '').lower() for s in steps),
+    'forge_gate_before_caprover_credentials': (
+        forge_gate_index is not None
+        and caprover_credentials_index is not None
+        and forge_gate_index < caprover_credentials_index
+        and 'qwickapps-forge|*-forge' in forge_gate_run
+        and 'exit 1' in forge_gate_run
+    ),
     'uses_resolved_target_app': 'needs.resolve-stage.outputs.target_app' in all_text,
     'no_hardcoded_app_stable_suffix': (\"inputs.app_name }}-stable\" not in all_text) and (\"inputs.app_name}}-stable\" not in all_text),
     # aos#193 Phase 1 review (round 2): deploy-stable carries NO explicit
@@ -145,6 +163,9 @@ assert "deploy-stable: uses validate-deployment-health.sh (same as deploy-caprov
 
 assert "deploy-stable: has a 'Resolve CapRover credentials'-style step" \
   test "$(get has_caprover_credentials_step)" = "True"
+
+assert "infra#41: Forge stable refusal precedes CapRover credentials and exits" \
+  test "$(get forge_gate_before_caprover_credentials)" = "True"
 
 assert "deploy-stable: resolves its target app name via resolve-stage's target_app output" \
   test "$(get uses_resolved_target_app)" = "True"

@@ -84,6 +84,13 @@ jobs:
           ENV="${{ inputs.environment }}"
           APP="${{ inputs.app_name }}"
 
+          # Validate at the earliest boundary, before app-name policy or any
+          # environment-specific credential is selected. The promote job has
+          # the same validation, but drift-check is the first networked job.
+          case "$APP" in
+            *[!a-z0-9-]*|""|-*|*-) echo "ERROR: app_name must be a lowercase slug"; exit 1 ;;
+          esac
+
           case "$ENV" in
             dev)
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_DEV_CAPROVER_URL }}"
@@ -99,6 +106,25 @@ jobs:
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
               DRIFT_APP="${APP}-uat-stable"
+              ;;
+          esac
+
+          # infra#41: Forge's stable slot is not permitted on oci-main.
+          # Keep this small policy table at the first job that touches the
+          # promotion path: drift-check runs before GHCR retagging, CapRover
+          # login, registration, or configuration writes.
+          case "$APP" in
+            qwickapps-forge|*-forge)
+              case "$ENV" in
+                prod|uat)
+                  # macmini-devserver is not a configured CapRover target in
+                  # this reusable workflow. Refuse every Forge promotion
+                  # rather than accepting an arbitrary override and risking
+                  # an unregistered stable-slot write on another cluster.
+                  echo "::error::infra#41: forge-stable must run on macmini-devserver, not oci-main"
+                  exit 1
+                  ;;
+              esac
               ;;
           esac
 
@@ -239,6 +265,19 @@ jobs:
               CAPROVER_URL="${{ inputs.caprover_url || secrets.OCI_MAIN_CAPROVER_URL }}"
               CAPROVER_PASSWORD="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
               STABLE_APP_URL="https://${STABLE_APP}.app.qwickforge.com"
+              ;;
+          esac
+
+          # Mirror the fail-closed placement policy from drift-check. This
+          # protects this write path if the job structure changes later.
+          case "$APP" in
+            qwickapps-forge|*-forge)
+              case "$ENV" in
+                prod|uat)
+                  echo "::error::infra#41: forge-stable must run on macmini-devserver, not oci-main"
+                  exit 1
+                  ;;
+              esac
               ;;
           esac
           if [ -n "${{ inputs.stable_url }}" ]; then

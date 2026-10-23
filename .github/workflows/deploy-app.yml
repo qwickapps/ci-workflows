@@ -335,9 +335,21 @@ jobs:
           elif [ -n "${{ inputs.caprover_host }}" ]; then
             RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_host }}")"
           fi
+          # App-to-host policy table. Most stable slots remain on the
+          # canonical oci-main CapRover, but infra#41 assigns Forge's stable
+          # slot to macmini-devserver. Do not fold this into a Forge-only
+          # exception below: this table is deliberately the single extension
+          # point for future placement exceptions.
+          FORGE_STABLE_HOST="macmini-devserver"
           case "$STAGE_INPUT" in
             build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
-            uat|live|stable) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+            uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+            stable)
+              case "$APP_NAME" in
+                qwickapps-forge|*-forge) EXPECTED_HOST="$FORGE_STABLE_HOST" ;;
+                *) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+              esac
+              ;;
             # Unreachable today -- STAGE_INPUT is validated to be one of
             # build|uat|live|stable above. Kept as an explicit fail-closed
             # arm so that if a stage is ever added to that allow-list
@@ -354,7 +366,11 @@ jobs:
             exit 1
           fi
           if [ "$RESOLVED_HOST" != "$EXPECTED_HOST" ]; then
-            echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
+            if [ "$STAGE_INPUT" = "stable" ] && [[ "$APP_NAME" = "qwickapps-forge" || "$APP_NAME" = *-forge ]]; then
+              echo "ERROR: infra#41: forge stable must deploy to '$EXPECTED_HOST', not '$RESOLVED_HOST'"
+            else
+              echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
+            fi
             exit 1
           fi
 
@@ -1790,6 +1806,19 @@ jobs:
           sparse-checkout: |
             scripts
           sparse-checkout-cone-mode: false
+
+      - name: Refuse unsupported Forge stable deployment before CapRover access
+        run: |
+          # infra#41 assigns Forge stable to macmini-devserver. This workflow
+          # only has the oci-main CapRover credential/deploy implementation;
+          # it must never fall back to that cluster and create the forbidden
+          # slot while the macmini deployment mechanism is absent.
+          case "${{ inputs.app_name }}" in
+            qwickapps-forge|*-forge)
+              echo "::error::infra#41: forge-stable must run on macmini-devserver; deploy-app has no supported macmini stable deployment mechanism"
+              exit 1
+              ;;
+          esac
 
       - name: Verify live-e2e-approved + directive signature (aos#193 Phase 1 §1/§5)
         # Runs BEFORE any CapRover credential resolution or deploy step
