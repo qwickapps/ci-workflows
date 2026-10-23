@@ -1,0 +1,6 @@
+{
+  "qwickapps-forge": {
+    "prod": ["MACMINI_DEVSERVER"],
+    "uat": ["MACMINI_DEVSERVER"]
+  }
+}

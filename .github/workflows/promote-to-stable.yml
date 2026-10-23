@@ -72,6 +72,17 @@ jobs:
       - name: Checkout caller repo
         uses: actions/checkout@v4
 
+      - name: Checkout stable-host policy
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows-policy
+          sparse-checkout: |
+            config/stable-host-policy.json
+            scripts/stable-host-policy.sh
+          sparse-checkout-cone-mode: false
+
       - name: Verify protocols runtime available
         run: |
           if [[ ! -f ~/.qwickapps/protocols/scripts/check-runtime-drift.sh ]]; then
@@ -81,8 +92,16 @@ jobs:
 
       - name: Resolve CapRover credentials for drift check
         run: |
+          set -euo pipefail
           ENV="${{ inputs.environment }}"
           APP="${{ inputs.app_name }}"
+
+          # Validate at the earliest boundary, before app-name policy or any
+          # environment-specific credential is selected. The promote job has
+          # the same validation, but drift-check is the first networked job.
+          case "$APP" in
+            *[!a-z0-9-]*|""|-*|*-) echo "ERROR: app_name must be a lowercase slug"; exit 1 ;;
+          esac
 
           case "$ENV" in
             dev)
@@ -101,6 +120,9 @@ jobs:
               DRIFT_APP="${APP}-uat-stable"
               ;;
           esac
+
+          # infra#41 policy check runs before any credential use or write.
+          bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP" "$ENV" "$CAPROVER_URL"
 
           if [ -z "$CAPROVER_URL" ] || [ -z "$CAPROVER_PASSWORD" ]; then
             echo "ERROR: CapRover credentials not found for ${ENV}."
@@ -140,6 +162,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Checkout stable-host policy
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows-policy
+          sparse-checkout: |
+            config/stable-host-policy.json
+            scripts/stable-host-policy.sh
+          sparse-checkout-cone-mode: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -215,6 +248,7 @@ jobs:
 
       - name: Resolve CapRover credentials and slot names
         run: |
+          set -euo pipefail
           ENV="${{ inputs.environment }}"
           APP="${{ inputs.app_name }}"
 
@@ -241,6 +275,9 @@ jobs:
               STABLE_APP_URL="https://${STABLE_APP}.app.qwickforge.com"
               ;;
           esac
+
+          # Mirror the policy check before GHCR retagging or stable-slot work.
+          bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP" "$ENV" "$CAPROVER_URL"
           if [ -n "${{ inputs.stable_url }}" ]; then
             STABLE_APP_URL="${{ inputs.stable_url }}"
           fi
