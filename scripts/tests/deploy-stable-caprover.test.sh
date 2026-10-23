@@ -76,7 +76,8 @@ result = {
         forge_gate_index is not None
         and caprover_credentials_index is not None
         and forge_gate_index < caprover_credentials_index
-        and 'qwickapps-forge|*-forge' in forge_gate_run
+        and 'qwickapps-forge)' in forge_gate_run
+        and 'qwickapps-forge|*-forge)' not in forge_gate_run
         and 'exit 1' in forge_gate_run
     ),
     'forge_gate_normalizes_aliases': (

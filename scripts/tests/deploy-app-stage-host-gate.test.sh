@@ -197,6 +197,12 @@ IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=captain.app.qwickfo
   IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \
   assert_succeeds "infra#41: Forge stable explicit macmini caprover_url is classified as MACMINI_DEVSERVER"
 
+# The suffix alone is not policy. An unlisted app ending in -forge must retain
+# the default OCI-main stable placement.
+IN_STAGE=stable IN_APP_NAME=example-forge IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  IN_GATEWAY_STABLE_URL=http://example-forge-stable.taile324e7.ts.net:8080 \
+  assert_succeeds "unlisted -forge app retains the default OCI-main stable placement"
+
 echo ""
 echo "== Check 2: no per-environment build slots =="
 

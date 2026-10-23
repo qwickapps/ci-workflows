@@ -351,6 +351,15 @@ jobs:
           # exception below: this table is deliberately the single extension
           # point for future placement exceptions.
           FORGE_STABLE_HOST="macmini-devserver"
+          POLICY_APP="$APP_NAME"
+          while :; do
+            case "$POLICY_APP" in
+              *-live) POLICY_APP="${POLICY_APP%-live}" ;;
+              *-uat) POLICY_APP="${POLICY_APP%-uat}" ;;
+              *-stable) POLICY_APP="${POLICY_APP%-stable}" ;;
+              *) break ;;
+            esac
+          done
           if [ "$STAGE_INPUT" = "stable" ]; then
             bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP_NAME" prod "$RESOLVED_HOST"
           fi
@@ -358,8 +367,8 @@ jobs:
             build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
             uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
             stable)
-              case "$APP_NAME" in
-                qwickapps-forge|*-forge|*-forge-live|*-forge-uat|*-forge-stable) EXPECTED_HOST="$FORGE_STABLE_HOST" ;;
+              case "$POLICY_APP" in
+                qwickapps-forge) EXPECTED_HOST="$FORGE_STABLE_HOST" ;;
                 *) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
               esac
               ;;
@@ -379,7 +388,7 @@ jobs:
             exit 1
           fi
           if [ "$RESOLVED_HOST" != "$EXPECTED_HOST" ]; then
-            if [ "$STAGE_INPUT" = "stable" ] && [[ "$APP_NAME" = "qwickapps-forge" || "$APP_NAME" = *-forge ]]; then
+            if [ "$STAGE_INPUT" = "stable" ] && [ "$POLICY_APP" = "qwickapps-forge" ]; then
               echo "ERROR: infra#41: forge stable must deploy to '$EXPECTED_HOST', not '$RESOLVED_HOST'"
             else
               echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
@@ -1836,7 +1845,7 @@ jobs:
             esac
           done
           case "$POLICY_APP" in
-            qwickapps-forge|*-forge)
+            qwickapps-forge)
               echo "::error::infra#41: forge-stable must run on macmini-devserver; deploy-app has no supported macmini stable deployment mechanism"
               exit 1
               ;;
