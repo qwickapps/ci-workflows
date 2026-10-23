@@ -40,6 +40,11 @@ on:
         required: false
         type: string
         default: ''
+      manifest_path:
+        description: 'Caller-owned runtime environment manifest used by the drift check.'
+        required: false
+        type: string
+        default: '.qwickapps/runtime.env.manifest.yml'
     secrets:
       OCI_DEV_CAPROVER_URL:
         required: false
@@ -127,12 +132,18 @@ jobs:
 
       - name: Run runtime drift check
         run: |
+          MANIFEST_PATH="${{ inputs.manifest_path }}"
+          if [[ ! -f "$MANIFEST_PATH" ]]; then
+            echo "::error::Caller runtime manifest not found: $MANIFEST_PATH"
+            exit 1
+          fi
+
           ~/.qwickapps/protocols/scripts/check-runtime-drift.sh \
             --app-name "$DRIFT_APP_NAME" \
             --host caprover \
             --caprover-url "$DRIFT_CAPROVER_URL" \
             --caprover-token "$DRIFT_CAPROVER_TOKEN" \
-            --manifest-path .qwickapps/runtime.env.manifest.yml
+            --manifest-path "$MANIFEST_PATH"
 
   promote-to-stable:
     needs: [drift-check]
@@ -140,6 +151,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # The caller checkout above intentionally supplies caller-owned
+      # deployment assets. The shared helpers below must instead come from
+      # this reusable workflow's immutable revision, not whatever files a
+      # caller happens to carry at its own SHA.
+      - name: Checkout reusable workflow helpers
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -298,12 +322,12 @@ jobs:
         # step reported success even while silently flattening the image,
         # which is exactly why the bug went unnoticed.
         run: |
-          chmod +x scripts/verify-multiarch-manifest.sh
-          scripts/verify-multiarch-manifest.sh \
+          chmod +x .ci-workflows/scripts/verify-multiarch-manifest.sh
+          .ci-workflows/scripts/verify-multiarch-manifest.sh \
             --config "$TMPDIR_DOCKER" \
             --ref "$STABLE_IMAGE_VERSIONED" \
             --source-ref "$image_ref"
-          scripts/verify-multiarch-manifest.sh \
+          .ci-workflows/scripts/verify-multiarch-manifest.sh \
             --config "$TMPDIR_DOCKER" \
             --ref "$STABLE_IMAGE_LATEST" \
             --source-ref "$image_ref"
@@ -381,8 +405,8 @@ jobs:
           # would introduce TS_HOSTNAME into callers like ide/forge/crew
           # that never set it at all. See that script's own header and
           # scripts/tests/rescope-ts-hostname.test.sh for the covered cases.
-          chmod +x scripts/rescope-ts-hostname.sh
-          MERGED=$(scripts/rescope-ts-hostname.sh "$STABLE_DEF" "$ENV_VARS" "$STABLE_APP")
+          chmod +x .ci-workflows/scripts/rescope-ts-hostname.sh
+          MERGED=$(.ci-workflows/scripts/rescope-ts-hostname.sh "$STABLE_DEF" "$ENV_VARS" "$STABLE_APP")
           if [ -n "$SVC_OVERRIDE" ]; then
             MERGED=$(echo "$MERGED" | jq --arg override "$SVC_OVERRIDE" '.serviceUpdateOverride = $override')
           fi
@@ -402,6 +426,15 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Restore reusable workflow helpers after caller re-checkout
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
 
       - name: Deploy versioned stable image to stable slot
         run: |
