@@ -1,0 +1,23 @@
+name: Stable Host Policy Proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Forge stable target environment
+        required: true
+        type: choice
+        options: [prod, uat]
+
+permissions:
+  contents: read
+
+jobs:
+  prove-forge-is-refused:
+    uses: ./.github/workflows/promote-to-stable.yml
+    with:
+      app_name: qwickapps-forge
+      environment: ${{ inputs.environment }}
+      image_ref: ghcr.io/qwickapps/img-policy-proof-does-not-exist:never
+      health_path: /_health
+    secrets: inherit

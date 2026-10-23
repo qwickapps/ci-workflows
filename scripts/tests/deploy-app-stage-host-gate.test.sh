@@ -40,8 +40,14 @@ extract_script() {
 import yaml
 with open('$WORKFLOW') as f:
     doc = yaml.safe_load(f)
-print(doc['jobs']['resolve-stage']['steps'][0]['run'])
+for step in doc['jobs']['resolve-stage']['steps']:
+    if step.get('name') == 'Resolve canonical stage contract':
+        print(step['run'])
+        break
+else:
+    raise SystemExit('resolve-stage contract step not found')
 " | sed -E \
+    -e 's#\.ci-workflows-policy/scripts/stable-host-policy\.sh#'"$ROOT_DIR"'/scripts/stable-host-policy.sh#g' \
     -e 's/\$\{\{ env\.REGISTRY \}\}/$REGISTRY/g' \
     -e 's/\$\{\{ env\.OWNER \}\}/$OWNER/g' \
     -e 's/\$\{\{ inputs\.app_name \}\}/$IN_APP_NAME/g' \
@@ -176,7 +182,7 @@ IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
 IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=captain.app.qwickforge.com \
   IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \
   assert_fails_with "infra#41: Forge stable targeting oci-main is refused" \
-  "infra#41: forge stable must deploy to 'macmini-devserver'"
+  "infra#41: qwickapps-forge-stable must run on macmini-devserver, not oci-main"
 
 IN_STAGE=stable IN_APP_NAME=qwickapps-forge IN_CAPROVER_HOST=macmini-devserver \
   IN_GATEWAY_STABLE_URL=http://qwickapps-forge-stable.taile324e7.ts.net:8080 \

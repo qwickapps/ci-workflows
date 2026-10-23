@@ -27,6 +27,7 @@ for step in doc['jobs']['drift-check']['steps']:
 else:
     raise SystemExit('drift-check resolution step not found')
 " | sed -E \
+    -e 's#\.ci-workflows-policy/scripts/stable-host-policy\.sh#'"$ROOT_DIR"'/scripts/stable-host-policy.sh#g' \
     -e 's/\$\{\{ inputs\.environment \}\}/$IN_ENV/g' \
     -e 's/\$\{\{ inputs\.app_name \}\}/$IN_APP/g' \
     -e 's/\$\{\{ inputs\.caprover_url \|\| secrets\.OCI_DEV_CAPROVER_URL \}\}/$IN_CAPROVER_URL/g' \
@@ -100,17 +101,17 @@ echo "== promote-to-stable: Forge stable placement policy =="
 IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
   IN_ENV=prod IN_APP=qwickapps-forge \
   assert_fails_with "Forge prod is refused before credentials are used" \
-  "infra#41: forge-stable must run on macmini-devserver, not oci-main"
+  "infra#41: qwickapps-forge-stable must run on macmini-devserver, not oci-main"
 
 IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
   IN_ENV=uat IN_APP=qwickapps-forge \
   assert_fails_with "Forge uat is refused before credentials are used" \
-  "infra#41: forge-stable must run on macmini-devserver, not oci-main"
+  "infra#41: qwickapps-forge-stable must run on macmini-devserver, not oci-main"
 
 IN_CAPROVER_URL=https://unapproved.example.test IN_CAPROVER_PASSWORD=test \
   IN_ENV=prod IN_APP=qwickapps-forge \
   assert_fails_with "Forge cannot bypass policy with an arbitrary host override" \
-  "infra#41: forge-stable must run on macmini-devserver, not oci-main"
+  "infra#41: qwickapps-forge-stable must run on MACMINI_DEVSERVER; resolved: UNKNOWN"
 
 IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
   IN_ENV=prod IN_APP=Qwickapps-Forge \
@@ -121,6 +122,15 @@ IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
   IN_ENV=prod IN_APP='qwickapps-forge ' \
   assert_fails_with "whitespace-suffixed Forge app name is rejected before credentials" \
   "ERROR: app_name must be a lowercase slug"
+
+IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
+  IN_ENV=prod IN_APP=qwickapps-forge-live \
+  assert_fails_with "Forge alias is refused before credentials" \
+  "infra#41: qwickapps-forge-stable must run on macmini-devserver, not oci-main"
+
+IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
+  IN_ENV=prod IN_APP=qwickapps-unlisted \
+  assert_succeeds "unlisted prod promotion remains allowed"
 
 IN_CAPROVER_URL=https://captain.app.qwickforge.com IN_CAPROVER_PASSWORD=test \
   IN_ENV=prod IN_APP=qwickapps-memories \

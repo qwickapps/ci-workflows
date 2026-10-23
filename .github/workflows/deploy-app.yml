@@ -240,6 +240,16 @@ jobs:
       canary: ${{ steps.meta.outputs.canary }}
       deploy_start_epoch: ${{ steps.meta.outputs.deploy_start_epoch }}
     steps:
+      - name: Checkout stable-host policy
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows-policy
+          sparse-checkout: |
+            config/stable-host-policy.json
+            scripts/stable-host-policy.sh
+          sparse-checkout-cone-mode: false
       - name: Resolve canonical stage contract
         id: meta
         run: |
@@ -341,12 +351,16 @@ jobs:
           # exception below: this table is deliberately the single extension
           # point for future placement exceptions.
           FORGE_STABLE_HOST="macmini-devserver"
+          if [ "$STAGE_INPUT" = "stable" ]; then
+            OCI_MAIN_CAPROVER_URL="${{ inputs.caprover_url }}" \
+              bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP_NAME" prod "$RESOLVED_HOST"
+          fi
           case "$STAGE_INPUT" in
             build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
             uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
             stable)
               case "$APP_NAME" in
-                qwickapps-forge|*-forge) EXPECTED_HOST="$FORGE_STABLE_HOST" ;;
+                qwickapps-forge|*-forge|*-forge-live|*-forge-uat|*-forge-stable) EXPECTED_HOST="$FORGE_STABLE_HOST" ;;
                 *) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
               esac
               ;;
