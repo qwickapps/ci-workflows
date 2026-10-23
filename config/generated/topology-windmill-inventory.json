@@ -197,17 +197,6 @@
       "repo": "qwickapps/forge"
     },
     {
-      "hostname": "qwickapps-forge-stable",
-      "platform": "caprover",
-      "app": "srv-captain--qwickapps-forge-stable",
-      "host": "oci-main",
-      "role": "backend",
-      "state": {
-        "mode": "ephemeral"
-      },
-      "repo": "qwickapps/forge"
-    },
-    {
       "hostname": "qwickapps-forge-uat",
       "platform": "caprover",
       "app": "srv-captain--qwickapps-forge-uat",

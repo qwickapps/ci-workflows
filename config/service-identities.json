@@ -211,19 +211,6 @@
       "images": ["ghcr.io/qwickapps/img-qwickapps-forge:release"]
     },
     {
-      "canonical_hostname": "qwickapps-forge-stable",
-      "workload_owner": "forge-platform",
-      "repo": "qwickapps/forge",
-      "platform": "caprover",
-      "app": "srv-captain--qwickapps-forge-stable",
-      "required_host": "oci-main",
-      "role": "backend",
-      "load_balancer": false,
-      "state": {"mode": "ephemeral"},
-      "images": ["ghcr.io/qwickapps/img-qwickapps-forge:stable"],
-      "notes": "0/0 replicas as of 2026-10-07 live sweep; registered identity, not currently scheduled."
-    },
-    {
       "canonical_hostname": "qwickapps-forge-uat",
       "workload_owner": "forge-platform",
       "repo": "qwickapps/forge",
