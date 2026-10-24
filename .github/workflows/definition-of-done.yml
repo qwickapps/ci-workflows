@@ -91,6 +91,41 @@ jobs:
 
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA" HEAD 2>/dev/null || git diff --name-only HEAD~1 HEAD)"
 
+          # ci-workflows#147: a diff made up entirely of lockfiles has no
+          # source change to test, so the test-file requirement can never be
+          # met. Keyed on diff content only (not PR author/title). An empty
+          # diff does not qualify. Manifests (package.json, go.mod, ...) are
+          # deliberately NOT exempt -- they can change scripts/config.
+          LOCKFILE_ONLY=false
+          if [ -n "$CHANGED_FILES" ]; then
+            LOCKFILE_ONLY=true
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                package-lock.json|*/package-lock.json) ;;
+                npm-shrinkwrap.json|*/npm-shrinkwrap.json) ;;
+                pnpm-lock.yaml|*/pnpm-lock.yaml) ;;
+                yarn.lock|*/yarn.lock) ;;
+                Cargo.lock|*/Cargo.lock) ;;
+                go.sum|*/go.sum) ;;
+                poetry.lock|*/poetry.lock) ;;
+                Pipfile.lock|*/Pipfile.lock) ;;
+                composer.lock|*/composer.lock) ;;
+                Gemfile.lock|*/Gemfile.lock) ;;
+                *) LOCKFILE_ONLY=false; break ;;
+              esac
+            done <<EOF
+          $CHANGED_FILES
+          EOF
+          fi
+
+          if [ "$LOCKFILE_ONLY" = "true" ]; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "detail=Lockfile-only diff — no source change to test." >> "$GITHUB_OUTPUT"
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Test file patterns (bash 3.2 safe — no grep -P, no case folding)
           TEST_FILES=""
           while IFS= read -r f; do
@@ -106,7 +141,9 @@ jobs:
           $CHANGED_FILES
           EOF
 
-          TEST_FILES="$(echo "$TEST_FILES" | tr ' ' '\n' | grep -v '^$' | sort -u)"
+          # `|| true`: grep exits 1 when nothing matches, which under pipefail
+          # killed the step before the fail branch could set status/detail.
+          TEST_FILES="$(echo "$TEST_FILES" | tr ' ' '\n' | { grep -v '^$' || true; } | sort -u)"
 
           if [ -n "$TEST_FILES" ]; then
             COUNT="$(echo "$TEST_FILES" | wc -l | tr -d ' ')"
