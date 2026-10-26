@@ -1425,6 +1425,56 @@ jobs:
           E2E_DIGEST="$(printf '%s' "${E2E_COMMAND}|${IMAGE_REF}|${{ github.sha }}" | sha256sum | awk '{print $1}')"
           echo "e2e_digest=sha256:${E2E_DIGEST}" >> "$GITHUB_OUTPUT"
 
+      - name: Record first-stable build proof
+        if: needs.resolve-stage.outputs.stage == 'build'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${{ needs.resolve-stage.outputs.image_ref }}")"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::build proof digest malformed"; exit 1; }
+          OUTPUT_JSON="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg digest "$DIGEST" \
+            '{schema:"first-stable-source-proof/v1",kind:"build",repo:$repo,app_name:$app,source_sha:$sha,image_digest:$digest}')"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-build/${{ inputs.app_name }}" \
+            --title "First-stable build qualification" \
+            --summary "Build stage completed for the immutable image digest; a later bootstrap must also carry matching UAT proof." \
+            --output-json "$OUTPUT_JSON" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied skip
+
+      - name: Record first-stable UAT proof
+        if: needs.resolve-stage.outputs.stage == 'uat'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${{ needs.resolve-stage.outputs.image_ref }}")"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::UAT proof digest malformed"; exit 1; }
+          OUTPUT_JSON="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg digest "$DIGEST" \
+            '{schema:"first-stable-source-proof/v1",kind:"uat",repo:$repo,app_name:$app,source_sha:$sha,image_digest:$digest,stage:"uat"}')"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-uat/${{ inputs.app_name }}" \
+            --title "First-stable UAT qualification" \
+            --summary "UAT stage completed for the immutable image digest; a later bootstrap may use it only with its matching build proof." \
+            --output-json "$OUTPUT_JSON" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied skip
+
       - name: Create live-e2e-approved check run (aos#193 Phase 1 §1)
         # Only created when the caller has opted into
         # require_live_approval_check AND actually ran a real e2e_command
