@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # Shared GHCR tag-history query for fail-closed deployment gates.
-# Requires GH_TOKEN in the environment. Prints true or false only on success.
+# Prove the exact package is visible to this token before a bootstrap gate can
+# interpret a missing :stable tag. Listing unrelated org packages is not proof
+# of visibility into this private package.
+ghcr_package_readable() {
+  local owner="$1" image_name="$2" response
+  if ! response="$(gh api "orgs/${owner}/packages/container/${image_name}" 2>&1)"; then
+    echo "::error::ghcr-tag-history: could not prove token visibility for target package '${owner}/${image_name}'" >&2
+    return 1
+  fi
+  if ! printf '%s' "$response" | jq -e --arg image_name "$image_name" 'type == "object" and .name == $image_name' >/dev/null 2>&1; then
+    echo "::error::ghcr-tag-history: target package visibility response was malformed or named a different package" >&2
+    return 1
+  fi
+}
 
 ghcr_tag_history_exists() {
   local owner="$1" image_name="$2"; shift 2

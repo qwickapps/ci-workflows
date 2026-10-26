@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/ghcr-tag-history.sh"
 source "$SCRIPT_DIR/lib/check-run-binding.sh"
+source "$SCRIPT_DIR/lib/first-stable-evidence.sh"
 
 GITHUB_TOKEN="" REPO="" APP_NAME="" SHA="" IMAGE_REF="" IMAGE_BASE=""
 usage() { echo "Usage: $0 --github-token <token> --repo <owner/repo> --app-name <app> --sha <sha> --image-ref <base>@sha256:<digest> --image-base <base>" >&2; }
@@ -24,6 +25,9 @@ export GH_TOKEN="$GITHUB_TOKEN"
 refuse() { echo "::error::first-stable-bootstrap REFUSED ($1): $2" >&2; exit 1; }
 
 IMAGE_NAME="${IMAGE_BASE##*/}"
+if ! ghcr_package_readable "qwickapps" "$IMAGE_NAME"; then
+  refuse "stable_tag_visibility_probe_failed" "could not prove read visibility for ${IMAGE_BASE} before treating :stable as absent"
+fi
 if ! stable_history="$(ghcr_tag_history_exists "qwickapps" "$IMAGE_NAME" stable)"; then
   refuse "stable_tag_probe_failed" "could not prove whether ${IMAGE_BASE}:stable exists"
 fi
@@ -34,6 +38,17 @@ release_digest="$(docker buildx imagetools inspect --format '{{.Digest}}' "${IMA
 [[ "$source_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || refuse "source_digest_invalid" "source digest was malformed"
 [[ "$release_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || refuse "release_digest_invalid" "release digest was malformed"
 [ "$source_digest" = "$release_digest" ] || refuse "release_digest_mismatch" "image_ref digest does not equal ${IMAGE_BASE}:release"
+
+# The pinned digest is eligible only after BOTH the build-stage deployment and
+# the subsequent UAT deployment wrote independently GitHub-bound success
+# records for this exact caller commit and manifest digest. Missing evidence,
+# a forged record, pagination loss, or an API/binding ambiguity all refuse.
+if ! first_stable_evidence_require "$REPO" "$APP_NAME" "$SHA" "$source_digest" build; then
+  refuse "build_proof_missing_or_invalid" "source image lacks bound build qualification"
+fi
+if ! first_stable_evidence_require "$REPO" "$APP_NAME" "$SHA" "$source_digest" uat; then
+  refuse "uat_proof_missing_or_invalid" "source image lacks bound UAT qualification"
+fi
 
 check_name="blue-green/first-stable-bootstrap/${APP_NAME}"
 encoded="$(jq -rn --arg n "$check_name" '$n | @uri')"
