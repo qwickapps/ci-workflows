@@ -96,6 +96,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/caprover-api.sh"
 # shellcheck source=scripts/lib/check-run-binding.sh
 source "$SCRIPT_DIR/lib/check-run-binding.sh"
+# shellcheck source=scripts/lib/ghcr-tag-history.sh
+source "$SCRIPT_DIR/lib/ghcr-tag-history.sh"
 
 CAPROVER_URL=""
 CAPROVER_PASSWORD=""
@@ -172,85 +174,9 @@ echo "check-first-deploy-proof: CapRover app '${STABLE_APP_NAME}' exists=${CAPRO
 
 # ── Check 2: GHCR tag-history-absence (release/stable, ever) ────────────
 echo "check-first-deploy-proof: checking GHCR package '${IMAGE_NAME}' for release/stable tag history..." >&2
-GHCR_TAG_HISTORY_FOUND="false"
-GHCR_RESPONSE=""
-GHCR_ERR_FILE="$(mktemp)"
-trap 'rm -f "$GHCR_ERR_FILE"' EXIT
-if GHCR_RESPONSE="$(gh api --paginate "orgs/${OWNER}/packages/container/${IMAGE_NAME}/versions?per_page=100" 2>"$GHCR_ERR_FILE")"; then
-  # aos#193 review finding #3: a non-JSON body or an EMPTY body (both
-  # possible on a 2xx response `gh api` happily passes through) must be a
-  # hard failure, never silently read as "no tag history". `jq -es .` on
-  # a genuinely empty string parses fine (slurp of zero inputs -> `[]`),
-  # so the empty-body case needs its own explicit check -- it is NOT
-  # caught by the JSON-parse check alone.
-  if [ -z "$GHCR_RESPONSE" ]; then
-    echo "::error::check-first-deploy-proof: GHCR package-versions response was empty -- refusing to guess first-deploy status" >&2
-    exit 1
-  fi
-  if ! printf '%s' "$GHCR_RESPONSE" | jq -es . >/dev/null 2>&1; then
-    echo "::error::check-first-deploy-proof: GHCR package-versions response is not valid JSON -- refusing to guess first-deploy status" >&2
-    exit 1
-  fi
-  # `--paginate` prints one JSON array per page, concatenated (not merged
-  # into a single array) -- `jq -s` (slurp) reads all of them as separate
-  # inputs into one outer array, and `flatten` collapses that plus each
-  # page's own array nesting into one flat list of version objects,
-  # regardless of how many pages came back (including exactly one).
-  if printf '%s' "$GHCR_RESPONSE" | jq -es '
-      flatten
-      | any(.metadata.container.tags[]? | . == "release" or . == "stable")
-    ' 2>/dev/null | grep -q '^true$'; then
-    GHCR_TAG_HISTORY_FOUND="true"
-  fi
-else
-  # aos#193 review finding #3 (404 positive-evidence, round 1): a 404
-  # counts as "package genuinely does not exist" ONLY when BOTH the HTTP
-  # status is 404 AND the response carries GitHub's own specific "Package
-  # not found." message -- requiring both (not either alone) means a 404
-  # returned for a DIFFERENT reason falls through to the hard-failure
-  # branch below instead of being read as proof of absence.
-  #
-  # aos#193 review finding #2 (MEDIUM, round 2): that alone is still
-  # ambiguous. GitHub returns that EXACT SAME 404 + "Package not found."
-  # response for a private package this token simply cannot see (not
-  # linked/scoped to the caller repo) -- indistinguishable from "never
-  # pushed" by response text alone. Before trusting this 404 as absence,
-  # independently prove the token can see container packages in this org
-  # AT ALL: `GET /orgs/{owner}/packages?package_type=container` filters
-  # its results to packages associated with the triggering repository when
-  # called with the ephemeral GITHUB_TOKEN, so a non-empty result here is
-  # real positive evidence of package visibility for this repo -- and in
-  # real operation this is the normal case, not a special one: this job's
-  # `build` dependency has already pushed THIS run's image to
-  # `${IMAGE_NAME}` moments before this script ever runs (see
-  # deploy-app.yml's `deploy-caprover` job: `needs: [..., build]`). If the
-  # visibility probe itself fails or comes back empty, the whole
-  # first-deploy proof is INDETERMINATE -- never silently read as
-  # absence, exactly like every other ambiguous signal in this script.
-  if grep -qi "HTTP 404" "$GHCR_ERR_FILE" && grep -qi "Package not found" "$GHCR_ERR_FILE"; then
-    echo "check-first-deploy-proof: got a 404 'Package not found' for '${IMAGE_NAME}' -- confirming the token has real container-package visibility in org '${OWNER}' before trusting this as absence..." >&2
-    VISIBILITY_ERR_FILE="$(mktemp)"
-    VISIBILITY_OK="false"
-    VISIBILITY_RESPONSE=""
-    if VISIBILITY_RESPONSE="$(gh api "orgs/${OWNER}/packages?package_type=container&per_page=1" 2>"$VISIBILITY_ERR_FILE")"; then
-      if printf '%s' "$VISIBILITY_RESPONSE" | jq -es 'flatten | length > 0' 2>/dev/null | grep -q '^true$'; then
-        VISIBILITY_OK="true"
-      fi
-    fi
-    if [ "$VISIBILITY_OK" != "true" ]; then
-      echo "::error::check-first-deploy-proof: could not positively confirm this token can see ANY container package in org '${OWNER}' (orgs/${OWNER}/packages?package_type=container returned empty or failed) -- a 404 for '${IMAGE_NAME}' is therefore INDETERMINATE (genuine absence and a visibility gap look identical), not proof of absence. Refusing to guess first-deploy status." >&2
-      cat "$VISIBILITY_ERR_FILE" >&2
-      rm -f "$VISIBILITY_ERR_FILE"
-      exit 1
-    fi
-    rm -f "$VISIBILITY_ERR_FILE"
-    echo "check-first-deploy-proof: confirmed token has real container-package visibility in org '${OWNER}' -- GHCR package '${IMAGE_NAME}' genuinely does not exist -- no tag history (as expected for a genuinely new app)" >&2
-    GHCR_TAG_HISTORY_FOUND="false"
-  else
-    echo "::error::check-first-deploy-proof: GHCR package-versions query failed unexpectedly -- refusing to guess first-deploy status" >&2
-    cat "$GHCR_ERR_FILE" >&2
-    exit 1
-  fi
+if ! GHCR_TAG_HISTORY_FOUND="$(ghcr_tag_history_exists "$OWNER" "$IMAGE_NAME" release stable)"; then
+  echo "::error::check-first-deploy-proof: GHCR tag-history query was inconclusive -- refusing to guess first-deploy status" >&2
+  exit 1
 fi
 echo "check-first-deploy-proof: GHCR release/stable tag history found=${GHCR_TAG_HISTORY_FOUND}" >&2
 

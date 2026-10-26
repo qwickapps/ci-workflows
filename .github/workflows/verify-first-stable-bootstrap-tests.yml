@@ -1,0 +1,27 @@
+name: First Stable Bootstrap Tests
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/verify-first-stable-bootstrap-tests.yml'
+      - 'scripts/verify-first-stable-bootstrap.sh'
+      - 'scripts/lib/ghcr-tag-history.sh'
+      - 'scripts/lib/check-run-binding.sh'
+      - 'scripts/tests/verify-first-stable-bootstrap.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/verify-first-stable-bootstrap.sh'
+      - 'scripts/lib/ghcr-tag-history.sh'
+      - 'scripts/lib/check-run-binding.sh'
+      - 'scripts/tests/verify-first-stable-bootstrap.test.sh'
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/tests/verify-first-stable-bootstrap.test.sh

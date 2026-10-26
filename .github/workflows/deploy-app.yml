@@ -204,11 +204,15 @@ on:
           about to deploy, conclusion==success, plus a passing `aos
           directive verify` result over its embedded payload (aos#193
           Phase 1 §5). Default false preserves today's deploy-stable
-          behavior exactly. NOTE: the signing bridge that would let a real
-          directive get attached to that check run is not built yet
-          (aos#193, latest comment) -- setting this true cannot succeed in
-          production today and is not yet meant to be used there; it fails
-          closed by design, not by omission.
+          behavior exactly.
+        type: boolean
+        default: false
+
+      bootstrap_first_stable:
+        description: >-
+          Permit exactly one stable-slot bootstrap from a digest-pinned
+          release image when no :stable tag exists. Stable stage only;
+          default false preserves existing callers unchanged.
         type: boolean
         default: false
 
@@ -237,6 +241,7 @@ jobs:
       caprover_required: ${{ steps.meta.outputs.caprover_required }}
       run_migrations_for_stage: ${{ steps.meta.outputs.run_migrations_for_stage }}
       build_required: ${{ steps.meta.outputs.build_required }}
+      bootstrap_first_stable: ${{ steps.meta.outputs.bootstrap_first_stable }}
       canary: ${{ steps.meta.outputs.canary }}
       deploy_start_epoch: ${{ steps.meta.outputs.deploy_start_epoch }}
     steps:
@@ -277,6 +282,17 @@ jobs:
           if [ -z "$APP_NAME" ]; then
             echo "ERROR: app_name is required"
             exit 1
+          fi
+          BOOTSTRAP_FIRST_STABLE="${{ inputs.bootstrap_first_stable }}"
+          if [ "$BOOTSTRAP_FIRST_STABLE" = "true" ]; then
+            if [ "$STAGE_INPUT" != "stable" ]; then
+              echo "ERROR: bootstrap_first_stable is allowed only for stage stable"
+              exit 1
+            fi
+            if ! [[ "$INPUT_IMAGE" =~ ^.+@sha256:[a-f0-9]{64}$ ]]; then
+              echo "ERROR: bootstrap_first_stable requires image_ref pinned as <base>@sha256:<64 lowercase hex>; mutable tags are refused"
+              exit 1
+            fi
           fi
           if [ -z "${{ inputs.container_port }}" ]; then
             echo "ERROR: container_port is required"
@@ -503,6 +519,9 @@ jobs:
               GATEWAY_APP_NAME="${APP_NAME}"
               ENV_LABEL="stable"
               PRIOR_TAG="${IMAGE_BASE}:stable"
+              if [ "$BOOTSTRAP_FIRST_STABLE" = "true" ]; then
+                PRIOR_TAG="${IMAGE_BASE}:release"
+              fi
               NEXT_TAG=""
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
@@ -597,6 +616,7 @@ jobs:
           echo "caprover_required=${CAPROVER_REQUIRED}" >> "$GITHUB_OUTPUT"
           echo "run_migrations_for_stage=${RUN_MIGRATIONS_FOR_STAGE}" >> "$GITHUB_OUTPUT"
           echo "build_required=${BUILD_REQUIRED}" >> "$GITHUB_OUTPUT"
+          echo "bootstrap_first_stable=${BOOTSTRAP_FIRST_STABLE}" >> "$GITHUB_OUTPUT"
           echo "canary=${CANARY}" >> "$GITHUB_OUTPUT"
 
   # -- Immutable env var gate -----------------------------------------------
@@ -918,6 +938,21 @@ jobs:
             fi
             docker buildx imagetools inspect "$PRIOR_TAG" >/dev/null
           fi
+      - name: Verify first-stable bootstrap proof
+        if: needs.resolve-stage.outputs.bootstrap_first_stable == 'true'
+        id: first-stable-bootstrap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          .ci-workflows/scripts/verify-first-stable-bootstrap.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --sha "${{ github.sha }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --image-base "${{ needs.resolve-stage.outputs.image_name }}"
+
       - name: Remove GHCR credentials
         if: always()
         run: |
@@ -2281,6 +2316,37 @@ jobs:
           corepack install
           pnpm install --no-frozen-lockfile --store-dir .pnpm-store
           pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
+
+      - name: Record first-stable bootstrap authorization
+        if: needs.resolve-stage.outputs.bootstrap_first_stable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
+          SOURCE_DIGEST="${IMAGE_REF##*@}"
+          RELEASE_DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${IMAGE_BASE}:release")"
+          [ "$SOURCE_DIGEST" = "$RELEASE_DIGEST" ] || { echo "::error::bootstrap digest changed after verification"; exit 1; }
+          PAYLOAD="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg source "$SOURCE_DIGEST" \
+            --arg release "$RELEASE_DIGEST" \
+            --arg actor "${{ github.actor }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{repo:$repo, app_name:$app, sha:$sha, source_digest:$source, release_digest:$release, actor:$actor, run_url:$run_url}')"
+          printf '## First stable bootstrap\n\n%s\n' "$PAYLOAD" >> "$GITHUB_STEP_SUMMARY"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-bootstrap/${{ inputs.app_name }}" \
+            --title "First stable bootstrap authorized" \
+            --summary "Stable slot bootstrapped from the verified release digest; normal live promotion remains the only path that creates :stable." \
+            --output-json "$PAYLOAD" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
         env:
