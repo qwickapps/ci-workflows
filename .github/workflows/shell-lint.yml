@@ -10,7 +10,7 @@ on:
 jobs:
   shell-lint:
     name: Shell Lint
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     steps:
       - uses: actions/checkout@v4
         with:
