@@ -12,7 +12,6 @@ from typing import Any
 
 import yaml
 
-GITHUB_HOSTED_PREFIXES = ("ubuntu-", "windows-", "macos-")
 DYNAMIC_RUNS_ON = re.compile(r"^\s*\$\{\{\s*fromJson\(inputs\.runs_on\)\s*\}\}\s*$")
 
 
@@ -66,10 +65,6 @@ def normalized_labels(value: Any, default: Any = None) -> list[str] | None:
     return None
 
 
-def is_github_hosted(labels: list[str]) -> bool:
-    return len(labels) == 1 and labels[0].startswith(GITHUB_HOSTED_PREFIXES)
-
-
 def allowed_entries(repo_policy: dict[str, Any], job_class: str) -> list[dict[str, Any]]:
     job_classes = repo_policy["job_classes"]
     if job_class not in job_classes:
@@ -78,9 +73,17 @@ def allowed_entries(repo_policy: dict[str, Any], job_class: str) -> list[dict[st
 
 
 def label_set_allowed(repo_policy: dict[str, Any], job_class: str, labels: list[str]) -> bool:
-    if is_github_hosted(labels):
-        return repo_policy["visibility"] == "public"
     return any(sorted(entry["labels"]) == labels for entry in allowed_entries(repo_policy, job_class))
+
+
+def entry_matches_provenance(entry: dict[str, Any], labels: list[str], name: str, group: str) -> bool:
+    if sorted(entry["labels"]) != labels:
+        return False
+    allowed_groups = entry.get("runner_groups")
+    if allowed_groups and group not in allowed_groups:
+        return False
+    allowed_names = entry.get("runner_names")
+    return not allowed_names or name in allowed_names
 
 
 def validate_workflows(policy: dict[str, Any], repo: str, workflow_dir: Path) -> list[str]:
@@ -143,14 +146,7 @@ def provenance(policy: dict[str, Any], repo: str, run_id: str) -> tuple[bool, li
         name = job.get("runner_name") or ""
         group = job.get("runner_group_name") or ""
         entries = allowed_entries(repo_policy, job_class)
-        match = (
-            is_github_hosted(labels) and repo_policy["visibility"] == "public"
-        ) or any(
-            sorted(entry["labels"]) == labels
-            and group in entry.get("runner_groups", [])
-            and (not entry.get("runner_names") or name in entry["runner_names"])
-            for entry in entries
-        )
+        match = any(entry_matches_provenance(entry, labels, name, group) for entry in entries)
         conclusion = "allow" if match else "deny"
         lines.append(
             f"job={job.get('name','')} runner_name={name} runner_group={group} labels={','.join(labels)} class={job_class} conclusion={conclusion}"
