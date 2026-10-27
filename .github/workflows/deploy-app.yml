@@ -1022,10 +1022,16 @@ jobs:
             exit 0
           fi
           [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
-          case "${CAPROVER_URL,,}" in
-            *route.qwickforge.com*|*oci-gateway*) HOST_KEY=oci"-"gateway ;;
-            *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
-            *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; topology admission fails closed"; exit 1 ;;
+          # Map only an exact canonical endpoint. The admission helper rejects
+          # lookalikes, userinfo, non-HTTPS schemes, ports, paths, queries,
+          # and fragments before it accepts any deployment tuple.
+          CP_TARGET="${{ inputs.caprover_url }}"
+          if [ -z "$CP_TARGET" ]; then
+            CP_TARGET="${{ needs.resolve-stage.outputs.caprover_host_name }}"
+          fi
+          case "$CP_TARGET" in
+            http://*|https://*) ;;
+            *) CP_TARGET="https://$CP_TARGET" ;;
           esac
           SOURCE_MERGED=true
           if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
@@ -1033,7 +1039,7 @@ jobs:
             git fetch --no-tags origin "$DEFAULT_BRANCH"
             git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}" || SOURCE_MERGED=false
           fi
-          ARGS=(--registry .ci-workflows/config/service-identities.json --host "$HOST_KEY" --platform caprover --app "${{ needs.resolve-stage.outputs.target_app }}" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
+          ARGS=(--registry .ci-workflows/config/service-identities.json --caprover-url "$CP_TARGET" --platform caprover --app "${{ needs.resolve-stage.outputs.target_app }}" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
           if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
             ARGS+=(--production --source-sha "${GITHUB_SHA}" --source-merged "$SOURCE_MERGED")
           fi
@@ -2019,6 +2025,42 @@ jobs:
             echo "ERROR: missing required stable env file ${ENV_FILE}"
             exit 1
           fi
+
+      - name: Topology admission before mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+          TS_HOSTNAME="$(grep -E '^[[:space:]]*TS_HOSTNAME=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          if [ -z "$TS_HOSTNAME" ] && [[ "${IMAGE_REF,,}" != *qwickway* ]]; then
+            echo "No Tailscale/QwickWay configuration in this deploy; topology admission not applicable."
+            exit 0
+          fi
+          [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
+          CP_TARGET="${{ inputs.caprover_url }}"
+          if [ -z "$CP_TARGET" ]; then
+            CP_TARGET="${{ needs.resolve-stage.outputs.caprover_host_name }}"
+          fi
+          case "$CP_TARGET" in
+            http://*|https://*) ;;
+            *) CP_TARGET="https://$CP_TARGET" ;;
+          esac
+          DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          SOURCE_MERGED=true
+          git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}" || SOURCE_MERGED=false
+          python3 .ci-workflows/scripts/topology-admission.py \
+            --registry .ci-workflows/config/service-identities.json \
+            --caprover-url "$CP_TARGET" \
+            --platform caprover \
+            --app "${{ needs.resolve-stage.outputs.target_app }}" \
+            --hostname "$TS_HOSTNAME" \
+            --image-ref "$IMAGE_REF" \
+            --production \
+            --source-sha "${GITHUB_SHA}" \
+            --source-merged "$SOURCE_MERGED"
 
       - name: Configure target slot (atomic env + config)
         run: |

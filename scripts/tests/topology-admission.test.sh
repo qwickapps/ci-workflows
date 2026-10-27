@@ -11,7 +11,11 @@ expect_deny "duplicate canonical claimant" "${ADMIT[@]}" --host oci-gateway --pl
 expect_deny "unmerged source" "${ADMIT[@]}" --host oci-gateway --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged false
 expect_deny "direct untraceable deploy" "${ADMIT[@]}" --host oci-gateway --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-merged true
 expect_deny "attempted canonical rename" "${ADMIT[@]}" --host oci-gateway --platform caprover --app qwickapps-mcp-gateway-retired --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
-expect_pass "canonical owner" "${ADMIT[@]}" --host oci-gateway --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
+expect_pass "canonical owner" "${ADMIT[@]}" --caprover-url https://route.qwickforge.com --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
+expect_deny "lookalike CapRover hostname" "${ADMIT[@]}" --caprover-url https://route.qwickforge.com.attacker.example --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
+expect_deny "CapRover userinfo trick" "${ADMIT[@]}" --caprover-url https://route.qwickforge.com@attacker.example --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
+expect_deny "CapRover port trick" "${ADMIT[@]}" --caprover-url https://route.qwickforge.com:4443 --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
+expect_deny "CapRover path trick" "${ADMIT[@]}" --caprover-url https://route.qwickforge.com/captain --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 "${ADMIT[@]}" --render-windmill-inventory "$TMP/inventory.json" >/dev/null
 python3 - "$TMP/inventory.json" <<'PY'
@@ -19,6 +23,22 @@ import json,sys
 item=json.load(open(sys.argv[1]))["services"][0]
 assert item["hostname"] == "qwickapps-mcp"
 assert item["host"] == "oci-gateway"
+PY
+python3 - "$ROOT/.github/workflows/deploy-app.yml" <<'PY'
+import sys
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1]))
+for job_name in ("deploy-caprover", "deploy-stable"):
+    steps = workflow["jobs"][job_name]["steps"]
+    names = [step.get("name") for step in steps]
+    admission_index = names.index("Topology admission before mutation")
+    configure_index = names.index("Configure target slot (atomic env + config)")
+    assert admission_index < configure_index, (job_name, admission_index, configure_index)
+    admission = steps[admission_index]["run"]
+    assert "--caprover-url \"$CP_TARGET\"" in admission, job_name
+    assert "*route.qwickforge.com*" not in admission, job_name
+    assert "*app.qwickforge.com*" not in admission, job_name
 PY
 echo "Tests: $pass passed, $fail failed"
 test "$fail" -eq 0

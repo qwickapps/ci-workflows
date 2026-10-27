@@ -11,6 +11,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = ROOT / "config" / "service-identities.json"
@@ -58,6 +59,44 @@ def load(path: Path) -> list[dict]:
     return typed_entries
 
 
+def caprover_host_for_endpoint(raw_url: str) -> str:
+    """Map an exact canonical CapRover endpoint to its topology host.
+
+    Substring matching would accept hostile lookalikes such as
+    ``route.qwickforge.com.attacker.example`` or userinfo/path variants.
+    Parse first, then admit only the exact HTTPS authority with no port,
+    credentials, query, fragment, or non-root path.
+    """
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError as exc:
+        fail(f"invalid CapRover endpoint: {exc}")
+        return ""  # pragma: no cover - fail exits
+    if parsed.scheme.lower() != "https":
+        fail("CapRover endpoint must use https")
+    if parsed.username is not None or parsed.password is not None:
+        fail("CapRover endpoint must not contain userinfo")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        fail(f"invalid CapRover endpoint port: {exc}")
+        return ""  # pragma: no cover - fail exits
+    if port is not None:
+        fail("CapRover endpoint must not specify a port")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        fail("CapRover endpoint must not contain path, query, or fragment")
+    hosts = {
+        "route.qwickforge.com": "oci-gateway",
+        "app.qwickforge.com": "oci-main",
+        "oci-gateway": "oci-gateway",
+        "oci-main": "oci-main",
+    }
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in hosts:
+        fail(f"unmapped CapRover endpoint {raw_url!r}")
+    return hosts[hostname]
+
+
 def render(entries: list[dict], output: Path) -> None:
     inventory = {"version": 1, "services": []}
     for entry in entries:
@@ -79,6 +118,7 @@ def main() -> None:
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--render-windmill-inventory", type=Path)
     parser.add_argument("--host")
+    parser.add_argument("--caprover-url")
     parser.add_argument("--platform")
     parser.add_argument("--app")
     parser.add_argument("--hostname")
@@ -92,19 +132,24 @@ def main() -> None:
         render(entries, args.render_windmill_inventory)
         print(f"Rendered Windmill inventory: {args.render_windmill_inventory}")
         return
-    required = (args.host, args.platform, args.app, args.hostname)
-    if not all(required):
-        fail("--host, --platform, --app and --hostname are required for admission")
+    required = (args.platform, args.app, args.hostname)
+    if not all(required) or (not args.host and not args.caprover_url):
+        fail("--platform, --app, --hostname and either --host or --caprover-url are required for admission")
+    endpoint_host = caprover_host_for_endpoint(args.caprover_url) if args.caprover_url else None
+    if args.host and endpoint_host and args.host != endpoint_host:
+        fail(f"--host {args.host!r} disagrees with canonical CapRover endpoint host {endpoint_host!r}")
+    host = endpoint_host or args.host
+    assert host is not None
     hostname = args.hostname.lower()
     matches = [e for e in entries if e["canonical_hostname"].lower() == hostname]
     if len(matches) != 1:
         fail(f"canonical hostname {hostname} has {len(matches)} registry owners")
     entry = matches[0]
-    if (args.host, args.platform, args.app) != (entry["required_host"], entry["platform"], entry["app"]):
+    if (host, args.platform, args.app) != (entry["required_host"], entry["platform"], entry["app"]):
         fail("tuple mismatch for %s: requested host=%s platform=%s app=%s; registry requires host=%s platform=%s app=%s" % (
-            hostname, args.host, args.platform, args.app,
+            hostname, host, args.platform, args.app,
             entry["required_host"], entry["platform"], entry["app"]))
-    if "qwickway" in args.image_ref.lower() and args.host != "oci-gateway":
+    if "qwickway" in args.image_ref.lower() and host != "oci-gateway":
         fail("QwickWay/LB image is permitted only on oci-gateway")
     if args.production:
         if not re.fullmatch(r"[0-9a-f]{40}", args.source_sha):
