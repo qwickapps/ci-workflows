@@ -9,10 +9,10 @@ on:
         type: string
         default: "go.mod"
       runs_on:
-        description: "Runner label(s) as a JSON array string"
+        description: "Deprecated compatibility input. Runner selection is fixed to the owner-approved choco label set."
         required: false
         type: string
-        default: '["self-hosted", "linux"]'
+        default: '["self-hosted", "choco"]'
       semgrep_configs:
         description: "Newline-delimited Semgrep config list"
         required: false
@@ -33,7 +33,7 @@ permissions:
 jobs:
   dependency-audit:
     name: Dependency Audit (govulncheck)
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, choco]
     outputs:
       has_findings: ${{ steps.audit.outputs.has_findings }}
       summary: ${{ steps.audit.outputs.summary }}
@@ -90,7 +90,7 @@ jobs:
 
   sast:
     name: SAST (Semgrep)
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, choco]
     outputs:
       has_findings: ${{ steps.scan.outputs.has_findings }}
       summary: ${{ steps.scan.outputs.summary }}
@@ -164,7 +164,7 @@ jobs:
 
   create-security-issue:
     name: Create Security Issue (72h SLA)
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, choco]
     needs: [dependency-audit, sast]
     if: |
       failure() &&

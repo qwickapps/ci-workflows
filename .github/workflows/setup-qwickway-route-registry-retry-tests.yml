@@ -39,7 +39,7 @@ permissions:
 jobs:
   contract:
     name: setup-qwickway-route.sh registry retry/reorder/username tests
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     # ci-workflows#184: this repo is public and this job runs on the
     # fleet's self-hosted macmini runner. Without this guard, a
     # pull_request from a fork would execute its own workflow-file

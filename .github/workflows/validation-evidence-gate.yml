@@ -10,7 +10,7 @@ on:
 
 jobs:
   evidence-gate:
-    runs-on: [self-hosted, macmini]
+    runs-on: [self-hosted, choco]
     steps:
       - name: Determine if fleet-critical
         id: classify
