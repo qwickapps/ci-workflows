@@ -693,15 +693,18 @@ jobs:
             config/service-identities.json
           sparse-checkout-cone-mode: false
 
+      # Applicability matches the guard's own rule (repo qwickapps/node OR
+      # app_name node); it inspects the exact file the renderer wrote.
       - name: Reject ephemeral node production deployment inputs
-        if: ${{ github.repository == 'qwickapps/node' && (needs.resolve-stage.outputs.stage == 'live' || needs.resolve-stage.outputs.stage == 'stable') }}
+        if: ${{ (github.repository == 'qwickapps/node' || needs.resolve-stage.outputs.app_name == 'node') && (needs.resolve-stage.outputs.stage == 'live' || needs.resolve-stage.outputs.stage == 'stable') }}
         env:
           APP_NAME: ${{ needs.resolve-stage.outputs.app_name }}
           DEPLOY_STAGE: ${{ needs.resolve-stage.outputs.stage }}
           IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
+          RENDERED_ENV_FILE: ${{ steps.env-file.outputs.path }}
         run: |
           chmod +x .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh
-          .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh --production-env
+          .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh --production-env "$RENDERED_ENV_FILE"
 
       - name: Make scripts executable
         run: chmod +x .ci-workflows/scripts/*.sh
@@ -1235,6 +1238,18 @@ jobs:
             exit 1
           fi
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      # Re-check the file THIS job rendered and is about to apply; the
+      # validate-env check covered a different job's render.
+      - name: Reject ephemeral node production deployment inputs
+        if: ${{ (github.repository == 'qwickapps/node' || needs.resolve-stage.outputs.app_name == 'node') && (needs.resolve-stage.outputs.stage == 'live' || needs.resolve-stage.outputs.stage == 'stable') }}
+        env:
+          APP_NAME: ${{ needs.resolve-stage.outputs.app_name }}
+          DEPLOY_STAGE: ${{ needs.resolve-stage.outputs.stage }}
+          IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
+          RENDERED_ENV_FILE: ${{ steps.env-file.outputs.path }}
+        run: |
+          .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh --production-env "$RENDERED_ENV_FILE"
 
       - name: Topology admission before mutation
         env:
@@ -2557,6 +2572,18 @@ jobs:
             exit 1
           fi
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      # Re-check the file THIS job rendered and is about to apply; the
+      # validate-env check covered a different job's render.
+      - name: Reject ephemeral node production deployment inputs
+        if: ${{ (github.repository == 'qwickapps/node' || needs.resolve-stage.outputs.app_name == 'node') && (needs.resolve-stage.outputs.stage == 'live' || needs.resolve-stage.outputs.stage == 'stable') }}
+        env:
+          APP_NAME: ${{ needs.resolve-stage.outputs.app_name }}
+          DEPLOY_STAGE: ${{ needs.resolve-stage.outputs.stage }}
+          IMAGE_REF: ${{ needs.resolve-stage.outputs.image_ref }}
+          RENDERED_ENV_FILE: ${{ steps.env-file.outputs.path }}
+        run: |
+          .ci-workflows/scripts/node-tailscale-entrypoint-guard.sh --production-env "$RENDERED_ENV_FILE"
 
       - name: Configure target slot (atomic env + config)
         run: |

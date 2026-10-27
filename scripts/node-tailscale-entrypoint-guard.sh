@@ -64,8 +64,39 @@ case "$mode" in
     [[ "$stage" == "live" || "$stage" == "stable" ]] || { echo "node production guard skipped for stage '$stage'"; exit 0; }
     [[ "$image_ref" =~ ^ghcr\.io/qwickapps/img-node:(release|stable)$ || "$image_ref" =~ ^ghcr\.io/qwickapps/img-node@sha256:[0-9a-f]{64}$ ]] \
       || fail "live/stable node deploy must use approved qwickapps img-node release/stable tag or immutable digest, got '$image_ref'"
-    if [[ -d .deploy-app-env ]] && grep -RInE '^[[:space:]]*(TS_EPHEMERAL_AUTHKEY|TS_STATE_MODE)[[:space:]]*=[[:space:]]*(.+|mem)[[:space:]]*$' .deploy-app-env 2>/dev/null; then
-      fail "rendered production env enables TS_EPHEMERAL_AUTHKEY or TS_STATE_MODE=mem"
+    # The caller MUST name the exact file env_render_script wrote (deploy-app
+    # passes steps.env-file.outputs.path). There is no default location: an
+    # unnamed, missing or empty file fails closed instead of passing vacuously.
+    env_file="${2:-}"
+    [[ -n "$env_file" ]] || fail "--production-env requires the rendered env file path as its argument"
+    [[ -f "$env_file" && -r "$env_file" ]] || fail "rendered env file '$env_file' does not exist or is unreadable"
+    [[ -s "$env_file" ]] || fail "rendered env file '$env_file' is empty"
+
+    # Parse dotenv lines without echoing values (they are secrets).
+    violations=()
+    lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      lineno=$((lineno + 1))
+      line="${line%$'\r'}"
+      line="${line#"${line%%[![:space:]]*}"}"
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      [[ "$line" =~ ^export[[:space:]]+(.*)$ ]] && line="${BASH_REMATCH[1]}"
+      [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      value="${value#[\"\']}"
+      value="${value%[\"\']}"
+      case "$key" in
+        TS_EPHEMERAL_AUTHKEY) violations+=("line $lineno: TS_EPHEMERAL_AUTHKEY is set") ;;
+        TS_STATE_MODE)
+          # bash-3.2 safe (macOS runners): no ${value,,}.
+          case "$value" in [Mm][Ee][Mm]) violations+=("line $lineno: TS_STATE_MODE=mem") ;; esac ;;
+      esac
+    done < "$env_file"
+    if (( ${#violations[@]} > 0 )); then
+      fail "rendered production env enables ephemeral Tailscale (${violations[*]})"
     fi
     echo "node persistent-entrypoint production contract passed"
     ;;
