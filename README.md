@@ -57,7 +57,7 @@ jobs can reference individual values with
 | `env` | yes | — | Target environment (e.g. `prod`, `uat`, `dev`). |
 | `keys` | yes | — | JSON array of secret key names to fetch (e.g. `["TS_AUTHKEY"]`). |
 | `secrets_url` | yes | — | API base URL of the secrets service. This must be explicit; `https://secrets.qwickapps.com` is a landing site, not an API. |
-| `runs_on` | no | `["self-hosted","macmini"]` | Runner labels as a JSON array string. |
+| `runs_on` | no | `["self-hosted","macmini"]` | Deprecated compatibility input; secret retrieval always uses the owner-approved `[self-hosted, macmini]` runner labels. |
 
 #### Output
 

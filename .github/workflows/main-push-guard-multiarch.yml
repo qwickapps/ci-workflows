@@ -50,7 +50,7 @@ on:
         type: string
         default: '20'
       runs_on:
-        description: 'Runner label(s) as a JSON array string'
+        description: 'Deprecated compatibility input. Multi-arch work is fixed to the owner-approved macmini label set.'
         required: false
         type: string
         default: '["self-hosted", "macmini"]'
@@ -84,7 +84,7 @@ jobs:
   # ---------------------------------------------------------------------------
   validate-platforms:
     name: Validate platforms input
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Reject empty/malformed platforms
         env:
@@ -107,7 +107,7 @@ jobs:
   blue-green-deploy-contract:
     name: Blue-Green Deploy Contract
     if: inputs.enforce_blue_green_deploy_contract
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout calling repo
         uses: actions/checkout@v4
@@ -157,7 +157,7 @@ jobs:
   test:
     name: Test
     needs: [validate-platforms]
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Validate package_manager input
         # Fleet follow-up on ci-workflows#181: every install/build/test step
@@ -262,7 +262,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-push:
     name: Build and Push Multi-Arch Docker Image
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     needs: [validate-platforms, test]
     permissions:
       contents: read

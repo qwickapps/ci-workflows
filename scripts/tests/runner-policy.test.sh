@@ -44,10 +44,30 @@ jobs:
 EOF
 }
 
+make_dynamic_workflow() {
+  local directory="$1"
+  mkdir -p "$directory"
+  cat > "$directory/fixture.yml" <<'EOF'
+name: fixture
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: '["self-hosted", "choco"]'
+jobs:
+  test:
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    steps:
+      - run: true
+EOF
+}
+
 make_workflow "$TMPDIR/old-unknown" '[self-hosted, unknown-host]'
 make_workflow "$TMPDIR/old-bare" 'self-hosted'
 make_workflow "$TMPDIR/old-hosted-private" 'ubuntu-24.04'
 make_workflow "$TMPDIR/old-hosted-unapproved" 'ubuntu-unapproved'
+make_dynamic_workflow "$TMPDIR/old-caller-override"
 make_workflow "$TMPDIR/new-approved" '[self-hosted, choco]'
 make_workflow "$TMPDIR/new-hosted-approved" 'ubuntu-24.04'
 
@@ -70,6 +90,8 @@ expect_fail "old fixture with GitHub-hosted runner in a private repo is rejected
   python3 "$CHECKER" --policy "$TMPDIR/private-policy.json" validate --repo qwickapps/private-fixture --workflow-dir "$TMPDIR/old-hosted-private"
 expect_fail "public fixture with an unapproved GitHub-hosted label is rejected" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/old-hosted-unapproved"
+expect_fail "caller-controlled runs-on that could override to an unapproved label is rejected" \
+  python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/old-caller-override"
 expect_pass "new fixture with approved choco labels passes" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/new-approved"
 expect_pass "public fixture with an approved GitHub-hosted label passes" \

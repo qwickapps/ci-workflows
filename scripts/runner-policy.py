@@ -12,8 +12,6 @@ from typing import Any
 
 import yaml
 
-DYNAMIC_RUNS_ON = re.compile(r"^\s*\$\{\{\s*fromJson\(inputs\.runs_on\)\s*\}\}\s*$")
-
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open() as handle:
@@ -41,17 +39,7 @@ def classify(path: Path, job_id: str) -> str:
     return "build"
 
 
-def default_runs_on(document: dict[str, Any]) -> Any:
-    on = document.get(True, document.get("on", {}))
-    workflow_call = on.get("workflow_call") if isinstance(on, dict) else None
-    inputs = workflow_call.get("inputs", {}) if isinstance(workflow_call, dict) else {}
-    runs_on = inputs.get("runs_on", {}) if isinstance(inputs, dict) else {}
-    return runs_on.get("default") if isinstance(runs_on, dict) else None
-
-
-def normalized_labels(value: Any, default: Any = None) -> list[str] | None:
-    if isinstance(value, str) and DYNAMIC_RUNS_ON.match(value):
-        value = default
+def normalized_labels(value: Any) -> list[str] | None:
     if isinstance(value, str):
         if value.startswith("${{"):
             return None
@@ -100,11 +88,10 @@ def validate_workflows(policy: dict[str, Any], repo: str, workflow_dir: Path) ->
         if not isinstance(jobs, dict):
             errors.append(f"{path}: jobs must be a mapping")
             continue
-        default = default_runs_on(document)
         for job_id, job in jobs.items():
             if not isinstance(job, dict) or "runs-on" not in job:
                 continue
-            labels = normalized_labels(job["runs-on"], default)
+            labels = normalized_labels(job["runs-on"])
             job_class = classify(path, str(job_id))
             if labels is None:
                 errors.append(f"{path.name}:{job_id}: unresolved runs-on expression is prohibited")
