@@ -28,10 +28,11 @@ class GitHub:
             return rows, ""
         except json.JSONDecodeError as exc: return None, str(exc)
 
-def has_recent_true_merge(api, repo, cutoff):
+def has_recent_true_merge(api, repo, default_branch, cutoff):
     prs, err = api.request(f"repos/{repo}/pulls?state=closed&per_page=100", paginate=True)
     if err or not isinstance(prs, list): return None
     for pr in prs:
+        if ((pr.get("base") or {}).get("ref")) != default_branch: continue
         merged_at, sha = pr.get("merged_at"), pr.get("merge_commit_sha")
         try: merged = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
         except (TypeError, ValueError): continue
@@ -58,7 +59,7 @@ def main():
             report["repos"].append({"repo": name, "error": "could not read before settings"}); continue
         exception = "explicit faabzi exception" if name == "qwickapps/faabzi" else None
         if not exception:
-            number = has_recent_true_merge(api, name, cutoff)
+            number = has_recent_true_merge(api, name, before.get("default_branch"), cutoff) if isinstance(before.get("default_branch"), str) else None
             if number is None:
                 report["repos"].append({"repo": name, "before": public_settings(before), "error": "could not determine 90-day merge-commit exception"}); continue
             if number: exception = f"PR #{number} merged with a two-parent commit within 90 days"

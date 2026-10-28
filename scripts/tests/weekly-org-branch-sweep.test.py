@@ -21,11 +21,13 @@ class FakeApi:
         return response() if callable(response) else response
 
 def branch(name="feature/old", days=91):
-    return {"name": name, "commit": {"sha": SHA, "commit": {"author": {"date": (NOW - timedelta(days=days)).isoformat()}}}}
+    # Matches GET /repos/{owner}/{repo}/branches: commit has sha/url only.
+    return {"name": name, "commit": {"sha": SHA, "url": f"https://api.github.com/repos/{REPO}/commits/{SHA}"}}
 
-def endpoints(name="feature/old", pr_list=None, compare_ahead=2):
+def endpoints(name="feature/old", pr_list=None, compare_ahead=2, days=91):
     encoded = name.replace("/", "%2F")
     return {
+        f"repos/{REPO}/commits/{SHA}": ({"commit": {"author": {"date": (NOW - timedelta(days=days)).isoformat()}}}, ""),
         f"repos/{REPO}/branches/{encoded}/protection": (None, "HTTP 404"),
         f"repos/{REPO}/rules/branches/{encoded}": ([], ""),
         f"repos/{REPO}/compare/main...{SHA}": ({"ahead_by": compare_ahead}, ""),
@@ -44,7 +46,7 @@ class WeeklySweepTests(unittest.TestCase):
                 self.assertEqual("protected branch name", record["reason"])
 
     def test_recent_commit_is_untouchable(self):
-        record = classify(FakeApi(endpoints()), branch(days=13))
+        record = classify(FakeApi(endpoints(days=13)), branch(days=13))
         self.assertEqual("skipped", record["action"])
         self.assertIn("14 days", record["reason"])
 

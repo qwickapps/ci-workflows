@@ -116,14 +116,24 @@ def compare_ahead(api, repo, base, head):
     return value["ahead_by"]
 
 
+def branch_commit_date(api, repo, sha):
+    """Branch-list API payloads include only sha/url; fetch the dated commit."""
+    commit, err = api_ok(api, f"repos/{repo}/commits/{sha}")
+    if err or not isinstance(commit, dict):
+        return None
+    return stamp((((commit.get("commit") or {}).get("author") or {}).get("date")))
+
+
 def classify(api, repo, default_branch, branch, prs, now):
     name = branch.get("name") if isinstance(branch, dict) else None
     sha = ((branch.get("commit") or {}).get("sha")) if isinstance(branch, dict) else None
-    commit_date = stamp((((branch.get("commit") or {}).get("commit") or {}).get("author") or {}).get("date"))
-    if not isinstance(name, str) or not isinstance(sha, str) or not commit_date:
+    if not isinstance(name, str) or not isinstance(sha, str):
         return action(repo, name or "", "skipped", "branch metadata is incomplete")
     if name == default_branch or protected_name(name):
         return action(repo, name, "skipped", "protected branch name")
+    commit_date = branch_commit_date(api, repo, sha)
+    if not commit_date:
+        return action(repo, name, "skipped", "branch tip could not be read")
     protected, why = branch_has_protection_or_ruleset(api, repo, name)
     if protected is None:
         return action(repo, name, "skipped", why)
