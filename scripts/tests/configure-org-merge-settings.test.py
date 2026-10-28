@@ -30,4 +30,13 @@ class MergeExceptionTests(unittest.TestCase):
         cutoff = datetime(2026, 9, 1, tzinfo=timezone.utc)
         self.assertEqual(32, settings.has_recent_true_merge(api, "qwickapps/example", "main", cutoff))
 
+    def test_incomplete_pr_metadata_is_ignored(self):
+        prs = [
+            {"number": 33, "base": {"ref": "main"}, "merged_at": None, "merge_commit_sha": "c" * 40},
+            {"number": 34, "base": {"ref": "main"}, "merged_at": "2026-10-01T00:00:00Z", "merge_commit_sha": None},
+        ]
+        api = FakeApi(prs, {})
+        cutoff = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        self.assertFalse(settings.has_recent_true_merge(api, "qwickapps/example", "main", cutoff))
+
 if __name__ == "__main__": unittest.main(verbosity=2)

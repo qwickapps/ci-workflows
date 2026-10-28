@@ -34,6 +34,8 @@ def has_recent_true_merge(api, repo, default_branch, cutoff):
     for pr in prs:
         if ((pr.get("base") or {}).get("ref")) != default_branch: continue
         merged_at, sha = pr.get("merged_at"), pr.get("merge_commit_sha")
+        if not isinstance(merged_at, str) or not isinstance(sha, str):
+            continue
         try: merged = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
         except (TypeError, ValueError): continue
         if merged < cutoff or not isinstance(sha, str): continue
