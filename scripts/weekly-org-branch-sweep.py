@@ -166,6 +166,12 @@ def classify(api, repo, default_branch, branch, prs, now):
     return action(repo, name, "skipped", "closed-unmerged or no-PR branch is younger than 90 days", pr=pr.get("number") if pr else None)
 
 
+def current_branch_sha(api, repo, branch):
+    value, err = api_ok(api, f"repos/{repo}/git/ref/heads/{quote(branch, safe='')}")
+    sha = ((value or {}).get("object") or {}).get("sha") if isinstance(value, dict) else None
+    return sha if not err and isinstance(sha, str) else None
+
+
 def execute(api, record, dry_run):
     if dry_run:
         record["action"] = "would_" + record["action"]
@@ -178,11 +184,17 @@ def execute(api, record, dry_run):
         record["reason"] = record["reason"] if not err else "failed to create stale warning"
         return record
     if record["action"] == "delete":
+        if current_branch_sha(api, repo, branch) != record["sha"]:
+            record.update(action="skipped", reason="branch changed or could not be read before deletion")
+            return record
         _, err = api.request(f"repos/{repo}/git/refs/heads/{quote(branch, safe='')}", "DELETE")
         record["action"] = "deleted" if not err else "skipped"
         record["reason"] = record["reason"] if not err else "branch deletion failed"
         return record
     if record["action"] == "archive_delete":
+        if current_branch_sha(api, repo, branch) != record["sha"]:
+            record.update(action="skipped", reason="branch changed or could not be read before archival")
+            return record
         tag = "archive/" + branch
         _, err = api.request(f"repos/{repo}/git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": record["sha"]})
         if err:
@@ -191,6 +203,9 @@ def execute(api, record, dry_run):
         verify, err = api_ok(api, f"repos/{repo}/git/ref/tags/{quote(tag, safe='')}")
         if err or not isinstance(verify, dict) or ((verify.get("object") or {}).get("sha") != record["sha"]):
             record.update(action="skipped", reason="archive tag verification failed")
+            return record
+        if current_branch_sha(api, repo, branch) != record["sha"]:
+            record.update(action="skipped", reason="branch changed or could not be read before deletion")
             return record
         _, err = api.request(f"repos/{repo}/git/refs/heads/{quote(branch, safe='')}", "DELETE")
         record.update(action="archived_deleted" if not err else "skipped", reason=record["reason"] if not err else "branch deletion after archive failed", tag=tag)

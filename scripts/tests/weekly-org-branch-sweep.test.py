@@ -28,6 +28,7 @@ def endpoints(name="feature/old", pr_list=None, compare_ahead=2, days=91):
     encoded = name.replace("/", "%2F")
     return {
         f"repos/{REPO}/commits/{SHA}": ({"commit": {"author": {"date": (NOW - timedelta(days=days)).isoformat()}}}, ""),
+        f"repos/{REPO}/git/ref/heads/{encoded}": ({"object": {"sha": SHA}}, ""),
         f"repos/{REPO}/branches/{encoded}/protection": (None, "HTTP 404"),
         f"repos/{REPO}/rules/branches/{encoded}": ([], ""),
         f"repos/{REPO}/compare/main...{SHA}": ({"ahead_by": compare_ahead}, ""),
@@ -87,6 +88,35 @@ class WeeklySweepTests(unittest.TestCase):
         record = classify(api, branch())
         api.responses[(f"repos/{REPO}/git/refs", "POST")] = (None, "")
         api.responses[f"repos/{REPO}/git/ref/tags/archive%2Ffeature%2Fold"] = ({"object": {"sha": "b" * 40}}, "")
+        result = sweep.execute(api, record, dry_run=False)
+        self.assertEqual("skipped", result["action"])
+        self.assertNotIn((f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE"), [(c[0], c[1]) for c in api.calls])
+
+    def test_changed_or_unreadable_ref_prevents_delete(self):
+        for ref_response in (({"object": {"sha": "b" * 40}}, ""), (None, "HTTP 500")):
+            with self.subTest(ref_response=ref_response):
+                api = FakeApi(endpoints(compare_ahead=0))
+                api.responses[f"repos/{REPO}/git/ref/heads/feature%2Fold"] = ref_response
+                result = sweep.execute(api, classify(api, branch()), dry_run=False)
+                self.assertEqual("skipped", result["action"])
+                self.assertNotIn((f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE"), [(c[0], c[1]) for c in api.calls])
+
+    def test_changed_ref_after_archive_tag_prevents_delete(self):
+        class RacingApi(FakeApi):
+            def __init__(self):
+                super().__init__(endpoints())
+                self.ref_reads = 0
+            def request(self, endpoint, method="GET", fields=None, paginate=False):
+                if endpoint == f"repos/{REPO}/git/ref/heads/feature%2Fold":
+                    self.ref_reads += 1
+                    if self.ref_reads == 2:
+                        self.calls.append((endpoint, method, fields, paginate))
+                        return {"object": {"sha": "b" * 40}}, ""
+                return super().request(endpoint, method, fields, paginate)
+        api = RacingApi()
+        record = classify(api, branch())
+        api.responses[(f"repos/{REPO}/git/refs", "POST")] = (None, "")
+        api.responses[f"repos/{REPO}/git/ref/tags/archive%2Ffeature%2Fold"] = ({"object": {"sha": SHA}}, "")
         result = sweep.execute(api, record, dry_run=False)
         self.assertEqual("skipped", result["action"])
         self.assertNotIn((f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE"), [(c[0], c[1]) for c in api.calls])
