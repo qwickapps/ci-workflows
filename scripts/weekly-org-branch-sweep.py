@@ -97,8 +97,15 @@ def has_marker(api, repo, pr_number):
     return any(MARKER in str(comment.get("body", "")) for comment in comments if isinstance(comment, dict))
 
 
-def associated_pr(branch, prs):
-    matches = [pr for pr in prs if isinstance(pr, dict) and isinstance(pr.get("head"), dict) and pr["head"].get("ref") == branch]
+def associated_pr(repo, branch, prs):
+    matches = []
+    for pr in prs:
+        head = pr.get("head") if isinstance(pr, dict) else None
+        head_repo = head.get("repo") if isinstance(head, dict) else None
+        if not isinstance(head, dict) or not isinstance(head_repo, dict):
+            continue
+        if head.get("ref") == branch and head_repo.get("full_name") == repo:
+            matches.append(pr)
     open_prs = [pr for pr in matches if pr.get("state") == "open"]
     if open_prs:
         return open_prs[0]
@@ -142,7 +149,7 @@ def classify(api, repo, default_branch, branch, prs, now):
     age = now - commit_date
     if age < timedelta(days=14):
         return action(repo, name, "skipped", "commit is newer than 14 days")
-    pr = associated_pr(name, prs)
+    pr = associated_pr(repo, name, prs)
     if pr and pr.get("state") == "open":
         if age >= timedelta(days=30):
             marked = has_marker(api, repo, pr.get("number"))

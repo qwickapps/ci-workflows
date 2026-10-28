@@ -64,7 +64,7 @@ class WeeklySweepTests(unittest.TestCase):
     def test_merged_or_ancestor_branch_deletes(self):
         record = classify(FakeApi(endpoints(compare_ahead=0)), branch())
         self.assertEqual("delete", record["action"])
-        merged = {"state": "closed", "merged_at": "2026-01-01T00:00:00Z", "merge_commit_sha": "m" * 40, "number": 7, "head": {"ref": "feature/old"}}
+        merged = {"state": "closed", "merged_at": "2026-01-01T00:00:00Z", "merge_commit_sha": "m" * 40, "number": 7, "head": {"ref": "feature/old", "repo": {"full_name": REPO}}}
         responses = endpoints(compare_ahead=2)
         responses[f"repos/{REPO}/compare/{'m'*40}...{SHA}"] = ({"ahead_by": 0}, "")
         record = classify(FakeApi(responses), branch(), [merged])
@@ -121,8 +121,16 @@ class WeeklySweepTests(unittest.TestCase):
         self.assertEqual("skipped", result["action"])
         self.assertNotIn((f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE"), [(c[0], c[1]) for c in api.calls])
 
+    def test_fork_pr_with_same_branch_name_is_not_associated(self):
+        fork_pr = {"state": "open", "number": 7, "head": {"ref": "feature/old", "repo": {"full_name": "fork/example"}}}
+        same_repo_pr = {"state": "open", "number": 8, "head": {"ref": "feature/old", "repo": {"full_name": REPO}}}
+        self.assertEqual("archive_delete", classify(FakeApi(endpoints()), branch(), [fork_pr])["action"])
+        same_responses = endpoints(days=31)
+        same_responses[f"repos/{REPO}/issues/8/comments?per_page=100"] = ([], "")
+        self.assertEqual("warn", classify(FakeApi(same_responses), branch(days=31), [same_repo_pr])["action"])
+
     def test_stale_open_pr_warns_once_and_only_once(self):
-        pr = {"state": "open", "number": 7, "head": {"ref": "feature/old"}}
+        pr = {"state": "open", "number": 7, "head": {"ref": "feature/old", "repo": {"full_name": REPO}}}
         api = FakeApi(endpoints())
         record = classify(api, branch(days=31), [pr])
         self.assertEqual("warn", record["action"])
