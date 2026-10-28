@@ -97,6 +97,16 @@ expect_pass "new fixture with approved choco labels passes" \
 expect_pass "public fixture with an approved GitHub-hosted label passes" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/new-hosted-approved"
 
+echo "== caller-facing reusable workflows use org runners =="
+# Reusable workflows execute in the caller's repository. choco runners are
+# repo-scoped, so a choco label there queues forever (protocols#1769).
+for wf in shell-lint.yml validation-evidence-gate.yml; do
+  expect_pass "$wf requests the org macmini-fast runner" \
+    grep -Eq '^    runs-on: \[self-hosted, macmini, macmini-fast\]$' "$ROOT_DIR/.github/workflows/$wf"
+  expect_fail "$wf does not request a repo-scoped choco runner" \
+    grep -Eq 'runs-on:.*choco' "$ROOT_DIR/.github/workflows/$wf"
+done
+
 echo "== repository workflow policy =="
 expect_pass "all ci-workflows jobs use owner-approved labels" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$ROOT_DIR/.github/workflows"
