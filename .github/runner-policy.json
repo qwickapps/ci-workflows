@@ -6,7 +6,7 @@
       "visibility": "private",
       "job_classes": {
         "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
-        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}]},
         "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
         "arm": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]},
         "deploy": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]}
@@ -16,7 +16,7 @@
       "visibility": "public",
       "job_classes": {
         "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
-        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["ubuntu-24.04"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["ubuntu-24.04"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}]},
         "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
         "arm": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]},
         "deploy": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]}
