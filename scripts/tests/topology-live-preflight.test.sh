@@ -69,12 +69,12 @@ JSON
   name_conflict)
     if [[ "$host" == "oci-gateway" ]]; then
       if [[ "$cmd" == *"service ls"* ]]; then
-        echo "qwickapps-mcp"
+        echo "qwickapps-mcp-2"
         echo "srv-captain--qwickapps-mcp"
       elif [[ "$cmd" == *"service inspect"* ]]; then
         cat <<'JSON'
 [
-  {"Spec":{"Name":"qwickapps-mcp","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/example/plain-service:latest","Env":[]}}}},
+  {"Spec":{"Name":"qwickapps-mcp-2","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/example/plain-service:latest","Env":[]}}}},
   {"Spec":{"Name":"srv-captain--qwickapps-mcp","Mode":{"Replicated":{"Replicas":0}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
 ]
 JSON
@@ -169,23 +169,55 @@ JSON
 PREFLIGHT=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
   --hostname qwickapps-mcp --app srv-captain--qwickapps-mcp --target-host oci-gateway
   --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
+PREFLIGHT_BARE_APP=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
+  --hostname qwickapps-mcp --app qwickapps-mcp --target-host oci-gateway
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
+
+expect_result_status() {
+  local expected="$1" result_path="$2" actual
+  actual="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$result_path" 2>/dev/null || true)"
+  if [[ "$actual" == "$expected" ]]; then
+    echo "PASS result status $expected"
+    pass=$((pass+1))
+  else
+    echo "FAIL expected result status $expected, got ${actual:-<missing>}"
+    fail=$((fail+1))
+  fi
+}
 
 echo "== real 2026-10-08 finding: hand-made canary owns hostname live, registered app r=0 =="
 start_mock clean 18901
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18901" --coolify-base-url "http://127.0.0.1:18901" \
+CONFLICT_RESULT="$TMP/conflict-result.json"
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18901" --coolify-base-url "http://127.0.0.1:18901" --result-out "$CONFLICT_RESULT" \
   && { echo "FAIL expected deny: real finding replay"; fail=$((fail+1)); } \
   || { echo "PASS denied real finding replay"; pass=$((pass+1)); }
+expect_result_status live_conflict "$CONFLICT_RESULT"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== clean live state: no other claimant, no ghost, no coolify conflict => admit =="
 start_mock clean 18902
 STATE_OUT="$TMP/pre-state.json"
+ADMITTED_RESULT="$TMP/admitted-result.json"
 PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18902" --coolify-base-url "http://127.0.0.1:18902" \
-  --pre-mutation-state-out "$STATE_OUT" \
+  --pre-mutation-state-out "$STATE_OUT" --result-out "$ADMITTED_RESULT" \
   && { echo "PASS clean state admitted"; pass=$((pass+1)); } \
   || { echo "FAIL expected pass: clean state admitted"; fail=$((fail+1)); }
 test -s "$STATE_OUT" && { echo "PASS pre-mutation snapshot written"; pass=$((pass+1)); } \
   || { echo "FAIL expected pass: pre-mutation snapshot written"; fail=$((fail+1)); }
+expect_result_status admitted "$ADMITTED_RESULT"
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== bare workflow app aliases its srv-captain Docker service, but another claimant still denies =="
+start_mock clean 18908
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT_BARE_APP[@]}" --tailscale-base-url "http://127.0.0.1:18908" --coolify-base-url "http://127.0.0.1:18908" \
+  && { echo "PASS bare app self-claim admitted"; pass=$((pass+1)); } \
+  || { echo "FAIL expected pass: bare app self-claim admitted"; fail=$((fail+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+start_mock clean 18909
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT_BARE_APP[@]}" --tailscale-base-url "http://127.0.0.1:18909" --coolify-base-url "http://127.0.0.1:18909" \
+  && { echo "FAIL expected deny: bare app separate claimant"; fail=$((fail+1)); } \
+  || { echo "PASS denied bare app separate claimant"; pass=$((pass+1)); }
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== online Tailscale ghost (-2 suffix) => deny even with clean docker state =="
@@ -204,9 +236,11 @@ kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== unreachable SSH source => fail closed (deny), never skip =="
 start_mock clean 18905
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=unreachable "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18905" --coolify-base-url "http://127.0.0.1:18905" \
+UNREACHABLE_RESULT="$TMP/unreachable-result.json"
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=unreachable "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18905" --coolify-base-url "http://127.0.0.1:18905" --result-out "$UNREACHABLE_RESULT" \
   && { echo "FAIL expected deny: ssh unreachable"; fail=$((fail+1)); } \
   || { echo "PASS denied ssh unreachable (fail-closed)"; pass=$((pass+1)); }
+expect_result_status verification_failure "$UNREACHABLE_RESULT"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== missing Coolify token => fail closed (deny), never skip the 3rd source =="
@@ -219,7 +253,7 @@ PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live
   || { echo "PASS denied no coolify token (fail-closed)"; pass=$((pass+1)); }
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
-echo "== non-CapRover service name equals canonical hostname without TS_HOSTNAME => deny =="
+echo "== non-CapRover ghost-style service name without TS_HOSTNAME => deny =="
 start_mock clean 18907
 PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=name_conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18907" --coolify-base-url "http://127.0.0.1:18907" \
   && { echo "FAIL expected deny: service-name claimant"; fail=$((fail+1)); } \

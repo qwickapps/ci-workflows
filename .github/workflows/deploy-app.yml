@@ -1286,6 +1286,7 @@ jobs:
           TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
           HOST_KEY="${{ steps.topology-live-preflight.outputs.host-key }}"
           PRE_STATE="${{ steps.topology-live-preflight.outputs.pre-mutation-state-path }}"
+          POST_RESULT="${RUNNER_TEMP}/topology-post-deploy-result-${{ github.run_id }}-${{ github.run_attempt }}.json"
 
           TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
           if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
@@ -1324,17 +1325,24 @@ jobs:
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
-              --coolify-token "$COOLIFY_TOKEN_RESOLVED"; then
+              --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+              --result-out "$POST_RESULT"; then
             echo "No post-deploy topology conflict detected."
             exit 0
           fi
 
-          echo "::error::post-deploy topology conflict detected for ${TS_HOSTNAME} -- another claimant appeared during this deploy's own mutation window; rolling back"
+          POST_STATUS="$(python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); status = result.get("status"); sys.exit(1) if status not in {"live_conflict", "verification_failure"} else print(status)' "$POST_RESULT" 2>/dev/null || printf '%s' verification_failure)"
+          if [ "$POST_STATUS" != "live_conflict" ]; then
+            echo "::error::post-deploy live topology verification failed for ${TS_HOSTNAME}; no rollback was attempted because no conflict was confirmed"
+            exit 1
+          fi
+
+          echo "::error::post-deploy topology conflict confirmed for ${TS_HOSTNAME}; another claimant appeared during this deploy's mutation window, rolling back"
           python3 .ci-workflows/scripts/topology-rollback.py \
             --pre-mutation-state "$PRE_STATE" \
             --new-claimant-host "$HOST_KEY" \
             --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
-          echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
+          echo "::error::deploy rolled back due to a confirmed live topology conflict introduced during mutation; this deploy did NOT complete successfully"
           exit 1
 
       - name: Deep subsystem health check

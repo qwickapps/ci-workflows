@@ -9,6 +9,7 @@ on:
       - 'scripts/tests/topology-admission.test.sh'
       - 'scripts/tests/topology-live-preflight.test.sh'
       - 'scripts/tests/topology-rollback.test.sh'
+      - 'scripts/tests/deploy-app-topology-rollback.test.sh'
       - '.github/workflows/deploy-app.yml'
       - '.github/workflows/topology-admission-tests.yml'
   push:
@@ -21,6 +22,7 @@ on:
       - 'scripts/tests/topology-admission.test.sh'
       - 'scripts/tests/topology-live-preflight.test.sh'
       - 'scripts/tests/topology-rollback.test.sh'
+      - 'scripts/tests/deploy-app-topology-rollback.test.sh'
       - '.github/workflows/deploy-app.yml'
       - '.github/workflows/topology-admission-tests.yml'
 permissions:
@@ -40,3 +42,4 @@ jobs:
           bash scripts/tests/topology-admission.test.sh
           bash scripts/tests/topology-live-preflight.test.sh
           bash scripts/tests/topology-rollback.test.sh
+          bash scripts/tests/deploy-app-topology-rollback.test.sh

@@ -72,7 +72,25 @@ class LiveStateUnreachable(RuntimeError):
     """A live source could not be read. Caller must treat this as a deny."""
 
 
-def deny(reason: str) -> None:
+def write_result(result_out: Optional[Path], status: str, reason: str) -> None:
+    """Persist a machine-readable outcome for post-deploy callers.
+
+    Exit status deliberately stays 2 for every denial so pre-mutation callers
+    remain fail-closed. The result status lets a post-mutation caller
+    distinguish a confirmed live conflict (safe to roll back) from an
+    incomplete verification (unsafe to mutate anything further).
+    """
+    if result_out is not None:
+        result_out.write_text(json.dumps({"status": status, "reason": reason}) + "\n")
+
+
+def deny(
+    reason: str,
+    *,
+    result_out: Optional[Path] = None,
+    status: str = "verification_failure",
+) -> None:
+    write_result(result_out, status, reason)
     print(f"LIVE PREFLIGHT DENIED: {reason}", file=sys.stderr)
     raise SystemExit(2)
 
@@ -229,6 +247,18 @@ def matches_hostname_or_ghost(candidate: Optional[str], canonical: str) -> bool:
     return bool(m and m.group("base") == canonical)
 
 
+def claimant_aliases(app: str) -> set[str]:
+    """Return equivalent bare-workflow and CapRover Docker app identifiers."""
+    normalized = app.lower()
+    aliases = {normalized}
+    prefix = "srv-captain--"
+    if normalized.startswith(prefix):
+        aliases.add(normalized[len(prefix):])
+    else:
+        aliases.add(prefix + normalized)
+    return aliases
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", required=True, type=Path)
@@ -244,15 +274,17 @@ def main() -> int:
     parser.add_argument("--coolify-token", default="")
     parser.add_argument("--pre-mutation-state-out", type=Path, default=None,
                          help="write the pre-mutation owner snapshot here for the rollback script")
+    parser.add_argument("--result-out", type=Path, default=None,
+                        help="write JSON outcome: admitted, live_conflict, or verification_failure")
     args = parser.parse_args()
 
     registry = ta.load(args.registry)
     entry = next((e for e in registry if e["canonical_hostname"].lower() == args.hostname.lower()), None)
     if entry is None:
-        deny(f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this")
+        deny(f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this", result_out=args.result_out)
         return 2
     if entry["required_host"] != args.target_host:
-        deny(f"target host {args.target_host!r} != registry required_host {entry['required_host']!r} for {args.hostname!r}")
+        deny(f"target host {args.target_host!r} != registry required_host {entry['required_host']!r} for {args.hostname!r}", result_out=args.result_out)
         return 2
 
     # 1. Live docker swarm state on every CapRover host, fail-closed.
@@ -261,23 +293,26 @@ def main() -> int:
         for host in args.caprover_hosts:
             live_services.extend(docker_services_on_host(host))
     except LiveStateUnreachable as exc:
-        deny(f"CapRover live-state source unreachable, refusing to proceed without it: {exc}")
+        deny(f"CapRover live-state source unreachable, refusing to proceed without it: {exc}", result_out=args.result_out)
         return 2
 
+    self_claimant_aliases = claimant_aliases(args.app)
     other_claimants = [
         s for s in live_services
         if (
             matches_hostname_or_ghost(s.get("ts_hostname"), args.hostname)
             or matches_hostname_or_ghost(s.get("name"), args.hostname)
         )
-        and s.get("name") != args.app
+        and s.get("name", "").lower() not in self_claimant_aliases
     ]
     live_conflicts = [s for s in other_claimants if (s.get("replicas") or 0) > 0]
     if live_conflicts:
         deny(
             "other service(s) already claim hostname "
             f"{args.hostname!r} with replicas>0: "
-            + ", ".join(f"{s['name']}@{s['host']} (r={s['replicas']})" for s in live_conflicts)
+            + ", ".join(f"{s['name']}@{s['host']} (r={s['replicas']})" for s in live_conflicts),
+            result_out=args.result_out,
+            status="live_conflict",
         )
         return 2
 
@@ -286,7 +321,7 @@ def main() -> int:
     try:
         devices = tailscale_devices(args.ts_api_key, args.tailnet, args.tailscale_base_url)
     except LiveStateUnreachable as exc:
-        deny(f"Tailscale live-state source unreachable, refusing to proceed without it: {exc}")
+        deny(f"Tailscale live-state source unreachable, refusing to proceed without it: {exc}", result_out=args.result_out)
         return 2
 
     online_matches = [
@@ -297,7 +332,9 @@ def main() -> int:
     if online_ghosts:
         deny(
             "online Tailscale ghost(s) for hostname "
-            f"{args.hostname!r}: " + ", ".join(d.get("name", "?") for d in online_ghosts)
+            f"{args.hostname!r}: " + ", ".join(d.get("name", "?") for d in online_ghosts),
+            result_out=args.result_out,
+            status="live_conflict",
         )
         return 2
 
@@ -308,7 +345,7 @@ def main() -> int:
         try:
             apps = coolify_apps(args.coolify_base_url, args.coolify_token)
         except LiveStateUnreachable as exc:
-            deny(f"Coolify live-state source unreachable, refusing to proceed without it: {exc}")
+            deny(f"Coolify live-state source unreachable, refusing to proceed without it: {exc}", result_out=args.result_out)
             return 2
         coolify_conflicts = [
             a for a in apps if args.hostname in (a.get("ts_hostnames") or [])
@@ -316,11 +353,13 @@ def main() -> int:
         if coolify_conflicts:
             deny(
                 "Coolify app(s) on momo already claim hostname "
-                f"{args.hostname!r}: " + ", ".join(a["name"] for a in coolify_conflicts)
+                f"{args.hostname!r}: " + ", ".join(a["name"] for a in coolify_conflicts),
+                result_out=args.result_out,
+                status="live_conflict",
             )
             return 2
     else:
-        deny("no Coolify token supplied; Coolify is a live claimant source and cannot be skipped")
+        deny("no Coolify token supplied; Coolify is a live claimant source and cannot be skipped", result_out=args.result_out)
         return 2
 
     # Record the pre-mutation owner (if any, on the target host under the
@@ -333,6 +372,7 @@ def main() -> int:
         snapshot = {"host": args.target_host, "app": args.app, "previous_owner": owner}
         args.pre_mutation_state_out.write_text(json.dumps(snapshot, indent=2))
 
+    write_result(args.result_out, "admitted", "no live claimant conflicts")
     print(f"LIVE PREFLIGHT OK: no live claimant conflicts for {args.hostname!r} on {args.target_host!r}")
     return 0
 
