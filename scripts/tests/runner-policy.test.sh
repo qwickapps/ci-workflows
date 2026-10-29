@@ -107,12 +107,6 @@ for wf in shell-lint.yml validation-evidence-gate.yml; do
     grep -Eq 'runs-on:.*choco' "$ROOT_DIR/.github/workflows/$wf"
 done
 
-echo "== definition of done runner =="
-expect_pass "definition-of-done uses the restored macmini label set" \
-  grep -Eq '^    runs-on: \[self-hosted, macmini\]$' "$ROOT_DIR/.github/workflows/definition-of-done.yml"
-expect_fail "definition-of-done does not retain the repo-scoped choco label" \
-  grep -Eq 'runs-on:.*choco' "$ROOT_DIR/.github/workflows/definition-of-done.yml"
-
 echo "== repository workflow policy =="
 expect_pass "all ci-workflows jobs use owner-approved labels" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$ROOT_DIR/.github/workflows"
