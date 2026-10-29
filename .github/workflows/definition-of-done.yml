@@ -50,7 +50,7 @@ jobs:
   # ---------------------------------------------------------------------------
   definition-of-done:
     name: Definition of Done
-    runs-on: [self-hosted, choco]
+    runs-on: [self-hosted, macmini, macmini-fast]
     steps:
       - name: Checkout (full history for diff)
         uses: actions/checkout@v4
