@@ -16,6 +16,24 @@ on:
         required: false
         type: string
         default: "21"
+  # Keep the historical callable contract. Some repositories invoke this
+  # workflow directly for closed-PR hygiene; removing workflow_call makes
+  # those callers fail before this workflow can report its audit result.
+  workflow_call:
+    inputs:
+      repository:
+        description: "owner/name target repository"
+        required: true
+        type: string
+      pr_number:
+        description: "Closed PR number"
+        required: true
+        type: number
+      enforce:
+        description: "Allow deletion after all safety checks"
+        required: false
+        type: boolean
+        default: false
 
 # Minimal permissions: read org repos + write repo contents for branch deletion
 permissions:

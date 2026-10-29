@@ -89,17 +89,16 @@ else
   echo "  SKIP: historical fixture commits not present in this checkout (need full history)"
 fi
 
-# --- Test 2: false positive check on the current repo state ----------------
+# --- Test 2: current repo remains compatible with origin/main --------------
 echo ""
-echo "-- Test 2: false-positive check (current branch vs origin/main) --"
+echo "-- Test 2: compatibility check (current branch vs origin/main) --"
 
 cd "$ROOT_DIR"
 if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  merge_base="$(git merge-base origin/main HEAD 2>/dev/null || echo origin/main)"
-  clean_out="$(BASE_REF="$merge_base" bash "$GUARD" 2>&1)" && clean_rc=0 || clean_rc=$?
+  clean_out="$(BASE_REF=origin/main bash "$GUARD" 2>&1)" && clean_rc=0 || clean_rc=$?
   printf '%s\n' "$clean_out" | indent
 
-  assert "current repo state: guard exits zero (PASSes)" \
+  assert "current repo state: guard exits zero against origin/main (PASSes)" \
     test "$clean_rc" -eq 0
 else
   echo "  SKIP: origin/main not available in this checkout"

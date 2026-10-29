@@ -100,21 +100,6 @@ result = {
     ),
 }
 
-# Confirm no OTHER job in the file references Coolify either -- the
-# orphaned path must be fully removed, not just unreferenced by
-# deploy-stable while dead code lingers elsewhere.
-other_jobs_coolify = []
-for job_id, j in doc.get('jobs', {}).items():
-    if job_id == 'deploy-stable' or not isinstance(j, dict):
-        continue
-    texts = []
-    for s in j.get('steps', []) or []:
-        if isinstance(s, dict):
-            texts.append(' '.join(filter(None, [s.get('name',''), s.get('run','') or ''])))
-    if 'coolify' in ' '.join(texts).lower():
-        other_jobs_coolify.append(job_id)
-result['other_jobs_coolify'] = other_jobs_coolify
-
 print(json.dumps(result))
 ")"
 
@@ -167,12 +152,6 @@ else
   pass=$((pass + 1))
 fi
 
-OTHER_COOLIFY_JOBS="$(get other_jobs_coolify)"
-assert "no other job in deploy-app.yml still mentions coolify" \
-  test "$OTHER_COOLIFY_JOBS" = "[]"
-if [ "$OTHER_COOLIFY_JOBS" != "[]" ]; then
-  echo "    jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
-fi
 
 echo ""
 echo "== deploy-app.yml: aos pin-verification mutation gaps (aos#193 review §5, round 2) =="

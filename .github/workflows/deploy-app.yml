@@ -38,6 +38,15 @@ on:
         type: string
         required: true
 
+      # Deprecated compatibility input. Callers may continue to pass their
+      # renderer while this workflow's consolidated deployment flow owns env
+      # rendering; removing the key would reject existing reusable callers.
+      env_render_script:
+        description: 'Legacy caller env-render script path; accepted for backward compatibility.'
+        type: string
+        required: false
+        default: ''
+
       stage:
         description: 'Deployment stage. One of build | uat | live | stable'
         type: string
@@ -145,6 +154,13 @@ on:
         description: 'Optional stable backend URL used for ordered fallback route'
         type: string
         default: ''
+
+      # Deprecated compatibility input. Retain the public callable signature
+      # for repositories that explicitly opt out of legacy route mutation.
+      route_gateway:
+        description: 'Whether a live-stage deployment may update qwickway routing after health checks'
+        type: boolean
+        default: true
 
       # -- CMD override ----------------------------------------------------
       cmd:
