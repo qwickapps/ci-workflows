@@ -22,7 +22,9 @@ This script does not read or trust the registry's static `state` block for
 "is anything running" -- that block records *intent*, this script measures
 *reality*. It is fail-closed: any unreachable source is a DENY, never a skip.
 
-Exit codes: 0 = admit, 2 = deny (including "could not verify").
+Exit codes: 0 = admit, 2 = deny. Denials carry a structured 409 conflict or
+503 verification-failure status; consumers must use that result rather than
+the process exit value to decide whether a rollback is safe.
 """
 from __future__ import annotations
 
@@ -72,9 +74,26 @@ class LiveStateUnreachable(RuntimeError):
     """A live source could not be read. Caller must treat this as a deny."""
 
 
-def deny(reason: str) -> None:
-    print(f"LIVE PREFLIGHT DENIED: {reason}", file=sys.stderr)
-    raise SystemExit(2)
+def emit_result(args: argparse.Namespace, *, status_code: int,
+                failure_type: Optional[str] = None, reason: Optional[str] = None) -> int:
+    """Write one machine-readable admission result.
+
+    Unix exit values cannot represent HTTP-like status codes such as 409 and
+    503 faithfully, so retain the 0/2 process contract and put the actionable
+    result in JSON for the post-deploy workflow.
+    """
+    result = {
+        "status_code": status_code,
+        "failure_type": failure_type,
+        "reason": reason,
+        "hostname": args.hostname,
+        "target_host": args.target_host,
+    }
+    rendered = json.dumps(result, sort_keys=True)
+    if args.result_json_out is not None:
+        args.result_json_out.write_text(rendered + "\n")
+    print(rendered)
+    return 0 if status_code == 200 else 2
 
 
 def run_ssh(host: str, command: str) -> str:
@@ -244,16 +263,18 @@ def main() -> int:
     parser.add_argument("--coolify-token", default="")
     parser.add_argument("--pre-mutation-state-out", type=Path, default=None,
                          help="write the pre-mutation owner snapshot here for the rollback script")
+    parser.add_argument("--result-json-out", type=Path, default=None,
+                        help="write structured admission result JSON here")
     args = parser.parse_args()
 
     registry = ta.load(args.registry)
     entry = next((e for e in registry if e["canonical_hostname"].lower() == args.hostname.lower()), None)
     if entry is None:
-        deny(f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this")
-        return 2
+        return emit_result(args, status_code=409, failure_type="topology_conflict",
+                           reason=f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this")
     if entry["required_host"] != args.target_host:
-        deny(f"target host {args.target_host!r} != registry required_host {entry['required_host']!r} for {args.hostname!r}")
-        return 2
+        return emit_result(args, status_code=409, failure_type="topology_conflict",
+                           reason=f"target host {args.target_host!r} != registry required_host {entry['required_host']!r} for {args.hostname!r}")
 
     # 1. Live docker swarm state on every CapRover host, fail-closed.
     live_services: list[dict] = []
@@ -261,8 +282,8 @@ def main() -> int:
         for host in args.caprover_hosts:
             live_services.extend(docker_services_on_host(host))
     except LiveStateUnreachable as exc:
-        deny(f"CapRover live-state source unreachable, refusing to proceed without it: {exc}")
-        return 2
+        return emit_result(args, status_code=503, failure_type="verification_failure",
+                           reason=f"CapRover live-state source unreachable, refusing to proceed without it: {exc}")
 
     other_claimants = [
         s for s in live_services
@@ -274,20 +295,19 @@ def main() -> int:
     ]
     live_conflicts = [s for s in other_claimants if (s.get("replicas") or 0) > 0]
     if live_conflicts:
-        deny(
+        return emit_result(args, status_code=409, failure_type="topology_conflict", reason=(
             "other service(s) already claim hostname "
             f"{args.hostname!r} with replicas>0: "
             + ", ".join(f"{s['name']}@{s['host']} (r={s['replicas']})" for s in live_conflicts)
-        )
-        return 2
+        ))
 
     # 2. Tailscale: deny on any online -N ghost or a differently-named online
     #    device already holding the canonical hostname.
     try:
         devices = tailscale_devices(args.ts_api_key, args.tailnet, args.tailscale_base_url)
     except LiveStateUnreachable as exc:
-        deny(f"Tailscale live-state source unreachable, refusing to proceed without it: {exc}")
-        return 2
+        return emit_result(args, status_code=503, failure_type="verification_failure",
+                           reason=f"Tailscale live-state source unreachable, refusing to proceed without it: {exc}")
 
     online_matches = [
         d for d in devices
@@ -295,11 +315,10 @@ def main() -> int:
     ]
     online_ghosts = [d for d in online_matches if d.get("name", "").split(".")[0] != args.hostname]
     if online_ghosts:
-        deny(
+        return emit_result(args, status_code=409, failure_type="topology_conflict", reason=(
             "online Tailscale ghost(s) for hostname "
             f"{args.hostname!r}: " + ", ".join(d.get("name", "?") for d in online_ghosts)
-        )
-        return 2
+        ))
 
     # 3. Coolify: deny if any Coolify app other than the one being deployed
     #    (Coolify never deploys through this pipeline, so any Coolify app at
@@ -308,20 +327,19 @@ def main() -> int:
         try:
             apps = coolify_apps(args.coolify_base_url, args.coolify_token)
         except LiveStateUnreachable as exc:
-            deny(f"Coolify live-state source unreachable, refusing to proceed without it: {exc}")
-            return 2
+            return emit_result(args, status_code=503, failure_type="verification_failure",
+                               reason=f"Coolify live-state source unreachable, refusing to proceed without it: {exc}")
         coolify_conflicts = [
             a for a in apps if args.hostname in (a.get("ts_hostnames") or [])
         ]
         if coolify_conflicts:
-            deny(
+            return emit_result(args, status_code=409, failure_type="topology_conflict", reason=(
                 "Coolify app(s) on momo already claim hostname "
                 f"{args.hostname!r}: " + ", ".join(a["name"] for a in coolify_conflicts)
-            )
-            return 2
+            ))
     else:
-        deny("no Coolify token supplied; Coolify is a live claimant source and cannot be skipped")
-        return 2
+        return emit_result(args, status_code=503, failure_type="verification_failure",
+                           reason="no Coolify token supplied; Coolify is a live claimant source and cannot be skipped")
 
     # Record the pre-mutation owner (if any, on the target host under the
     # registry's own app name) so the rollback script can restore it later.
@@ -333,8 +351,7 @@ def main() -> int:
         snapshot = {"host": args.target_host, "app": args.app, "previous_owner": owner}
         args.pre_mutation_state_out.write_text(json.dumps(snapshot, indent=2))
 
-    print(f"LIVE PREFLIGHT OK: no live claimant conflicts for {args.hostname!r} on {args.target_host!r}")
-    return 0
+    return emit_result(args, status_code=200)
 
 
 if __name__ == "__main__":

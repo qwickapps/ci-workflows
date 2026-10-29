@@ -1317,24 +1317,57 @@ jobs:
             fi
           fi
 
-          if python3 .ci-workflows/scripts/topology-live-preflight.py \
+          RESULT_JSON="${RUNNER_TEMP}/post-deploy-topology-result.json"
+          rm -f "$RESULT_JSON"
+          set +e
+          python3 .ci-workflows/scripts/topology-live-preflight.py \
               --registry .ci-workflows/config/service-identities.json \
               --hostname "$TS_HOSTNAME" \
               --app "${{ needs.resolve-stage.outputs.target_app }}" \
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
-              --coolify-token "$COOLIFY_TOKEN_RESOLVED"; then
+              --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+              --result-json-out "$RESULT_JSON"
+          PREFLIGHT_EXIT=$?
+          set -e
+          if [ "$PREFLIGHT_EXIT" -eq 0 ]; then
             echo "No post-deploy topology conflict detected."
             exit 0
           fi
 
-          echo "::error::post-deploy topology conflict detected for ${TS_HOSTNAME} -- another claimant appeared during this deploy's own mutation window; rolling back"
-          python3 .ci-workflows/scripts/topology-rollback.py \
-            --pre-mutation-state "$PRE_STATE" \
-            --new-claimant-host "$HOST_KEY" \
-            --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
-          echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
+          # The script's JSON result is authoritative: exit code 2 merely
+          # means deny and cannot encode 409/503 safely on Unix.
+          if [ ! -s "$RESULT_JSON" ]; then
+            echo "::error::post-deploy topology verification failed closed (400): no structured result; deployment will not be mutated"
+            exit 1
+          fi
+          if ! RESULT_FIELDS=$(python3 -c 'import json,sys; result=json.load(open(sys.argv[1], encoding="utf-8")); status=result.get("status_code"); failure_type=result.get("failure_type"); isinstance(status,int) and isinstance(failure_type,str) or sys.exit("invalid structured topology result"); print(status, failure_type)' "$RESULT_JSON"); then
+            echo "::error::post-deploy topology verification failed closed (400): malformed structured result; deployment will not be mutated"
+            exit 1
+          fi
+          read -r STATUS_CODE FAILURE_TYPE <<< "$RESULT_FIELDS"
+          echo "Post-deploy topology result: status_code=${STATUS_CODE} failure_type=${FAILURE_TYPE}"
+
+          if [ "$STATUS_CODE" = "409" ] && [ "$FAILURE_TYPE" = "topology_conflict" ]; then
+            echo "::error::post-deploy topology conflict detected for ${TS_HOSTNAME}; rolling back the new claimant"
+            python3 .ci-workflows/scripts/topology-rollback.py \
+              --pre-mutation-state "$PRE_STATE" \
+              --new-claimant-host "$HOST_KEY" \
+              --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
+            echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
+            exit 1
+          fi
+
+          # SSH, Tailscale, and Coolify source errors arrive as 503
+          # verification_failure. Do not attempt a rollback: the live owner
+          # is unverified, so any deployment mutation would be unsafe.
+          if [ "$STATUS_CODE" = "503" ] && [ "$FAILURE_TYPE" = "verification_failure" ]; then
+            echo "::error::post-deploy topology verification failed closed (400): live ownership is unverified; deployment will not be mutated"
+            exit 1
+          fi
+
+          echo "::error::post-deploy topology verification failed closed (400): unexpected status_code=${STATUS_CODE} failure_type=${FAILURE_TYPE}; deployment will not be mutated"
           exit 1
 
       - name: Deep subsystem health check

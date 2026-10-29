@@ -172,9 +172,22 @@ PREFLIGHT=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
 
 echo "== real 2026-10-08 finding: hand-made canary owns hostname live, registered app r=0 =="
 start_mock clean 18901
+CONFLICT_RESULT="$TMP/conflict-result.json"
 PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18901" --coolify-base-url "http://127.0.0.1:18901" \
+  --result-json-out "$CONFLICT_RESULT" \
   && { echo "FAIL expected deny: real finding replay"; fail=$((fail+1)); } \
   || { echo "PASS denied real finding replay"; pass=$((pass+1)); }
+if python3 - "$CONFLICT_RESULT" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status_code"] == 409
+assert result["failure_type"] == "topology_conflict"
+PY
+then
+  echo "PASS conflict structured result is 409/topology_conflict"; pass=$((pass+1))
+else
+  echo "FAIL conflict structured result is 409/topology_conflict"; fail=$((fail+1))
+fi
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== clean live state: no other claimant, no ghost, no coolify conflict => admit =="
@@ -204,9 +217,22 @@ kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== unreachable SSH source => fail closed (deny), never skip =="
 start_mock clean 18905
+VERIFICATION_RESULT="$TMP/verification-result.json"
 PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=unreachable "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18905" --coolify-base-url "http://127.0.0.1:18905" \
+  --result-json-out "$VERIFICATION_RESULT" \
   && { echo "FAIL expected deny: ssh unreachable"; fail=$((fail+1)); } \
   || { echo "PASS denied ssh unreachable (fail-closed)"; pass=$((pass+1)); }
+if python3 - "$VERIFICATION_RESULT" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status_code"] == 503
+assert result["failure_type"] == "verification_failure"
+PY
+then
+  echo "PASS verification structured result is 503/verification_failure"; pass=$((pass+1))
+else
+  echo "FAIL verification structured result is 503/verification_failure"; fail=$((fail+1))
+fi
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== missing Coolify token => fail closed (deny), never skip the 3rd source =="

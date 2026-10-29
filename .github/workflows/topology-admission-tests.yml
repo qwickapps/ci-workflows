@@ -8,6 +8,7 @@ on:
       - 'scripts/topology-rollback.py'
       - 'scripts/tests/topology-admission.test.sh'
       - 'scripts/tests/topology-live-preflight.test.sh'
+      - 'scripts/tests/topology-post-deploy-workflow.test.sh'
       - 'scripts/tests/topology-rollback.test.sh'
       - '.github/workflows/deploy-app.yml'
       - '.github/workflows/topology-admission-tests.yml'
@@ -20,6 +21,7 @@ on:
       - 'scripts/topology-rollback.py'
       - 'scripts/tests/topology-admission.test.sh'
       - 'scripts/tests/topology-live-preflight.test.sh'
+      - 'scripts/tests/topology-post-deploy-workflow.test.sh'
       - 'scripts/tests/topology-rollback.test.sh'
       - '.github/workflows/deploy-app.yml'
       - '.github/workflows/topology-admission-tests.yml'
@@ -39,4 +41,5 @@ jobs:
           set -euo pipefail
           bash scripts/tests/topology-admission.test.sh
           bash scripts/tests/topology-live-preflight.test.sh
+          bash scripts/tests/topology-post-deploy-workflow.test.sh
           bash scripts/tests/topology-rollback.test.sh
