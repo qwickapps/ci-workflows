@@ -66,6 +66,7 @@ SSH_JUMP = {
 SSH_TIMEOUT_SECONDS = 15
 HTTP_TIMEOUT_SECONDS = 15
 GHOST_SUFFIX_RE = re.compile(r"^(?P<base>[a-z0-9-]+)-(?P<n>\d+)$")
+CAPROVER_SERVICE_PREFIX = "srv-captain--"
 
 
 class LiveStateUnreachable(RuntimeError):
@@ -229,6 +230,20 @@ def matches_hostname_or_ghost(candidate: Optional[str], canonical: str) -> bool:
     return bool(m and m.group("base") == canonical)
 
 
+def normalized_claimant_name(name: Optional[str]) -> str:
+    """Normalize the CapRover swarm-service wrapper from an app claimant.
+
+    CapRover's Docker Swarm service name is normally ``srv-captain--<app>``,
+    while some live discovery sources expose the bare ``<app>`` name.  They
+    identify the same deploying claimant, not competing services.
+    """
+    if not name:
+        return ""
+    if name.startswith(CAPROVER_SERVICE_PREFIX):
+        return name.removeprefix(CAPROVER_SERVICE_PREFIX)
+    return name
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", required=True, type=Path)
@@ -270,7 +285,8 @@ def main() -> int:
             matches_hostname_or_ghost(s.get("ts_hostname"), args.hostname)
             or matches_hostname_or_ghost(s.get("name"), args.hostname)
         )
-        and s.get("name") != args.app
+        and normalized_claimant_name(s.get("name"))
+        != normalized_claimant_name(args.app)
     ]
     live_conflicts = [s for s in other_claimants if (s.get("replicas") or 0) > 0]
     if live_conflicts:

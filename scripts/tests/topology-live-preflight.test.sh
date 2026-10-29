@@ -66,7 +66,7 @@ JSON
       [[ "$cmd" == *"service ls"* ]] && echo -n ""
     fi
     ;;
-  name_conflict)
+  equivalent_claimant)
     if [[ "$host" == "oci-gateway" ]]; then
       if [[ "$cmd" == *"service ls"* ]]; then
         echo "qwickapps-mcp"
@@ -75,7 +75,7 @@ JSON
         cat <<'JSON'
 [
   {"Spec":{"Name":"qwickapps-mcp","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/example/plain-service:latest","Env":[]}}}},
-  {"Spec":{"Name":"srv-captain--qwickapps-mcp","Mode":{"Replicated":{"Replicas":0}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
+  {"Spec":{"Name":"srv-captain--qwickapps-mcp","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
 ]
 JSON
       fi
@@ -169,61 +169,55 @@ JSON
 PREFLIGHT=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
   --hostname qwickapps-mcp --app srv-captain--qwickapps-mcp --target-host oci-gateway
   --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
+PREFLIGHT_BARE_APP=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
+  --hostname qwickapps-mcp --app qwickapps-mcp --target-host oci-gateway
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
 
 echo "== real 2026-10-08 finding: hand-made canary owns hostname live, registered app r=0 =="
 start_mock clean 18901
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18901" --coolify-base-url "http://127.0.0.1:18901" \
-  && { echo "FAIL expected deny: real finding replay"; fail=$((fail+1)); } \
-  || { echo "PASS denied real finding replay"; pass=$((pass+1)); }
+expect_deny "real-finding-replay" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict \
+  "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18901" --coolify-base-url "http://127.0.0.1:18901"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== clean live state: no other claimant, no ghost, no coolify conflict => admit =="
 start_mock clean 18902
 STATE_OUT="$TMP/pre-state.json"
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18902" --coolify-base-url "http://127.0.0.1:18902" \
-  --pre-mutation-state-out "$STATE_OUT" \
-  && { echo "PASS clean state admitted"; pass=$((pass+1)); } \
-  || { echo "FAIL expected pass: clean state admitted"; fail=$((fail+1)); }
-test -s "$STATE_OUT" && { echo "PASS pre-mutation snapshot written"; pass=$((pass+1)); } \
-  || { echo "FAIL expected pass: pre-mutation snapshot written"; fail=$((fail+1)); }
+expect_pass "clean-state-admitted" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean \
+  "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18902" --coolify-base-url "http://127.0.0.1:18902" \
+  --pre-mutation-state-out "$STATE_OUT"
+expect_pass "pre-mutation-snapshot-written" test -s "$STATE_OUT"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== online Tailscale ghost (-2 suffix) => deny even with clean docker state =="
 start_mock ts_ghost 18903
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18903" --coolify-base-url "http://127.0.0.1:18903" \
-  && { echo "FAIL expected deny: online ghost"; fail=$((fail+1)); } \
-  || { echo "PASS denied online ghost"; pass=$((pass+1)); }
+expect_deny "online-ghost" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean \
+  "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18903" --coolify-base-url "http://127.0.0.1:18903"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== Coolify app on momo claims the same canonical hostname => deny =="
 start_mock coolify_conflict 18904
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18904" --coolify-base-url "http://127.0.0.1:18904" \
-  && { echo "FAIL expected deny: coolify conflict"; fail=$((fail+1)); } \
-  || { echo "PASS denied coolify conflict"; pass=$((pass+1)); }
+expect_deny "coolify-conflict" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean \
+  "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18904" --coolify-base-url "http://127.0.0.1:18904"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== unreachable SSH source => fail closed (deny), never skip =="
 start_mock clean 18905
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=unreachable "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18905" --coolify-base-url "http://127.0.0.1:18905" \
-  && { echo "FAIL expected deny: ssh unreachable"; fail=$((fail+1)); } \
-  || { echo "PASS denied ssh unreachable (fail-closed)"; pass=$((pass+1)); }
+expect_deny "ssh-unreachable" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=unreachable \
+  "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18905" --coolify-base-url "http://127.0.0.1:18905"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== missing Coolify token => fail closed (deny), never skip the 3rd source =="
 start_mock clean 18906
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE" \
+expect_deny "no-coolify-token" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE" \
   --hostname qwickapps-mcp --app srv-captain--qwickapps-mcp --target-host oci-gateway \
   --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --tailscale-base-url "http://127.0.0.1:18906" \
-  --coolify-base-url "http://127.0.0.1:18906" \
-  && { echo "FAIL expected deny: no coolify token"; fail=$((fail+1)); } \
-  || { echo "PASS denied no coolify token (fail-closed)"; pass=$((pass+1)); }
+  --coolify-base-url "http://127.0.0.1:18906"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
-echo "== non-CapRover service name equals canonical hostname without TS_HOSTNAME => deny =="
+echo "== bare --app name and srv-captain-- target service are the same redeploy claimant => admit =="
 start_mock clean 18907
-PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=name_conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18907" --coolify-base-url "http://127.0.0.1:18907" \
-  && { echo "FAIL expected deny: service-name claimant"; fail=$((fail+1)); } \
-  || { echo "PASS denied service-name claimant"; pass=$((pass+1)); }
+expect_pass "equivalent-claimant-redeploy" env PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=equivalent_claimant \
+  "${PREFLIGHT_BARE_APP[@]}" --tailscale-base-url "http://127.0.0.1:18907" --coolify-base-url "http://127.0.0.1:18907"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "Tests: $pass passed, $fail failed"
