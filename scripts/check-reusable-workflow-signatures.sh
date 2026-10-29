@@ -21,12 +21,11 @@
 #   - For each one that ALSO existed (as a file) at BASE_REF, compares the
 #     KEY SETS under on.workflow_call.inputs / .outputs / .secrets between
 #     BASE_REF and HEAD_REF.
-#   - FAILS LOUDLY if any section's key set differs at all -- added,
-#     removed, OR renamed. This is deliberately a hard stop on ANY
-#     signature change, not just removals: an added-looking key can really
-#     be a rename that silently orphans callers still passing the old name,
-#     and the point is forcing a human to consciously notice and review the
-#     change, not to wave additive-looking diffs through.
+#   - FAILS LOUDLY for any removed key, renamed key, or newly-required
+#     input/secret. These changes can break existing callers.
+#   - Allows additions that are optional (and output additions), because
+#     existing callers can keep invoking the workflow unchanged. A rename
+#     still fails because it necessarily removes the old key.
 #   - Also FAILS if a file that WAS a reusable workflow at BASE_REF is no
 #     longer one at HEAD_REF (workflow_call block removed, or the file was
 #     deleted outright) -- the more extreme version of the same failure
@@ -128,7 +127,7 @@ def read_file(ref, path):
 
 
 def extract_signature(content):
-    """(is_reusable, {section: set(keys)}) for workflow YAML text.
+    """(is_reusable, {section: {key: definition}}) for workflow YAML text.
     (False, {}) for missing/unparseable/non-reusable content."""
     if content is None:
         return False, {}
@@ -150,7 +149,7 @@ def extract_signature(content):
     sig = {}
     for section in ("inputs", "outputs", "secrets"):
         block = workflow_call.get(section) or {}
-        sig[section] = set(block.keys()) if isinstance(block, dict) else set()
+        sig[section] = block if isinstance(block, dict) else {}
     return True, sig
 
 
@@ -194,15 +193,29 @@ for path in all_files:
 
     section_diffs = []
     for section in ("inputs", "outputs", "secrets"):
-        before = base_sig.get(section, set())
-        after = head_sig.get(section, set())
-        if before != after:
-            added = sorted(after - before)
-            removed = sorted(before - after)
+        before = base_sig.get(section, {})
+        after = head_sig.get(section, {})
+        before_keys = set(before)
+        after_keys = set(after)
+        removed = sorted(before_keys - after_keys)
+        added = sorted(after_keys - before_keys)
+        required_added = []
+        if section in ("inputs", "secrets"):
+            required_added = sorted(
+                key for key in added
+                if not isinstance(after.get(key), dict)
+                or after[key].get("required") is True
+            )
+        if removed or required_added:
             section_diffs.append(
-                f"      [{section}] before={sorted(before)}\n"
-                f"      [{section}] after= {sorted(after)}\n"
+                f"      [{section}] before={sorted(before_keys)}\n"
+                f"      [{section}] after= {sorted(after_keys)}\n"
                 f"      [{section}] added={added} removed={removed}"
+                + (f" required_added={required_added}" if required_added else "")
+            )
+        elif added:
+            print(
+                f"OK: {path} ({section} optional additions allowed: {added})"
             )
 
     if section_diffs:
@@ -227,12 +240,11 @@ if failures:
     print("")
     print(
         "A reusable workflow's on.workflow_call.inputs/outputs/secrets keys "
-        "changed. This is treated as a breaking change regardless of whether "
-        "it looks additive, because an added-looking key can be a silent "
-        "rename that orphans callers still using the old name. If this is "
-        "intentional: update every consuming repo in the same change (or "
-        "keep both old and new keys during a migration window), then have a "
-        "human consciously approve this diff."
+        "changed in a way that can break callers (a key was removed or a new "
+        "required input/secret was added). If this is intentional: update "
+        "every consuming repo in the same change (or keep both old and new "
+        "keys during a migration window), then have a human consciously "
+        "approve this diff."
     )
     sys.exit(1)
 

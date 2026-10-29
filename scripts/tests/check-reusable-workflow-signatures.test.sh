@@ -28,7 +28,8 @@
 #      byte-for-byte re-formatted (key order / quoting changed) but whose
 #      key SETS are identical must PASS -- proving the guard compares sets,
 #      not YAML formatting or text.
-
+#   5. Synthetic unit test: adding a required input must FAIL, while optional
+#      compatibility inputs can be added without breaking existing callers.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -187,6 +188,35 @@ reformat_out="$(cd "$SCRATCH_DIR" && BASE_REF=fixture-renamed HEAD_REF=fixture-r
 printf '%s\n' "$reformat_out" | indent
 assert "synthetic reformat-only: guard exits zero (PASSes)" \
   test "$reformat_rc" -eq 0
+
+(
+  cd "$SCRATCH_DIR"
+  cat > .github/workflows/fixture.yml <<'YAML'
+name: Fixture
+on:
+  workflow_call:
+    secrets:
+      TOKEN:
+        required: true
+    inputs:
+      image_ref:
+        type: string
+        required: true
+      required_new_input:
+        type: string
+        required: true
+YAML
+  git add -A
+  git commit -q -m "add required input"
+  git tag fixture-required-addition
+)
+
+required_addition_out="$(cd "$SCRATCH_DIR" && BASE_REF=fixture-reformatted HEAD_REF=fixture-required-addition bash "$GUARD" 2>&1)" && required_addition_rc=0 || required_addition_rc=$?
+printf '%s\n' "$required_addition_out" | indent
+assert "synthetic required input addition: guard exits non-zero (FAILs)" \
+  test "$required_addition_rc" -ne 0
+assert "synthetic required input addition: reports required_new_input" \
+  grep -q "required_new_input" <<<"$required_addition_out"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
