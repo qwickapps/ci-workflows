@@ -229,6 +229,25 @@ def matches_hostname_or_ghost(candidate: Optional[str], canonical: str) -> bool:
     return bool(m and m.group("base") == canonical)
 
 
+def caprover_app_name(service_or_app_name: str) -> str:
+    """Normalize a CapRover Swarm service name to its app name."""
+    return service_or_app_name.removeprefix("srv-captain--")
+
+
+def is_deploying_service(service: dict, app: str) -> bool:
+    """Return whether a live Swarm service is the app this workflow deploys.
+
+    CapRover names Docker services ``srv-captain--<app>`` while reusable
+    workflows may receive either that service name or the bare app name. Both
+    spellings identify the current deployment, but a similarly named service
+    without ``TS_HOSTNAME`` is not a CapRover self-claimant.
+    """
+    return (
+        bool(service.get("ts_hostname"))
+        and caprover_app_name(service.get("name", "")) == caprover_app_name(app)
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", required=True, type=Path)
@@ -270,7 +289,7 @@ def main() -> int:
             matches_hostname_or_ghost(s.get("ts_hostname"), args.hostname)
             or matches_hostname_or_ghost(s.get("name"), args.hostname)
         )
-        and s.get("name") != args.app
+        and not is_deploying_service(s, args.app)
     ]
     live_conflicts = [s for s in other_claimants if (s.get("replicas") or 0) > 0]
     if live_conflicts:

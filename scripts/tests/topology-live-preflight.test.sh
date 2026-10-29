@@ -66,6 +66,36 @@ JSON
       [[ "$cmd" == *"service ls"* ]] && echo -n ""
     fi
     ;;
+  bare_app_self)
+    if [[ "$host" == "oci-gateway" ]]; then
+      if [[ "$cmd" == *"service ls"* ]]; then
+        echo "srv-captain--qwickapps-mcp"
+      elif [[ "$cmd" == *"service inspect"* ]]; then
+        cat <<'JSON'
+[
+  {"Spec":{"Name":"srv-captain--qwickapps-mcp","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
+]
+JSON
+      fi
+    else
+      [[ "$cmd" == *"service ls"* ]] && echo -n ""
+    fi
+    ;;
+  prefixed_app_self)
+    if [[ "$host" == "oci-gateway" ]]; then
+      if [[ "$cmd" == *"service ls"* ]]; then
+        echo "qwickapps-mcp"
+      elif [[ "$cmd" == *"service inspect"* ]]; then
+        cat <<'JSON'
+[
+  {"Spec":{"Name":"qwickapps-mcp","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
+]
+JSON
+      fi
+    else
+      [[ "$cmd" == *"service ls"* ]] && echo -n ""
+    fi
+    ;;
   name_conflict)
     if [[ "$host" == "oci-gateway" ]]; then
       if [[ "$cmd" == *"service ls"* ]]; then
@@ -169,12 +199,36 @@ JSON
 PREFLIGHT=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
   --hostname qwickapps-mcp --app srv-captain--qwickapps-mcp --target-host oci-gateway
   --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
+PREFLIGHT_BARE_APP=(python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE"
+  --hostname qwickapps-mcp --app qwickapps-mcp --target-host oci-gateway
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy)
+
+echo "== bare workflow app matches the target CapRover Docker service => admit =="
+start_mock clean 18900
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=bare_app_self "${PREFLIGHT_BARE_APP[@]}" --tailscale-base-url "http://127.0.0.1:18900" --coolify-base-url "http://127.0.0.1:18900" \
+  && { echo "PASS bare app self-claim admitted"; pass=$((pass+1)); } \
+  || { echo "FAIL expected pass: bare app self-claim"; fail=$((fail+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== prefixed workflow app matches a bare live CapRover app => admit =="
+start_mock clean 18909
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=prefixed_app_self "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18909" --coolify-base-url "http://127.0.0.1:18909" \
+  && { echo "PASS prefixed app self-claim admitted"; pass=$((pass+1)); } \
+  || { echo "FAIL expected pass: prefixed app self-claim"; fail=$((fail+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== real 2026-10-08 finding: hand-made canary owns hostname live, registered app r=0 =="
 start_mock clean 18901
 PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18901" --coolify-base-url "http://127.0.0.1:18901" \
   && { echo "FAIL expected deny: real finding replay"; fail=$((fail+1)); } \
   || { echo "PASS denied real finding replay"; pass=$((pass+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== bare workflow app does not exempt a separate live claimant => deny =="
+start_mock clean 18908
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=conflict "${PREFLIGHT_BARE_APP[@]}" --tailscale-base-url "http://127.0.0.1:18908" --coolify-base-url "http://127.0.0.1:18908" \
+  && { echo "FAIL expected deny: bare app separate claimant"; fail=$((fail+1)); } \
+  || { echo "PASS denied bare app separate claimant"; pass=$((pass+1)); }
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "== clean live state: no other claimant, no ghost, no coolify conflict => admit =="
