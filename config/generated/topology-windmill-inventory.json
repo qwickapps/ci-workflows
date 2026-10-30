@@ -1,0 +1,464 @@
+{
+  "version": 1,
+  "services": [
+    {
+      "hostname": "qwickapps-mcp",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-mcp",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/mcp"
+    },
+    {
+      "hostname": "qwickapps-secrets",
+      "platform": "caprover",
+      "app": "qwickapps-secrets-canonical",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/secrets"
+    },
+    {
+      "hostname": "qwickapps-secrets-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-secrets-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/secrets"
+    },
+    {
+      "hostname": "qwickapps-secrets-uat",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-secrets-uat",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/secrets"
+    },
+    {
+      "hostname": "qwickapps-memories",
+      "platform": "caprover",
+      "app": "qwickapps-memories-canonical",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/memories"
+    },
+    {
+      "hostname": "qwickapps-memories-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-memories-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/memories"
+    },
+    {
+      "hostname": "qwickapps-memories-stable",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-memories-stable",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/memories"
+    },
+    {
+      "hostname": "qwickapps-documents",
+      "platform": "caprover",
+      "app": "qwickapps-documents-canonical",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/documents"
+    },
+    {
+      "hostname": "qwickapps-documents-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-documents-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/documents"
+    },
+    {
+      "hostname": "qwickapps-projects",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-projects",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/projects"
+    },
+    {
+      "hostname": "qwickapps-projects-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-projects-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/projects"
+    },
+    {
+      "hostname": "qwickapps-projects-uat",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-projects-uat",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/projects"
+    },
+    {
+      "hostname": "qwickapps-brain",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-brain-public",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/brain"
+    },
+    {
+      "hostname": "qwickapps-voice",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-voice",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/voice"
+    },
+    {
+      "hostname": "qwickapps-voice-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-voice-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/voice"
+    },
+    {
+      "hostname": "qwickapps-forge",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-forge",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/forge"
+    },
+    {
+      "hostname": "qwickapps-forge-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-forge-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/forge"
+    },
+    {
+      "hostname": "qwickapps-forge-uat",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-forge-uat",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/forge"
+    },
+    {
+      "hostname": "qwickapps-ide",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-ide",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/ide"
+    },
+    {
+      "hostname": "qwickapps-ide-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-ide-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/ide"
+    },
+    {
+      "hostname": "qwickapps-ide-uat",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-ide-uat",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/ide"
+    },
+    {
+      "hostname": "qwickapps-website",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-website",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "raajkumars/qwickapps"
+    },
+    {
+      "hostname": "qwickapps-website-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-website",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "raajkumars/qwickapps"
+    },
+    {
+      "hostname": "qwickapps-dashboard",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-dashboard",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/dashboard"
+    },
+    {
+      "hostname": "qwickapps-billing",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-billing",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "invoiceninja/invoiceninja"
+    },
+    {
+      "hostname": "qwickapps-llm",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-llm",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/lite-llm"
+    },
+    {
+      "hostname": "qwickapps-llm-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-llm-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/lite-llm"
+    },
+    {
+      "hostname": "qwickbackups",
+      "platform": "caprover",
+      "app": "srv-captain--qwickbackups",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/backup"
+    },
+    {
+      "hostname": "qwickbackups-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickbackups-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/backup"
+    },
+    {
+      "hostname": "qwickwos",
+      "platform": "caprover",
+      "app": "srv-captain--qwickwos",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/qwickwos"
+    },
+    {
+      "hostname": "qwickwos-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickwos",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/qwickwos"
+    },
+    {
+      "hostname": "qwickwos-bot",
+      "platform": "caprover",
+      "app": "srv-captain--qwickwos-bot",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/qwickwos-bot"
+    },
+    {
+      "hostname": "qwickwos-bot-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickwos-bot",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/qwickwos-bot"
+    },
+    {
+      "hostname": "qwickreach",
+      "platform": "caprover",
+      "app": "srv-captain--qwickreach",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/qwickreach"
+    },
+    {
+      "hostname": "qwickreach-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickreach-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/qwickreach"
+    },
+    {
+      "hostname": "qwickreach-web-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickreach-web-live",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/qwickreach"
+    },
+    {
+      "hostname": "qwickforge-website",
+      "platform": "caprover",
+      "app": "srv-captain--qwickforge-website",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "raajkumars/qwickapps"
+    },
+    {
+      "hostname": "qwickforge-website-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickforge-website",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "raajkumars/qwickapps"
+    },
+    {
+      "hostname": "qwickforge-ide",
+      "platform": "caprover",
+      "app": "srv-captain--qwickforge-ide",
+      "host": "oci-gateway",
+      "role": "load-balancer",
+      "state": {
+        "mode": "persistent",
+        "volume": "/var/lib/tailscale"
+      },
+      "repo": "qwickapps/qwickforge"
+    },
+    {
+      "hostname": "qwickforge-ide-live",
+      "platform": "caprover",
+      "app": "srv-captain--qwickforge-ide",
+      "host": "oci-main",
+      "role": "backend",
+      "state": {
+        "mode": "ephemeral"
+      },
+      "repo": "qwickapps/qwickforge"
+    }
+  ]
+}
