@@ -56,8 +56,12 @@ for job_name in ("deploy-caprover", "deploy-stable"):
     steps = workflow["jobs"][job_name]["steps"]
     names = [step.get("name") for step in steps]
     admission_index = names.index("Topology admission before mutation")
+    credentials_index = names.index("Resolve CapRover credentials")
+    ghcr_token_index = names.index("Select GHCR pull token for CapRover deploy (ci-workflows#204)")
     configure_index = names.index("Configure target slot (atomic env + config)")
     deploy_index = names.index("Deploy image to target slot")
+    assert admission_index < credentials_index, (job_name, admission_index, credentials_index)
+    assert admission_index < ghcr_token_index, (job_name, admission_index, ghcr_token_index)
     assert admission_index < configure_index, (job_name, admission_index, configure_index)
     assert admission_index < deploy_index, (job_name, admission_index, deploy_index)
     admission = steps[admission_index]["run"]

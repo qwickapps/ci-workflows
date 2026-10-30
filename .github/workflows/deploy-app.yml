@@ -879,101 +879,6 @@ jobs:
             config/service-identities.json
           sparse-checkout-cone-mode: false
 
-      - name: Resolve CapRover credentials
-        run: |
-          STAGE="${{ needs.resolve-stage.outputs.stage }}"
-
-          if [ -n "${{ inputs.caprover_url }}" ]; then
-            CP_URL="${{ inputs.caprover_url }}"
-          else
-            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
-          fi
-
-          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
-            CP_URL="https://${{ needs.resolve-stage.outputs.caprover_host_name }}"
-          fi
-
-          # Ensure scheme is present — caprover_host inputs are bare hostnames
-          case "$CP_URL" in
-            http://*|https://*) ;;
-            *) CP_URL="https://$CP_URL" ;;
-          esac
-
-          # Derive password from the CapRover URL (not stage), so callers that
-          # override caprover_host get the correct credential regardless of stage.
-          # dev.qwickforge.com → OCI_DEV; everything else → OCI_MAIN.
-          #
-          # ci-workflows#161: matched case-insensitively. DNS hostnames are
-          # case-insensitive (same principle as ci-workflows#160's
-          # normalize_host lowercasing), but this glob wasn't -- a caller
-          # passing a mixed-case caprover_url directly (bypassing
-          # caprover_host_name entirely, so lowercasing only that output
-          # would have missed this path) selected OCI_MAIN_CAPROVER_PASSWORD
-          # for a host that was actually dev, just spelled with capitals.
-          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
-          case "$CP_URL_LOWER" in
-            *dev.qwickforge.com*)
-              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-              ;;
-            *)
-              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
-              ;;
-          esac
-
-          if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
-            echo "ERROR: CapRover credentials missing for stage ${STAGE} url ${CP_URL}"
-            exit 1
-          fi
-
-          {
-            echo "CAPROVER_URL=$CP_URL"
-            echo "CAPROVER_PASSWORD=$CP_PASS"
-          } >> "$GITHUB_ENV"
-          echo "::add-mask::$CP_PASS"
-
-      - name: Select GHCR pull token for CapRover deploy (ci-workflows#204)
-        env:
-          GH_TOKEN_LEGACY_PAT: ${{ secrets.GHCR_PULL_TOKEN }}
-          GH_TOKEN_EPHEMERAL: ${{ github.token }}
-        run: |
-          # ci-workflows#204: deploy-from-ghcr.sh (the CALLER's own script,
-          # not ci-workflows') takes whatever token this step exports as
-          # GHCR_PULL_TOKEN and OVERWRITES CapRover's SHARED ghcr.io
-          # registry entry with it -- every app on that CapRover cluster
-          # pulls through that one registry credential afterward. Unlike
-          # the runner-side jobs above (build/verify-provenance/retag),
-          # here the long-lived, org-wide PAT is preferred WHEN it actually
-          # works: it stays valid on CapRover long after this job ends,
-          # whereas github.token is only valid for this job's own
-          # lifetime, so writing github.token into the shared registry slot
-          # would just relocate the staleness problem, not fix it.
-          # github.token is only the fallback, and a token that failed
-          # validation is never exported -- so a stale PAT can no longer
-          # poison every app on the shared CapRover the way it did before
-          # #204 (live example: qwickapps/secrets run 36272536825).
-          set -euo pipefail
-          # shellcheck source=/dev/null
-          source .ci-workflows/scripts/lib/ghcr-token-select.sh
-          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
-          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
-          REF_OWNER="${PARSED_REF[0]}"
-          PACKAGE="${PARSED_REF[1]}"
-          TAG="${PARSED_REF[2]}"
-          SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
-              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
-              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
-            exit 1
-          fi
-          echo "GHCR pull token source for CapRover: $SOURCE"
-          case "$SOURCE" in
-            "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
-            "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
-          esac
-          echo "GHCR_PULL_TOKEN=$CHOSEN_TOKEN" >> "$GITHUB_ENV"
-          echo "::add-mask::$CHOSEN_TOKEN"
-
       - name: Make scripts executable
         run: |
           chmod +x .github/scripts/*.sh
@@ -1044,6 +949,66 @@ jobs:
             ARGS+=(--production --source-sha "${GITHUB_SHA}" --source-merged "$SOURCE_MERGED")
           fi
           python3 .ci-workflows/scripts/topology-admission.py "${ARGS[@]}"
+
+      # Resolve and validate the deployment tuple before loading any CapRover
+      # or shared GHCR credential into the job environment.
+      - name: Resolve CapRover credentials
+        run: |
+          STAGE="${{ needs.resolve-stage.outputs.stage }}"
+          if [ -n "${{ inputs.caprover_url }}" ]; then
+            CP_URL="${{ inputs.caprover_url }}"
+          else
+            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
+          fi
+          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
+            CP_URL="https://${{ needs.resolve-stage.outputs.caprover_host_name }}"
+          fi
+          case "$CP_URL" in
+            http://*|https://*) ;;
+            *) CP_URL="https://$CP_URL" ;;
+          esac
+          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
+          case "$CP_URL_LOWER" in
+            *dev.qwickforge.com*) CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}" ;;
+            *) CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}" ;;
+          esac
+          if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
+            echo "ERROR: CapRover credentials missing for stage ${STAGE} url ${CP_URL}"
+            exit 1
+          fi
+          {
+            echo "CAPROVER_URL=$CP_URL"
+            echo "CAPROVER_PASSWORD=[redacted: assigned secret]"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::$CP_PASS"
+
+      - name: Select GHCR pull token for CapRover deploy (ci-workflows#204)
+        env:
+          GH_TOKEN_LEGACY_PAT: ${{ secrets.GHCR_PULL_TOKEN }}
+          GH_TOKEN_EPHEMERAL: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
+          SOURCE=""
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
+              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            exit 1
+          fi
+          echo "GHCR pull token source for CapRover: $SOURCE"
+          case "$SOURCE" in
+            "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
+            "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
+          esac
+          echo "GHCR_PULL_TOKEN=[redacted: assigned secret]" >> "$GITHUB_ENV"
+          echo "::add-mask::$CHOSEN_TOKEN"
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
         # aos#193 review finding #2: gated behind require_live_approval_check
@@ -1906,83 +1871,6 @@ jobs:
             --aos-environment-root "$AOS_ENV_ROOT" \
             --aos-manifest "$AOS_MANIFEST_ABS_PATH"
 
-      - name: Resolve CapRover credentials
-        run: |
-          if [ -n "${{ inputs.caprover_url }}" ]; then
-            CP_URL="${{ inputs.caprover_url }}"
-          else
-            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
-          fi
-
-          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
-            echo "ERROR: caprover_host_name is required for stage stable"
-            exit 1
-          fi
-
-          # Ensure scheme is present -- caprover_host inputs are bare hostnames.
-          case "$CP_URL" in
-            http://*|https://*) ;;
-            *) CP_URL="https://$CP_URL" ;;
-          esac
-
-          # Same dev/main credential selection deploy-caprover uses (ci-workflows#161:
-          # matched case-insensitively).
-          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
-          case "$CP_URL_LOWER" in
-            *dev.qwickforge.com*)
-              CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}"
-              ;;
-            *)
-              CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}"
-              ;;
-          esac
-
-          if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
-            echo "ERROR: CapRover credentials missing for stable deploy url ${CP_URL}"
-            exit 1
-          fi
-
-          {
-            echo "CAPROVER_URL=$CP_URL"
-            echo "CAPROVER_PASSWORD=$CP_PASS"
-          } >> "$GITHUB_ENV"
-          echo "::add-mask::$CP_PASS"
-
-      - name: Select GHCR pull token for CapRover deploy (ci-workflows#204)
-        env:
-          GH_TOKEN_LEGACY_PAT: ${{ secrets.GHCR_PULL_TOKEN }}
-          GH_TOKEN_EPHEMERAL: ${{ github.token }}
-        run: |
-          # ci-workflows#204: same reasoning as deploy-caprover's identical
-          # step -- deploy-from-ghcr.sh overwrites CapRover's SHARED
-          # ghcr.io registry entry with whatever this exports, so the
-          # long-lived, org-wide PAT is preferred WHEN it actually works
-          # (it outlives this job; github.token doesn't). github.token is
-          # only the fallback, and a token that failed validation is never
-          # exported.
-          set -euo pipefail
-          # shellcheck source=/dev/null
-          source .ci-workflows/scripts/lib/ghcr-token-select.sh
-          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
-          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
-          REF_OWNER="${PARSED_REF[0]}"
-          PACKAGE="${PARSED_REF[1]}"
-          TAG="${PARSED_REF[2]}"
-          SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
-              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
-              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
-            exit 1
-          fi
-          echo "GHCR pull token source for CapRover: $SOURCE"
-          case "$SOURCE" in
-            "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
-            "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
-          esac
-          echo "GHCR_PULL_TOKEN=$CHOSEN_TOKEN" >> "$GITHUB_ENV"
-          echo "::add-mask::$CHOSEN_TOKEN"
-
       - name: Make scripts executable
         run: |
           chmod +x .github/scripts/*.sh
@@ -2061,6 +1949,65 @@ jobs:
             --production \
             --source-sha "${GITHUB_SHA}" \
             --source-merged "$SOURCE_MERGED"
+
+      # Admission must finish before credentials are made available to the job.
+      - name: Resolve CapRover credentials
+        run: |
+          if [ -n "${{ inputs.caprover_url }}" ]; then
+            CP_URL="${{ inputs.caprover_url }}"
+          else
+            CP_URL="${{ needs.resolve-stage.outputs.caprover_host_name }}"
+          fi
+          if [ -z "$CP_URL" ] || [ "$CP_URL" = "null" ]; then
+            echo "ERROR: caprover_host_name is required for stage stable"
+            exit 1
+          fi
+          case "$CP_URL" in
+            http://*|https://*) ;;
+            *) CP_URL="https://$CP_URL" ;;
+          esac
+          CP_URL_LOWER="$(printf '%s' "$CP_URL" | tr '[:upper:]' '[:lower:]')"
+          case "$CP_URL_LOWER" in
+            *dev.qwickforge.com*) CP_PASS="${{ secrets.OCI_DEV_CAPROVER_PASSWORD }}" ;;
+            *) CP_PASS="${{ secrets.OCI_MAIN_CAPROVER_PASSWORD }}" ;;
+          esac
+          if [ -z "$CP_PASS" ] || [ -z "$CP_URL" ]; then
+            echo "ERROR: CapRover credentials missing for stable deploy url ${CP_URL}"
+            exit 1
+          fi
+          {
+            echo "CAPROVER_URL=$CP_URL"
+            echo "CAPROVER_PASSWORD=[redacted: assigned secret]"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::$CP_PASS"
+
+      - name: Select GHCR pull token for CapRover deploy (ci-workflows#204)
+        env:
+          GH_TOKEN_LEGACY_PAT: ${{ secrets.GHCR_PULL_TOKEN }}
+          GH_TOKEN_EPHEMERAL: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source .ci-workflows/scripts/lib/ghcr-token-select.sh
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          mapfile -t PARSED_REF < <(ghcr_parse_image_ref "$IMAGE_REF")
+          REF_OWNER="${PARSED_REF[0]}"
+          PACKAGE="${PARSED_REF[1]}"
+          TAG="${PARSED_REF[2]}"
+          SOURCE=""
+          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
+              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+            exit 1
+          fi
+          echo "GHCR pull token source for CapRover: $SOURCE"
+          case "$SOURCE" in
+            "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
+            "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
+          esac
+          echo "GHCR_PULL_TOKEN=[redacted: assigned secret]" >> "$GITHUB_ENV"
+          echo "::add-mask::$CHOSEN_TOKEN"
 
       - name: Configure target slot (atomic env + config)
         run: |
