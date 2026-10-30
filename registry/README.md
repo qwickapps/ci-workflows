@@ -6,25 +6,26 @@ not a requirement to add a hostname input to registry operations.
 
 ## Preflight Hostname Usage: None Detected
 
-Evidence collected: `2026-10-30T12:14:27Z` (UTC)
+Analysis snapshot: `2026-10-29T04:01:38+00:00` (UTC)
 
-Reviewed revision: `6e01207` (`fix(ci): restore approved macmini DoD runner`)
-
-The review found no production workflow or script references matching either
-`preflight.*hostname` / `hostname.*preflight` or `registry.*hostname` /
-`hostname.*registry`. Test fixtures and Markdown documentation were excluded
-from this targeted check.
+The upstream Coolify inventory analysis is recorded in
+[`analysis.md`](analysis.md). It inspected 32 applications, 2 databases, and
+5 services. The scanner found 10 matching `TS_HOSTNAME` environment entries
+across 5 application resources. Those entries represent five distinct,
+non-canonical scanner matches; they do not claim a canonical registry
+hostname.
 
 Result: `NO_MATCH`.
 
-This result is deliberately scoped. The repository does use `TS_HOSTNAME` for
-Tailscale build-slot configuration and validation elsewhere; those uses are
-not registry deploy-preflight hostname usage. Consumers should not infer from
-this record that `TS_HOSTNAME` is unused globally.
+The snapshot found zero canonical-hostname conflicts and zero QwickWay-image
+matches across the inspected resources. This result is deliberately scoped to
+the recorded Coolify inventory snapshot; it does not assert that
+`TS_HOSTNAME` is unused elsewhere in `ci-workflows` or in runtime
+configuration.
 
 ## Operational implication
 
-Registry preflight behavior has no hostname-specific input or validation to
-configure based on the reviewed tree. A future workflow or script that adds
-such behavior should update this record and include the corresponding
-regression coverage.
+Registry preflight behavior has no detected canonical-hostname claimant or
+QwickWay image reference to configure from this snapshot. A future inventory
+scan that finds either condition should update this record and add the
+corresponding preflight coverage.
