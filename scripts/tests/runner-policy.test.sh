@@ -107,6 +107,24 @@ for wf in shell-lint.yml validation-evidence-gate.yml external-db-gate.yml secre
     grep -Eq 'runs-on:.*choco' "$ROOT_DIR/.github/workflows/$wf"
 done
 
+echo "== reusable workflow policy context =="
+# workflow_call-only jobs execute in the caller repository. Their macmini-fast
+# allowance belongs to the private/default policy, not the public source repo.
+mkdir -p "$TMPDIR/reusable-security"
+for wf in external-db-gate.yml secret-scan.yml security-scan.yml main-push-guard-reusable.yml main-push-guard.yml; do
+  cp "$ROOT_DIR/.github/workflows/$wf" "$TMPDIR/reusable-security/$wf"
+done
+expect_pass "reusable security workflows are approved for private callers" \
+  python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/private-fixture --workflow-dir "$TMPDIR/reusable-security"
+expect_fail "public security policy does not approve macmini-fast" \
+  python3 - "$POLICY" <<'PY'
+import json, sys
+policy = json.load(open(sys.argv[1]))
+labels = ["self-hosted", "macmini", "macmini-fast"]
+allowed = policy["repositories"]["qwickapps/ci-workflows"]["job_classes"]["security"]["allowed"]
+raise SystemExit(0 if any(sorted(entry["labels"]) == sorted(labels) for entry in allowed) else 1)
+PY
+
 echo "== repository workflow policy =="
 expect_pass "all ci-workflows jobs use owner-approved labels" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$ROOT_DIR/.github/workflows"

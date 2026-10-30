@@ -22,6 +22,12 @@ def repository_policy(policy: dict[str, Any], repo: str) -> dict[str, Any]:
     return policy["repositories"].get(repo, policy["repositories"]["*"])
 
 
+def reusable_only(document: dict[str, Any]) -> bool:
+    """Whether a workflow executes only in the caller's repository."""
+    triggers = document.get(True, document.get("on", {}))  # type: ignore[arg-type]
+    return isinstance(triggers, dict) and set(triggers) == {"workflow_call"}
+
+
 def classify(path: Path, job_id: str) -> str:
     text = f"{path.name} {job_id}".lower()
     if path.name.endswith(("-tests.yml", "-tests.yaml")):
@@ -75,7 +81,6 @@ def entry_matches_provenance(entry: dict[str, Any], labels: list[str], name: str
 
 
 def validate_workflows(policy: dict[str, Any], repo: str, workflow_dir: Path) -> list[str]:
-    repo_policy = repository_policy(policy, repo)
     errors: list[str] = []
     paths = sorted([*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")])
     for path in paths:
@@ -84,6 +89,10 @@ def validate_workflows(policy: dict[str, Any], repo: str, workflow_dir: Path) ->
         except yaml.YAMLError as exc:
             errors.append(f"{path}: YAML parse error: {exc}")
             continue
+        # workflow_call-only jobs are scheduled in their caller's repository.
+        # Do not expand the public ci-workflows policy for caller execution.
+        effective_repo = "*" if reusable_only(document) else repo
+        repo_policy = repository_policy(policy, effective_repo)
         jobs = document.get("jobs", {})
         if not isinstance(jobs, dict):
             errors.append(f"{path}: jobs must be a mapping")
@@ -97,7 +106,7 @@ def validate_workflows(policy: dict[str, Any], repo: str, workflow_dir: Path) ->
                 errors.append(f"{path.name}:{job_id}: unresolved runs-on expression is prohibited")
             elif not label_set_allowed(repo_policy, job_class, labels):
                 errors.append(
-                    f"{path.name}:{job_id}: labels {labels!r} are not approved for {repo} class {job_class}"
+                    f"{path.name}:{job_id}: labels {labels!r} are not approved for {effective_repo} class {job_class}"
                 )
     return errors
 
