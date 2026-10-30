@@ -7,12 +7,13 @@
       "workload_owner": "mcp-platform",
       "repo": "qwickapps/mcp",
       "platform": "caprover",
-      "app": "qwickapps-mcp-gateway-canary-20261003",
+      "app": "qwickapps-mcp",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
       "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
-      "images": ["ghcr.io/qwickapps/qwickway"]
+      "images": ["ghcr.io/qwickapps/qwickway"],
+      "notes": "Live reconciliation 2026-10-30: qwickapps-mcp is 1/1 (CapRover instanceCount=1); qwickapps-mcp-gateway-canary-20261003 is 0/0 (instanceCount=0) and is not the canonical owner."
     },
     {
       "canonical_hostname": "qwickapps-secrets",
