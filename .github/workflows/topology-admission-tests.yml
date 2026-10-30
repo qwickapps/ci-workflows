@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'config/service-identities.json'
+      - 'config/generated/topology-windmill-inventory.json'
       - 'scripts/topology-admission.py'
       - 'scripts/tests/topology-admission.test.sh'
       - '.github/workflows/deploy-app.yml'
@@ -11,6 +12,7 @@ on:
     branches: [main]
     paths:
       - 'config/service-identities.json'
+      - 'config/generated/topology-windmill-inventory.json'
       - 'scripts/topology-admission.py'
       - 'scripts/tests/topology-admission.test.sh'
       - '.github/workflows/deploy-app.yml'
