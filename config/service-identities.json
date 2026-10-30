@@ -7,7 +7,7 @@
       "workload_owner": "mcp-platform",
       "repo": "qwickapps/mcp",
       "platform": "caprover",
-      "app": "srv-captain--qwickapps-mcp",
+      "app": "qwickapps-mcp-gateway-canary-20261003",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
