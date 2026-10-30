@@ -97,6 +97,21 @@ def caprover_host_for_endpoint(raw_url: str) -> str:
     return hosts[hostname]
 
 
+def deployment_app(entry: dict) -> str:
+    """Return the logical CapRover app name used by deploy-app.yml.
+
+    The registry's ``app`` field records the observed Docker service identity.
+    CapRover prefixes managed service names with ``srv-captain--``, while the
+    configure/deploy scripts and resolve-stage use the logical app name.  Keep
+    that implementation detail at the registry boundary instead of requiring
+    every workflow caller to know Docker's naming convention.
+    """
+    app = entry["app"]
+    if not isinstance(app, str) or not app:
+        fail("registry app must be a non-empty string")
+    return app.removeprefix("srv-captain--")
+
+
 def render(entries: list[dict], output: Path) -> None:
     inventory = {"version": 1, "services": []}
     for entry in entries:
@@ -145,10 +160,11 @@ def main() -> None:
     if len(matches) != 1:
         fail(f"canonical hostname {hostname} has {len(matches)} registry owners")
     entry = matches[0]
-    if (host, args.platform, args.app) != (entry["required_host"], entry["platform"], entry["app"]):
+    expected_app = deployment_app(entry)
+    if (host, args.platform, args.app) != (entry["required_host"], entry["platform"], expected_app):
         fail("tuple mismatch for %s: requested host=%s platform=%s app=%s; registry requires host=%s platform=%s app=%s" % (
             hostname, host, args.platform, args.app,
-            entry["required_host"], entry["platform"], entry["app"]))
+            entry["required_host"], entry["platform"], expected_app))
     if "qwickway" in args.image_ref.lower() and host != "oci-gateway":
         fail("QwickWay/LB image is permitted only on oci-gateway")
     if args.production:
