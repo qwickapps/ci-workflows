@@ -27,7 +27,8 @@ permissions:
 jobs:
   scan:
     name: Scan changed files for forbidden DB references
-    runs-on: [self-hosted, choco]
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

@@ -100,7 +100,7 @@ expect_pass "public fixture with an approved GitHub-hosted label passes" \
 echo "== caller-facing reusable workflows use org runners =="
 # Reusable workflows execute in the caller's repository. choco runners are
 # repo-scoped, so a choco label there queues forever (protocols#1769).
-for wf in shell-lint.yml validation-evidence-gate.yml; do
+for wf in shell-lint.yml validation-evidence-gate.yml external-db-gate.yml secret-scan.yml security-scan.yml main-push-guard-reusable.yml main-push-guard.yml; do
   expect_pass "$wf requests the org macmini-fast runner" \
     grep -Eq '^    runs-on: \[self-hosted, macmini, macmini-fast\]$' "$ROOT_DIR/.github/workflows/$wf"
   expect_fail "$wf does not request a repo-scoped choco runner" \

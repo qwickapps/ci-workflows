@@ -33,7 +33,8 @@ permissions:
 jobs:
   dependency-audit:
     name: Dependency Audit (govulncheck)
-    runs-on: [self-hosted, choco]
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     outputs:
       has_findings: ${{ steps.audit.outputs.has_findings }}
       summary: ${{ steps.audit.outputs.summary }}
@@ -90,7 +91,8 @@ jobs:
 
   sast:
     name: SAST (Semgrep)
-    runs-on: [self-hosted, choco]
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     outputs:
       has_findings: ${{ steps.scan.outputs.has_findings }}
       summary: ${{ steps.scan.outputs.summary }}
@@ -164,7 +166,8 @@ jobs:
 
   create-security-issue:
     name: Create Security Issue (72h SLA)
-    runs-on: [self-hosted, choco]
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     needs: [dependency-audit, sast]
     if: |
       failure() &&
