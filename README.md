@@ -390,3 +390,63 @@ jobs:
 `promote-to-stable.yml` accepts the same `app_name`, `image_ref`,
 `environment`, `health_path`, `image_name`, and `caprover_url` inputs, then
 re-tags the promoted image as stable and deploys it to the stable slot.
+
+---
+
+## Topology registry: CapRover live preflight + Coolify (momo) coverage (t_fbb1ae02)
+
+`config/service-identities.json` is the single versioned registry of
+canonical hostnames (see `scripts/topology-admission.py`). Two independent
+layers consume it in `deploy-app.yml`'s `deploy-caprover` job:
+
+1. **Topology admission before mutation** -- static input-tuple check
+   (`scripts/topology-admission.py`): denies a declared host/app/hostname
+   combination that doesn't match the registry, before any CapRover call.
+2. **Live-state topology preflight** (`scripts/topology-live-preflight.py`,
+   runs immediately after #1, still before any mutation) -- reads REAL
+   state: `docker service ls`/`inspect` over SSH on every CapRover host this
+   runner has credentials for, Tailscale device state via the tailnet API,
+   and Coolify application state via the Coolify API on momo. Fail-closed:
+   an unreachable source denies the deploy, it never skips the check.
+3. **Post-deploy topology conflict check + rollback**
+   (`scripts/topology-rollback.py`), right after the new slot's health
+   check passes: re-reads the same live state; if a conflict now exists
+   that didn't exist at preflight time (a race against a concurrent
+   deploy), it scales this deploy's new claimant to 0 and restores the
+   previous owner's recorded replica count/image. It never renames or
+   edits the registry's own canonical app identity.
+
+### CapRover hosts covered
+
+Both new steps pass every registered CapRover host explicitly:
+`oci-gateway`, `oci-main`, and `server1-qwickforge`. This is intentional:
+a claimant on a different host is the incident shape this guard prevents.
+If any of those SSH reads is unreachable or cannot return Docker service
+state, the deploy is denied before mutation; coverage is never silently
+reduced to make a deploy pass.
+
+### Coolify (momo) coverage
+
+Coolify is queried as a required live claimant source by both CapRover-side
+checks above: `--coolify-token` makes `topology-live-preflight.py` read every
+momo application and its `TS_HOSTNAME` environment setting. Any Coolify
+claimant of a registry hostname denies the CapRover deploy before mutation.
+
+Read-only API evidence, rechecked on **2026-10-17** with the scoped momo
+Coolify deploy token:
+
+- all 32 current momo applications returned no `TS_HOSTNAME` environment
+  value;
+- their application-detail records had no `docker_registry_image_name`
+  containing `qwickway` or `qwickapps-mcp`; and
+- an organization-wide GitHub code search found no controlled Coolify deploy
+  workflow/API caller other than the retired generic Coolify compatibility
+  paths in this repository.
+
+Therefore no current Coolify workload holds or is configured to claim the
+only registered canonical hostname, `qwickapps-mcp`; a new Coolify deployment
+cannot silently collide with it from the CapRover direction because the
+CapRover preflight queries Coolify live state. Before any future Coolify app
+is configured with a registry canonical hostname or a QwickWay image, its
+deployment entry point must gain the same fail-closed preflight before that
+configuration is applied.
