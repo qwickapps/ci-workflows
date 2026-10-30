@@ -100,20 +100,38 @@ result = {
     ),
 }
 
-# Confirm no OTHER job in the file references Coolify either -- the
-# orphaned path must be fully removed, not just unreferenced by
-# deploy-stable while dead code lingers elsewhere.
+# mcp#392's invariant is about deployment transport, not read-only topology
+# admission. deploy-stable must never deploy through Coolify again. The shared
+# deploy-caprover topology preflight is the sole narrow exception: it reads
+# Coolify's API only to deny a hostname collision before/after a CapRover
+# mutation; it never calls a Coolify deployment script or URL secret. Keep the
+# exception structural so a future Coolify deploy path cannot hide behind it.
 other_jobs_coolify = []
+invalid_topology_coolify_steps = []
 for job_id, j in doc.get('jobs', {}).items():
     if job_id == 'deploy-stable' or not isinstance(j, dict):
         continue
-    texts = []
     for s in j.get('steps', []) or []:
-        if isinstance(s, dict):
-            texts.append(' '.join(filter(None, [s.get('name',''), s.get('run','') or ''])))
-    if 'coolify' in ' '.join(texts).lower():
-        other_jobs_coolify.append(job_id)
-result['other_jobs_coolify'] = other_jobs_coolify
+        if not isinstance(s, dict):
+            continue
+        text = ' '.join(filter(None, [s.get('name',''), s.get('run','') or '']))
+        lower = text.lower()
+        if 'coolify' not in lower:
+            continue
+        if job_id != 'deploy-caprover':
+            other_jobs_coolify.append(job_id)
+            continue
+        allowed_names = {
+            'live-state topology preflight (caprover+tailscale+coolify)',
+            'post-deploy topology conflict check + rollback',
+        }
+        if (s.get('name', '').lower() not in allowed_names
+                or 'topology-live-preflight.py' not in (s.get('run', '') or '')
+                or 'deploy-to-coolify.sh' in lower
+                or 'secrets.coolify_url' in lower):
+            invalid_topology_coolify_steps.append(s.get('name', '<unnamed>'))
+result['other_jobs_coolify'] = sorted(set(other_jobs_coolify))
+result['invalid_topology_coolify_steps'] = invalid_topology_coolify_steps
 
 print(json.dumps(result))
 ")"
@@ -168,10 +186,16 @@ else
 fi
 
 OTHER_COOLIFY_JOBS="$(get other_jobs_coolify)"
-assert "no other job in deploy-app.yml still mentions coolify" \
+INVALID_TOPOLOGY_COOLIFY_STEPS="$(get invalid_topology_coolify_steps)"
+assert "no non-topology deploy-app job mentions coolify" \
   test "$OTHER_COOLIFY_JOBS" = "[]"
 if [ "$OTHER_COOLIFY_JOBS" != "[]" ]; then
-  echo "    jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
+  echo "    non-topology jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
+fi
+assert "deploy-caprover's only Coolify references are the two read-only topology-live-preflight guards" \
+  test "$INVALID_TOPOLOGY_COOLIFY_STEPS" = "[]"
+if [ "$INVALID_TOPOLOGY_COOLIFY_STEPS" != "[]" ]; then
+  echo "    invalid Coolify-bearing deploy-caprover steps: $INVALID_TOPOLOGY_COOLIFY_STEPS" >&2
 fi
 
 echo ""
