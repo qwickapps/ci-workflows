@@ -9,6 +9,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("ghcr_prune", ROOT / "scripts/ghcr-prune.py")
@@ -194,6 +195,25 @@ class RateLimitGateTests(unittest.TestCase):
 
         result = ghcr_prune.check_rate_limit(ErrorApi(), min_remaining=200)
         self.assertFalse(result.ok)
+
+
+class GitHubApiPathTests(unittest.TestCase):
+    def test_org_package_listing_uses_a_host_pinned_relative_api_path(self):
+        calls = []
+
+        def fake_run(args, capture_output, text):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+
+        with mock.patch.object(ghcr_prune.subprocess, "run", side_effect=fake_run):
+            result = ghcr_prune.list_org_packages(ghcr_prune.GitHub(), ORG)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(calls, [[
+            "gh", "api", "--hostname", "github.com",
+            "orgs/qwickapps/packages?package_type=container&per_page=100",
+            "--paginate",
+        ]])
 
 
 class RestoreLogTests(unittest.TestCase):
