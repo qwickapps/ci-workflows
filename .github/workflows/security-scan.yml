@@ -9,10 +9,10 @@ on:
         type: string
         default: "go.mod"
       runs_on:
-        description: "Runner label(s) as a JSON array string"
+        description: "Deprecated compatibility input. Runner selection is fixed to the owner-approved org macmini-fast label set."
         required: false
         type: string
-        default: '["self-hosted", "linux"]'
+        default: '["self-hosted", "macmini", "macmini-fast"]'
       semgrep_configs:
         description: "Newline-delimited Semgrep config list"
         required: false
@@ -33,7 +33,8 @@ permissions:
 jobs:
   dependency-audit:
     name: Dependency Audit (govulncheck)
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     outputs:
       has_findings: ${{ steps.audit.outputs.has_findings }}
       summary: ${{ steps.audit.outputs.summary }}
@@ -90,7 +91,8 @@ jobs:
 
   sast:
     name: SAST (Semgrep)
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     outputs:
       has_findings: ${{ steps.scan.outputs.has_findings }}
       summary: ${{ steps.scan.outputs.summary }}
@@ -164,7 +166,8 @@ jobs:
 
   create-security-issue:
     name: Create Security Issue (72h SLA)
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    # Reusable: runs in the CALLER's repo, so it must use an org runner. choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
     needs: [dependency-audit, sast]
     if: |
       failure() &&
