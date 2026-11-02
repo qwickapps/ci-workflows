@@ -24,7 +24,7 @@ jobs:
     env:
       # Org-wide operations require the contents-write token sourced from
       # QwickSecrets and installed as this repository Actions secret.
-      GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS }}
+      GH_TOKEN: ${{ secrets.WEEKLY_BRANCH_SWEEP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - name: Classify branches (dry-run by default)
