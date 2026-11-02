@@ -1,0 +1,34 @@
+name: Closed-Unmerged PR Branch Cleanup Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/branch-hygiene-allowlist.json'
+      - '.github/workflows/org-branch-hygiene.yml'
+      - '.github/workflows/org-branch-hygiene-tests.yml'
+      - 'scripts/org-branch-hygiene.py'
+      - 'scripts/org-branch-hygiene-summary.py'
+      - 'scripts/tests/org-branch-hygiene.test.py'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/branch-hygiene-allowlist.json'
+      - '.github/workflows/org-branch-hygiene.yml'
+      - '.github/workflows/org-branch-hygiene-tests.yml'
+      - 'scripts/org-branch-hygiene.py'
+      - 'scripts/org-branch-hygiene-summary.py'
+      - 'scripts/tests/org-branch-hygiene.test.py'
+
+permissions:
+  contents: read
+
+jobs:
+  branch-cleanup-tests:
+    name: merged PR branch cleanup safety tests
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 scripts/tests/org-branch-hygiene.test.py
