@@ -50,7 +50,7 @@ on:
         type: string
         default: '20'
       runs_on:
-        description: 'Deprecated compatibility input. Multi-arch work is fixed to the owner-approved macmini label set.'
+        description: 'Runner label(s) as a JSON array string'
         required: false
         type: string
         default: '["self-hosted", "macmini"]'
@@ -84,7 +84,7 @@ jobs:
   # ---------------------------------------------------------------------------
   validate-platforms:
     name: Validate platforms input
-    runs-on: [self-hosted, macmini]
+    runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - name: Reject empty/malformed platforms
         env:
@@ -107,7 +107,7 @@ jobs:
   blue-green-deploy-contract:
     name: Blue-Green Deploy Contract
     if: inputs.enforce_blue_green_deploy_contract
-    runs-on: [self-hosted, macmini]
+    runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - name: Checkout calling repo
         uses: actions/checkout@v4
@@ -157,7 +157,7 @@ jobs:
   test:
     name: Test
     needs: [validate-platforms]
-    runs-on: [self-hosted, macmini]
+    runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - name: Validate package_manager input
         # Fleet follow-up on ci-workflows#181: every install/build/test step
@@ -262,7 +262,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-push:
     name: Build and Push Multi-Arch Docker Image
-    runs-on: [self-hosted, macmini]
+    runs-on: ${{ fromJson(inputs.runs_on) }}
     needs: [validate-platforms, test]
     permissions:
       contents: read
@@ -333,11 +333,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
-          # t_a4d33238: run-scoped name under the "builder-" prefix (matches
-          # qwick-guard sop-074's allow-regex and the fleet reaper's filter)
-          # plus cleanup: true.
-          name: builder-${{ github.run_id }}
-          cleanup: true
 
       - name: Authenticate to GHCR (direct config write — no docker login/keychain)
         # See main-push-guard.yml's build-push job for why: docker/login-action
@@ -369,8 +364,3 @@ jobs:
             -t "$IMAGE_REF" \
             -f "$DOCKERFILE_PATH" \
             .
-
-      # t_a4d33238: second-chance teardown (see deploy-app.yml for rationale).
-      - name: Tear down buildx builder
-        if: always()
-        run: docker buildx rm "builder-${{ github.run_id }}" || true
