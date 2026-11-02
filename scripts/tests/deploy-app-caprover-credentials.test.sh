@@ -177,5 +177,24 @@ assert "route step's ghcr_probe_auth_only and --registry-user use the SAME shell
   ' _ "$ROUTE_STEP"
 
 echo ""
+echo "== route_gateway: non-routing live deployments retain health but skip gateway mutation =="
+ROUTE_GATEWAY_CONTRACT="$(python3 -c "
+import yaml
+with open('$WORKFLOW') as f:
+    doc = yaml.safe_load(f)
+inputs = doc[True]['workflow_call']['inputs']
+if inputs.get('route_gateway', {}).get('type') != 'boolean' or inputs['route_gateway'].get('default') is not True:
+    raise SystemExit(1)
+steps = doc['jobs']['deploy-caprover']['steps']
+for name in ['Route qwickway to ordered live/stable for live stage', 'Verify LB target resolves to the node just deployed (infra#101 guard)']:
+    step = next((s for s in steps if s.get('name') == name), None)
+    if not step or step.get('if') != \"needs.resolve-stage.outputs.stage == 'live' && inputs.route_gateway == true\":
+        raise SystemExit(1)
+print('ok')
+")"
+assert "route_gateway is boolean default true and gates only live qwickway mutation plus post-route verification" \
+  test "$ROUTE_GATEWAY_CONTRACT" = "ok"
+
+echo ""
 echo "Tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

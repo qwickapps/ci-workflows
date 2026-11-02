@@ -662,6 +662,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Make scripts executable
@@ -832,6 +833,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
@@ -995,6 +997,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Resolve CapRover credentials
@@ -1145,6 +1148,135 @@ jobs:
           fi
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
+      - name: Topology admission before mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+          TS_HOSTNAME="$(grep -E '^[[:space:]]*TS_HOSTNAME=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          if [ -z "$TS_HOSTNAME" ] && [[ "${IMAGE_REF,,}" != *qwickway* ]]; then
+            echo "No Tailscale/QwickWay configuration in this deploy; topology admission not applicable."
+            exit 0
+          fi
+          [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
+          case "${CAPROVER_URL,,}" in
+            *route.qwickforge.com*|*oci-gateway*) HOST_KEY=oci"-"gateway ;;
+            *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
+            *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; topology admission fails closed"; exit 1 ;;
+          esac
+          SOURCE_MERGED=true
+          if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
+            DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}" || SOURCE_MERGED=false
+          fi
+          ARGS=(--registry .ci-workflows/config/service-identities.json --host "$HOST_KEY" --platform caprover --app "${{ needs.resolve-stage.outputs.target_app }}" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
+          if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
+            ARGS+=(--production --source-sha "${GITHUB_SHA}" --source-merged "$SOURCE_MERGED")
+          fi
+          python3 .ci-workflows/scripts/topology-admission.py "${ARGS[@]}"
+
+      - name: Live-state topology preflight (CapRover+Tailscale+Coolify)
+        # t_fbb1ae02 decision #1: topology-admission.py (above) only checks
+        # the declared input tuple against the static registry. This step
+        # reads REAL live state -- docker swarm services on every reachable
+        # CapRover host, Tailscale device state, and Coolify app state --
+        # and denies if any OTHER claimant already holds this hostname.
+        # Fail-closed: an unreachable live source is a deny, never a skip
+        # (see scripts/topology-live-preflight.py).
+        id: topology-live-preflight
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+          # The live momo API token is the scoped deploy token. Do not use
+          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+          TS_HOSTNAME="$(grep -E '^[[:space:]]*TS_HOSTNAME=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          if [ -z "$TS_HOSTNAME" ] && [[ "${IMAGE_REF,,}" != *qwickway* ]]; then
+            echo "applicable=false" >> "$GITHUB_OUTPUT"
+            echo "No Tailscale/QwickWay configuration in this deploy; live topology preflight not applicable."
+            exit 0
+          fi
+          [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
+          case "${CAPROVER_URL,,}" in
+            *route.qwickforge.com*|*oci-gateway*) HOST_KEY=oci"-"gateway ;;
+            *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
+            *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; live preflight fails closed"; exit 1 ;;
+          esac
+          echo "applicable=true" >> "$GITHUB_OUTPUT"
+          echo "ts-hostname=$TS_HOSTNAME" >> "$GITHUB_OUTPUT"
+          echo "host-key=$HOST_KEY" >> "$GITHUB_OUTPUT"
+
+          # TS_API_KEY fallback: same proven pattern as the infra#101 LB
+          # guard further below (secrets-service fetch if the GH secret is
+          # stale or the '-' placeholder). Duplicated rather than threaded
+          # through step outputs -- this repo's existing convention (the
+          # two "Verify LB target..." steps) already duplicates this block
+          # per call site rather than pass resolved secrets between steps.
+          TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
+          if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              echo "::warning::TS_API_KEY is missing/placeholder; fetching from secrets service"
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/tailscale/TS_API_KEY" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_API_KEY=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_API_KEY" ] && [ "$_SEC_API_KEY" != "-" ]; then
+                  TS_API_KEY_RESOLVED="$_SEC_API_KEY"
+                  echo "::warning::Using TS_API_KEY from secrets service"
+                fi
+              fi
+            fi
+          fi
+          if [ -z "$TS_API_KEY_RESOLVED" ] || [ "$TS_API_KEY_RESOLVED" = "-" ]; then
+            echo "::error::TS_API_KEY unresolved; live preflight cannot verify Tailscale state, failing closed"
+            exit 1
+          fi
+
+          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
+          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
+                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
+                fi
+              fi
+            fi
+          fi
+          if [ -z "$COOLIFY_TOKEN_RESOLVED" ] || [ "$COOLIFY_TOKEN_RESOLVED" = "-" ]; then
+            echo "::error::Coolify API token unresolved; Coolify is a live claimant source and cannot be skipped, failing closed"
+            exit 1
+          fi
+
+          PRE_STATE="${RUNNER_TEMP}/topology-pre-mutation-state-${{ github.run_id }}-${{ github.run_attempt }}.json"
+          echo "pre-mutation-state-path=$PRE_STATE" >> "$GITHUB_OUTPUT"
+
+          # t_fbb1ae02 decision #1(a): inspect every registered CapRover
+          # host, not just the one being deployed to. A conflicting claimant
+          # on a different host is exactly the 2026-10-08 incident shape.
+          # server1-qwickforge is deliberately included: unreachable live
+          # state is a deny, never a reason to silently reduce coverage.
+          python3 .ci-workflows/scripts/topology-live-preflight.py \
+            --registry .ci-workflows/config/service-identities.json \
+            --hostname "$TS_HOSTNAME" \
+            --app "${{ needs.resolve-stage.outputs.target_app }}" \
+            --target-host "$HOST_KEY" \
+            --caprover-hosts oci-gateway oci-main server1-qwickforge \
+            --ts-api-key "$TS_API_KEY_RESOLVED" \
+            --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+            --pre-mutation-state-out "$PRE_STATE"
+
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
         # aos#193 review finding #2: gated behind require_live_approval_check
         # == true (in addition to stage == 'live'), the SAME opt-in the rest
@@ -1270,6 +1402,79 @@ jobs:
             --health-path "${{ inputs.health_path }}" \
             --max-attempts 15 \
             --sleep 20
+
+      - name: Post-deploy topology conflict check + rollback
+        # t_fbb1ae02 decision #2: re-read live state immediately after
+        # mutation. The preflight step above already denied any
+        # pre-existing conflict, so the only way this can now show one is a
+        # race -- another deploy claimed the same canonical hostname
+        # between our preflight read and our mutation. On that race: scale
+        # THIS deploy's new claimant to 0 and restore whatever the
+        # preflight step recorded as the previous owner. This never
+        # renames/edits the registry's own canonical app identity (see
+        # scripts/topology-rollback.py and its test).
+        if: steps.topology-live-preflight.outputs.applicable == 'true'
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+          # The live momo API token is the scoped deploy token. Do not use
+          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
+          HOST_KEY="${{ steps.topology-live-preflight.outputs.host-key }}"
+          PRE_STATE="${{ steps.topology-live-preflight.outputs.pre-mutation-state-path }}"
+
+          TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
+          if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/tailscale/TS_API_KEY" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_API_KEY=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_API_KEY" ] && [ "$_SEC_API_KEY" != "-" ]; then
+                  TS_API_KEY_RESOLVED="$_SEC_API_KEY"
+                fi
+              fi
+            fi
+          fi
+
+          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
+          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
+                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
+                fi
+              fi
+            fi
+          fi
+
+          if python3 .ci-workflows/scripts/topology-live-preflight.py \
+              --registry .ci-workflows/config/service-identities.json \
+              --hostname "$TS_HOSTNAME" \
+              --app "${{ needs.resolve-stage.outputs.target_app }}" \
+              --target-host "$HOST_KEY" \
+              --caprover-hosts oci-gateway oci-main server1-qwickforge \
+              --ts-api-key "$TS_API_KEY_RESOLVED" \
+              --coolify-token "$COOLIFY_TOKEN_RESOLVED"; then
+            echo "No post-deploy topology conflict detected."
+            exit 0
+          fi
+
+          echo "::error::post-deploy topology conflict detected for ${TS_HOSTNAME} -- another claimant appeared during this deploy's own mutation window; rolling back"
+          python3 .ci-workflows/scripts/topology-rollback.py \
+            --pre-mutation-state "$PRE_STATE" \
+            --new-claimant-host "$HOST_KEY" \
+            --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
+          echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
+          exit 1
 
       - name: Deep subsystem health check
         run: |
@@ -1664,6 +1869,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Authenticate to GHCR for retag (direct config write — no docker login/keychain)
@@ -1732,6 +1938,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Resolve CapRover credentials
@@ -1827,6 +2034,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Refuse unsupported Forge stable deployment before CapRover access

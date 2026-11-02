@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   signature-guard:
@@ -43,6 +44,9 @@ jobs:
       - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
+          # pull_request defaults to the synthetic merge ref; the guard must
+          # compare the actual reviewed PR head to the event payload.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Install PyYAML
@@ -57,4 +61,6 @@ jobs:
       - name: Check reusable workflow signatures (base vs PR head)
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+          SIGNATURE_APPROVAL_LOGIN: raajkumars
         run: bash scripts/check-reusable-workflow-signatures.sh
