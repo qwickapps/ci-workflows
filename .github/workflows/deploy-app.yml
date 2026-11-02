@@ -44,6 +44,32 @@ on:
         required: false
         default: 'build'
 
+      # -- Env rendering (t_ffaf9f03) ------------------------------------------
+      # The caller's rendered app env file used to be produced by a separate
+      # job/workflow and handed to validate-env/deploy-caprover/deploy-stable
+      # via actions/upload-artifact + actions/download-artifact, with /tmp
+      # fallback paths. Two problems killed that: (1) the file holds secret
+      # values, and a GitHub Actions artifact is retained and downloadable by
+      # anyone with repo read access -- secrets at rest outside QwickSecrets;
+      # (2) the org's Actions artifact-storage quota sits at/near its cap, so
+      # the upload step itself routinely fails ("Failed to CreateArtifact:
+      # Artifact storage quota has been hit"), breaking every dev deploy.
+      # env_render_script closes both: the caller provides an executable that
+      # renders the env file IN the same job that consumes it, so the
+      # contents never leave that job's filesystem and nothing is ever
+      # uploaded as an artifact. There is no /tmp fallback -- an env_render_script
+      # that produces no file (or an empty one) fails the job loudly.
+      env_render_script:
+        description: >-
+          Path (from the caller repo root) to an executable script this
+          workflow runs IN-JOB to render the app env file. Invoked as
+          `env_render_script <environment> <app_name> <output_path>` inside
+          validate-env, deploy-caprover, and deploy-stable (each renders its
+          own copy independently -- nothing is shared across jobs). Must
+          write a non-empty file to <output_path> or exit non-zero.
+        type: string
+        required: true
+
       # -- Build --------------------------------------------------------------
       dockerfile_path:
         description: 'Path to Dockerfile from repo root'
@@ -145,6 +171,11 @@ on:
         description: 'Optional stable backend URL used for ordered fallback route'
         type: string
         default: ''
+
+      route_gateway:
+        description: 'Whether a live-stage deployment may update qwickway routing after health checks'
+        type: boolean
+        default: true
 
       # -- CMD override ----------------------------------------------------
       cmd:
