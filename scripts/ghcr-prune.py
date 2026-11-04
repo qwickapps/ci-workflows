@@ -71,7 +71,12 @@ class GitHub:
     from the environment's logged-in session."""
 
     def request(self, endpoint, method="GET", paginate=False):
-        args = ["gh", "api", endpoint]
+        # `gh api` expects API-relative paths. Avoid a leading slash because
+        # older runner-installed gh clients can turn it into an invalid
+        # packages endpoint; pin the public GitHub host as well so runner
+        # environment configuration cannot redirect an org-wide sweep.
+        endpoint = endpoint.lstrip("/")
+        args = ["gh", "api", "--hostname", "github.com", endpoint]
         if method != "GET":
             args.extend(["-X", method])
         if paginate:
