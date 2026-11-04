@@ -23,7 +23,7 @@ permissions:
 jobs:
   guard:
     name: Verify Push via PR
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, choco]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
