@@ -39,10 +39,10 @@ jobs:
 
       - name: Run org-wide GHCR prune
         env:
-          # github.token cannot enumerate org-owned packages. Prefer the
-          # repository-scoped prune PAT, then retain the org-PAT and default
-          # token fallbacks for repositories where that secret is unavailable.
-          GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}
+          # github.token cannot enumerate org-owned packages. The org PAT is
+          # required for package deletion; only use the default token when the
+          # org PAT is unavailable.
+          GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_ENFORCE: ${{ inputs.enforce }}
           INPUT_KEEP: ${{ inputs.keep }}
