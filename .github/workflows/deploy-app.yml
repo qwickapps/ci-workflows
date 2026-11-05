@@ -2406,37 +2406,6 @@ jobs:
           pnpm install --no-frozen-lockfile --store-dir .pnpm-store
           pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
 
-      - name: Record first-stable bootstrap authorization
-        if: needs.resolve-stage.outputs.bootstrap_first_stable == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
-          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
-          SOURCE_DIGEST="${IMAGE_REF##*@}"
-          RELEASE_DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${IMAGE_BASE}:release")"
-          [ "$SOURCE_DIGEST" = "$RELEASE_DIGEST" ] || { echo "::error::bootstrap digest changed after verification"; exit 1; }
-          PAYLOAD="$(jq -nc \
-            --arg repo "${{ github.repository }}" \
-            --arg app "${{ inputs.app_name }}" \
-            --arg sha "${{ github.sha }}" \
-            --arg source "$SOURCE_DIGEST" \
-            --arg release "$RELEASE_DIGEST" \
-            --arg actor "${{ github.actor }}" \
-            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            '{repo:$repo, app_name:$app, sha:$sha, source_digest:$source, release_digest:$release, actor:$actor, run_url:$run_url}')"
-          printf '## First stable bootstrap\n\n%s\n' "$PAYLOAD" >> "$GITHUB_STEP_SUMMARY"
-          .ci-workflows/scripts/create-blue-green-check-run.sh \
-            --github-token "$GH_TOKEN" \
-            --repo "${{ github.repository }}" \
-            --sha "${{ github.sha }}" \
-            --name "blue-green/first-stable-bootstrap/${{ inputs.app_name }}" \
-            --title "First stable bootstrap authorized" \
-            --summary "Stable slot bootstrapped from the verified release digest; normal live promotion remains the only path that creates :stable." \
-            --output-json "$PAYLOAD" \
-            --external-id "${{ github.run_id }}-${{ github.run_attempt }}"
-
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
@@ -2487,3 +2456,34 @@ jobs:
             --ts-api-key "$TS_API_KEY_RESOLVED" \
             --canonical-hostname "$CANONICAL_HOSTNAME" \
             --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
+
+      - name: Record first-stable bootstrap authorization
+        if: needs.resolve-stage.outputs.bootstrap_first_stable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
+          SOURCE_DIGEST="${IMAGE_REF##*@}"
+          RELEASE_DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${IMAGE_BASE}:release")"
+          [ "$SOURCE_DIGEST" = "$RELEASE_DIGEST" ] || { echo "::error::bootstrap digest changed after verification"; exit 1; }
+          PAYLOAD="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg source "$SOURCE_DIGEST" \
+            --arg release "$RELEASE_DIGEST" \
+            --arg actor "${{ github.actor }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{repo:$repo, app_name:$app, sha:$sha, source_digest:$source, release_digest:$release, actor:$actor, run_url:$run_url}')"
+          printf '## First stable bootstrap\n\n%s\n' "$PAYLOAD" >> "$GITHUB_STEP_SUMMARY"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-bootstrap/${{ inputs.app_name }}" \
+            --title "First stable bootstrap authorized" \
+            --summary "Stable slot bootstrapped from the verified release digest; normal live promotion remains the only path that creates :stable." \
+            --output-json "$PAYLOAD" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}"
