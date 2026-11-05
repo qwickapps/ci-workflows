@@ -51,6 +51,7 @@ else:
     -e 's/\$\{\{ env\.REGISTRY \}\}/$REGISTRY/g' \
     -e 's/\$\{\{ env\.OWNER \}\}/$OWNER/g' \
     -e 's/\$\{\{ inputs\.app_name \}\}/$IN_APP_NAME/g' \
+    -e 's/\$\{\{ inputs\.bootstrap_first_stable \}\}/$IN_BOOTSTRAP_FIRST_STABLE/g' \
     -e 's/\$\{\{ inputs\.caprover_host \}\}/$IN_CAPROVER_HOST/g' \
     -e 's/\$\{\{ inputs\.caprover_url \}\}/$IN_CAPROVER_URL/g' \
     -e 's/\$\{\{ inputs\.container_port \}\}/$IN_CONTAINER_PORT/g' \
@@ -77,7 +78,7 @@ run_resolve_stage() {
   local out_file="$1"
   (
     export REGISTRY=ghcr.io OWNER=qwickapps
-    export IN_APP_NAME="${IN_APP_NAME:-}" IN_CAPROVER_HOST="${IN_CAPROVER_HOST:-}" \
+    export IN_APP_NAME="${IN_APP_NAME:-}" IN_BOOTSTRAP_FIRST_STABLE="${IN_BOOTSTRAP_FIRST_STABLE:-false}" IN_CAPROVER_HOST="${IN_CAPROVER_HOST:-}" \
            IN_CAPROVER_URL="${IN_CAPROVER_URL:-}" IN_CONTAINER_PORT="${IN_CONTAINER_PORT:-8080}" \
            IN_DOCKERFILE_ONLY="${IN_DOCKERFILE_ONLY:-true}" IN_GATEWAY_STABLE_URL="${IN_GATEWAY_STABLE_URL:-}" \
            IN_HEALTH_PATH="${IN_HEALTH_PATH:-/health}" IN_IMAGE_REF="${IN_IMAGE_REF:-}" \

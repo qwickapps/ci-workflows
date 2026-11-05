@@ -17,7 +17,7 @@ ghcr_package_readable() {
 
 ghcr_tag_history_exists() {
   local owner="$1" image_name="$2"; shift 2
-  local response err_file visibility_file visibility_response
+  local response err_file
   local tag_expr=''
   local tag
 
@@ -31,7 +31,7 @@ ghcr_tag_history_exists() {
   tag_expr="${tag_expr% or }"
 
   err_file="$(mktemp)"
-  trap 'rm -f "$err_file" "${visibility_file:-}"' RETURN
+  trap 'rm -f "$err_file"' RETURN
   if response="$(gh api --paginate "orgs/${owner}/packages/container/${image_name}/versions?per_page=100" 2>"$err_file")"; then
     if [ -z "$response" ]; then
       echo "::error::ghcr-tag-history: package-versions response was empty" >&2
@@ -55,11 +55,13 @@ ghcr_tag_history_exists() {
     return 1
   fi
 
-  visibility_file="$(mktemp)"
-  if ! visibility_response="$(gh api "orgs/${owner}/packages?package_type=container&per_page=1" 2>"$visibility_file")" || \
-      ! printf '%s' "$visibility_response" | jq -es 'flatten | length > 0' 2>/dev/null | grep -qx true; then
-    echo "::error::ghcr-tag-history: could not positively confirm this token can see ANY container package in org '${owner}'" >&2
-    cat "$visibility_file" >&2
+  # A 404 on THIS package's /versions is indistinguishable from "this token
+  # cannot see this specific private package" -- GitHub returns the same
+  # 404 for both. Visibility of some OTHER container package in the org
+  # proves nothing about the target. Require positive, target-specific
+  # readability before trusting the 404 as absence.
+  if ! ghcr_package_readable "$owner" "$image_name"; then
+    echo "::error::ghcr-tag-history: package-versions 404'd and target package visibility could not be positively confirmed for '${owner}/${image_name}' -- refusing to treat as absent" >&2
     return 1
   fi
   printf '%s\n' false
