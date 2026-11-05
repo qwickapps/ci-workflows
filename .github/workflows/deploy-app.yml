@@ -842,15 +842,46 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
-    # ci-workflows#137: same permissions-gap reasoning as the build job, but
-    # this job only pulls/inspects images -- packages: read is enough, no
-    # contents: read. The "Checkout ci-workflows scripts" step below fetches
-    # ci-workflows' OWN public repo via a `repository:` override (same
-    # pattern validate-env/deploy-caprover/deploy-stable/scale-build-slot
-    # already use with no permissions block at all), not this workflow's
-    # calling repo -- it does not need contents: read on the caller.
-    permissions:
-      packages: read
+    # ci-workflows#137: this job only pulls/inspects images -- packages:
+    # read was enough, no contents: read. The "Checkout ci-workflows
+    # scripts" step below fetches ci-workflows' OWN public repo via a
+    # `repository:` override (same pattern validate-env/deploy-caprover/
+    # deploy-stable/scale-build-slot already use with no permissions block
+    # at all), not this workflow's calling repo -- it does not need
+    # contents: read on the caller.
+    #
+    # t_b14e0125 (first-stable bootstrap): this job used to carry an
+    # explicit `permissions: {packages: read}` block. The new "Verify
+    # first-stable bootstrap proof" step (gated behind
+    # bootstrap_first_stable == true) needs `checks: read` + `actions:
+    # read` to read the digest-bound build/UAT proof check-runs. A job's
+    # requested permissions must be a SUBSET of what the calling workflow's
+    # OWN top-level `permissions:` grants, and GitHub validates this for
+    # the WHOLE workflow_call at dispatch time -- not lazily per job, and
+    # not skipped for a step whose `if:` evaluates false (empirically
+    # confirmed for this exact job class; see deploy-caprover's and
+    # deploy-stable's header comments / aos#193 Phase 1 review round 2).
+    # None of the current 14 org callers grant `checks`/`actions`, so
+    # adding those scopes to a STATIC explicit block here would break
+    # every one of them at dispatch time the moment this merges -- not
+    # just bootstrap ones.
+    #
+    # Resolution: mirror the already-accepted deploy-caprover/deploy-
+    # stable pattern exactly -- drop the explicit permissions block
+    # entirely so this job inherits whatever its calling workflow's own
+    # top-level `permissions:` grants. Every current caller already grants
+    # at least packages: read at its top level (this job's packages: read
+    # requirement has worked unmodified since ci-workflows#137), so
+    # removing the explicit block changes nothing for existing callers or
+    # non-bootstrap stages. A caller that wants bootstrap_first_stable:
+    # true to actually succeed must ALSO add `checks: read` + `actions:
+    # read` to ITS OWN top-level permissions -- a per-caller opt-in (only
+    # relevant to a brand-new app's very first stable promotion), not an
+    # org-wide rollout. Until a caller opts in, the bootstrap proof-read
+    # steps fail closed with a clear `gh api` permission error -- exactly
+    # the same already-documented, already-accepted state
+    # require_live_approval_check is in today (see deploy-caprover's
+    # header comment).
     steps:
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
