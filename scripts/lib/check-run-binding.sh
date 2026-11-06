@@ -218,6 +218,7 @@ CHECK_RUN_BINDING_JOB_NAME_SUFFIX=" / deploy-caprover"
 
 check_run_binding_verify() {
   local repo="$1" sha="$2" app_slug="$3" external_id="$4" expected_step_name="$5"
+  local expected_job_name_suffix="${6:-$CHECK_RUN_BINDING_JOB_NAME_SUFFIX}"
 
   if [ "$app_slug" != "github-actions" ]; then
     echo "::error::check-run binding REFUSED (check_run_app_mismatch): creating app.slug='${app_slug}', expected 'github-actions' -- a check run created by any other GitHub App is never a legitimate blue-green record, no matter what its output.text claims" >&2
@@ -343,7 +344,7 @@ check_run_binding_verify() {
   # run -- and that job's OWN conclusion must be "success" too, not just
   # the step's. A sibling job in the same run (e.g. an unrelated workflow
   # step with a copied name) must never satisfy this.
-  if ! printf '%s' "$jobs_response" | jq -e --arg step "$expected_step_name" --arg suffix "$CHECK_RUN_BINDING_JOB_NAME_SUFFIX" '
+  if ! printf '%s' "$jobs_response" | jq -e --arg step "$expected_step_name" --arg suffix "$expected_job_name_suffix" '
       (.jobs // [])[]?
       | select(.name != null and (.name | endswith($suffix)))
       | select(.conclusion == "success")

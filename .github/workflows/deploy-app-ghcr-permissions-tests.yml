@@ -12,10 +12,12 @@ name: Deploy App GHCR Permissions Tests
 #
 # Tests:
 #   bash scripts/tests/deploy-app-ghcr-permissions.test.sh
-#     - build/verify-provenance/retag each have the correct, minimal
-#       permissions block for what their steps actually need
+#     - build/retag each have the correct, minimal permissions block for
+#       what their steps actually need; verify-provenance/deploy-caprover/
+#       deploy-stable deliberately carry NO permissions block (t_b14e0125 /
+#       aos#193 Phase 1 round 2 -- see that test's header comment)
 #     - no workflow-level permissions block (which would broaden every
-#       other job, not just the three that need it)
+#       other job, not just the ones that need it)
 #     - no OTHER job was accidentally given a permissions block that would
 #       silently strip its actual defaults
 
