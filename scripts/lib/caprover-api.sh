@@ -333,10 +333,51 @@ caprover_poll_deployed_image() {
   return 1
 }
 
+# Resolve the service-identity registry used to protect destructive CapRover
+# cutovers. Central ci-workflows callers get the checked-in registry by default;
+# copied helpers can opt in explicitly with CAPROVER_SERVICE_IDENTITIES_FILE.
+caprover_service_identities_file() {
+  if [[ -n "${CAPROVER_SERVICE_IDENTITIES_FILE:-}" ]]; then
+    printf '%s\n' "$CAPROVER_SERVICE_IDENTITIES_FILE"
+    return 0
+  fi
+
+  local library_dir candidate
+  library_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  candidate="$(cd "$library_dir/../.." && pwd)/config/service-identities.json"
+  [[ -f "$candidate" ]] && printf '%s\n' "$candidate"
+}
+
+# Refuse to delete a service that the topology registry still names. A registry
+# change must land first, in the same reviewed PR or an earlier reviewed PR;
+# this prevents health/drift checks from inheriting a deleted app identity.
+caprover_assert_app_not_registry_referenced() {
+  local app_name="$1" registry matches
+  registry="$(caprover_service_identities_file || true)"
+  [[ -n "$registry" ]] || return 0
+
+  if [[ ! -r "$registry" ]]; then
+    echo "Error: service-identity registry is not readable: $registry" >&2
+    return 1
+  fi
+  if ! jq -e . "$registry" >/dev/null 2>&1; then
+    echo "Error: service-identity registry is invalid JSON: $registry" >&2
+    return 1
+  fi
+
+  matches="$(jq -r --arg app "$app_name" '.services[]? | select(.app == $app) | .canonical_hostname' "$registry")"
+  if [[ -n "$matches" ]]; then
+    echo "Error: refusing to delete '${app_name}': config/service-identities.json still assigns it to ${matches//$'\n'/, }. Update the registry in a reviewed PR before deleting the legacy app." >&2
+    return 1
+  fi
+}
+
 # Remove an app by name (idempotent — no-op if the app does not exist).
-# Does NOT delete persistent volumes.
+# Does NOT delete persistent volumes. Refuses a deletion while the checked-in
+# service-identity registry still declares the app as a canonical owner.
 caprover_remove_app() {
   local caprover_url="$1" token="$2" app_name="$3"
+  caprover_assert_app_not_registry_referenced "$app_name" || return 1
   local curl_args=()
   caprover_populate_curl_args "$caprover_url" curl_args
 
