@@ -264,6 +264,22 @@ jobs:
     name: Build and Push Multi-Arch Docker Image
     runs-on: [self-hosted, macmini]
     needs: [validate-platforms, test]
+    # t_712427a0: serialize multi-arch builds per caller repository. Every
+    # build-push job lands on the same macmini Docker VM, and a QEMU-emulated
+    # linux/amd64 + native linux/arm64 buildx build (pnpm install inside the
+    # image) is memory-heavy. Two callers in one run (raajkumars/qwickapps
+    # qwickapps-website + qwickforge-website) ran concurrently and both died
+    # with BuildKit "ResourceExhausted: cannot allocate memory" (run
+    # 42151708576). This lock lets exactly one build-push run at a time per
+    # repository; the platform list is unchanged.
+    #
+    # cancel-in-progress: false keeps the running build alive. GitHub keeps at
+    # most ONE pending job per group and a newer pending job replaces (cancels)
+    # an older pending one, so a caller workflow must not fan out more than two
+    # build-push jobs at once; chain extra callers with `needs:` instead.
+    concurrency:
+      group: main-push-guard-multiarch-build-push-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
