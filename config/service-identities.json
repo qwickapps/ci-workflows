@@ -57,13 +57,13 @@
       "workload_owner": "memory-platform",
       "repo": "qwickapps/memories",
       "platform": "caprover",
-      "app": "qwickapps-memories-canonical",
+      "app": "qwickapps-memories",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
       "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
       "images": ["ghcr.io/qwickapps/qwickway:latest"],
-      "notes": "Live app name verified via docker service ls on oci-gateway 2026-10-07: no srv-captain-- prefix. srv-captain--qwickapps-memories exists at 0/0 (orphaned)."
+      "notes": "Live CapRover appDefinitions readback 2026-11-06: qwickapps-memories is enabled, 1 replica, and persistent. The prior qwickapps-memories-canonical service was deleted after the persistent cutover."
     },
     {
       "canonical_hostname": "qwickapps-memories-live",
@@ -119,12 +119,13 @@
       "workload_owner": "projects-platform",
       "repo": "qwickapps/projects",
       "platform": "caprover",
-      "app": "srv-captain--qwickapps-projects",
+      "app": "qwickapps-projects-p",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
       "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
-      "images": ["ghcr.io/qwickapps/qwickway:latest"]
+      "images": ["ghcr.io/qwickapps/qwickway:latest"],
+      "notes": "Live CapRover appDefinitions readback 2026-11-06: qwickapps-projects-p is enabled, 1 replica, and persistent; the legacy srv-captain--qwickapps-projects app was deleted in the persistent cutover."
     },
     {
       "canonical_hostname": "qwickapps-projects-live",
@@ -168,12 +169,13 @@
       "workload_owner": "voice-platform",
       "repo": "qwickapps/voice",
       "platform": "caprover",
-      "app": "srv-captain--qwickapps-voice",
+      "app": "qwickapps-voice-p",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
       "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
-      "images": ["ghcr.io/qwickapps/qwickway:latest"]
+      "images": ["ghcr.io/qwickapps/qwickway:latest"],
+      "notes": "Live CapRover appDefinitions readback 2026-11-06: qwickapps-voice-p is enabled, 1 replica, and persistent; the legacy srv-captain--qwickapps-voice app was deleted in the persistent cutover."
     },
     {
       "canonical_hostname": "qwickapps-voice-live",
@@ -192,12 +194,13 @@
       "workload_owner": "forge-platform",
       "repo": "qwickapps/forge",
       "platform": "caprover",
-      "app": "srv-captain--qwickapps-forge",
+      "app": "qwickapps-forge-p",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
       "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
-      "images": ["ghcr.io/qwickapps/qwickway:latest"]
+      "images": ["ghcr.io/qwickapps/qwickway:latest"],
+      "notes": "Live CapRover appDefinitions readback 2026-11-06: qwickapps-forge-p is enabled, 1 replica, and persistent; the legacy srv-captain--qwickapps-forge app was deleted in the persistent cutover."
     },
     {
       "canonical_hostname": "qwickapps-forge-live",
@@ -318,12 +321,13 @@
       "workload_owner": "llm-platform",
       "repo": "qwickapps/lite-llm",
       "platform": "caprover",
-      "app": "srv-captain--qwickapps-llm",
+      "app": "qwickapps-llm-p",
       "required_host": "oci-gateway",
       "role": "load-balancer",
       "load_balancer": true,
       "state": {"mode": "persistent", "volume": "/var/lib/tailscale"},
-      "images": ["ghcr.io/qwickapps/qwickway:latest"]
+      "images": ["ghcr.io/qwickapps/qwickway:latest"],
+      "notes": "Live CapRover appDefinitions readback 2026-11-06: qwickapps-llm-p is enabled, 1 replica, and persistent; the legacy srv-captain--qwickapps-llm app was deleted in the persistent cutover."
     },
     {
       "canonical_hostname": "qwickapps-llm-live",

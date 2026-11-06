@@ -1,0 +1,27 @@
+name: CapRover service-identity deletion guard tests
+
+on:
+  pull_request:
+    paths:
+      - 'config/service-identities.json'
+      - 'scripts/lib/caprover-api.sh'
+      - 'scripts/tests/caprover-service-identity-deletion-guard.test.sh'
+      - '.github/workflows/caprover-service-identity-deletion-guard-tests.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'config/service-identities.json'
+      - 'scripts/lib/caprover-api.sh'
+      - 'scripts/tests/caprover-service-identity-deletion-guard.test.sh'
+      - '.github/workflows/caprover-service-identity-deletion-guard-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run service-identity deletion guard tests
+        run: bash scripts/tests/caprover-service-identity-deletion-guard.test.sh
