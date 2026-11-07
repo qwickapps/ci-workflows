@@ -1,0 +1,52 @@
+name: Deploy App Bootstrap Marker Order Tests
+
+# Regression gate for t_b14e0125 (meera review, 2026-11-05): the
+# deploy-stable job's "Record first-stable bootstrap authorization" step
+# used to run BEFORE the mandatory "Verify LB target resolves to the node
+# just deployed (infra#101 guard)" post-deploy step, so a failed LB-target
+# guard still left the single-use bootstrap marker in place -- a retry
+# then refused as "bootstrap already used" even though the required
+# deployment verification never completed. This gate exists so a future
+# edit can't silently move the marker step back ahead of a required
+# post-deploy guard.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-bootstrap-marker-order.test.sh
+#     - the marker step is positioned after the LB-target guard step
+#     - the marker step is the LAST step in deploy-stable (after every
+#       required post-deploy guard, not just the LB-target one)
+#     - the marker step's if: does not add always()/failure(), so
+#       GitHub Actions' default "skip after a failed step" behavior keeps
+#       applying
+#     - the marker step still gates on bootstrap_first_stable
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-bootstrap-marker-order-tests.yml'
+      - 'scripts/tests/deploy-app-bootstrap-marker-order.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/tests/deploy-app-bootstrap-marker-order.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml bootstrap marker order tests
+    runs-on: [self-hosted, choco]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted choco runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run bootstrap marker order contract test
+        run: bash scripts/tests/deploy-app-bootstrap-marker-order.test.sh
