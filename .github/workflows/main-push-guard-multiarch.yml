@@ -354,6 +354,16 @@ jobs:
           # plus cleanup: true.
           name: builder-${{ github.run_id }}
           cleanup: true
+          # t_712427a0: one BuildKit step at a time. The job-level concurrency
+          # lock above was not enough: a single qwickapps-website build still
+          # died "ResourceExhausted: cannot allocate memory" (run 42420804919)
+          # because buildx runs the linux/amd64 (QEMU) and linux/arm64
+          # `pnpm install` steps in parallel inside the ~6 GB macmini Docker
+          # VM. max-parallelism = 1 runs the per-platform steps one after the
+          # other; both platforms are still built and pushed as one manifest.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
 
       - name: Authenticate to GHCR (direct config write — no docker login/keychain)
         # See main-push-guard.yml's build-push job for why: docker/login-action
