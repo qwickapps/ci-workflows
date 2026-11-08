@@ -349,6 +349,14 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          # BuildKit otherwise schedules the linux/amd64 (QEMU) and linux/arm64
+          # graphs concurrently. On the 5.77GiB macmini Docker VM, concurrent
+          # dependency installs exhaust memory even when this job is the only
+          # build-push job running. Serialize work inside this multi-platform
+          # builder without changing the required platform list.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
           # t_a4d33238: run-scoped name under the "builder-" prefix (matches
           # qwick-guard sop-074's allow-regex and the fleet reaper's filter)
           # plus cleanup: true.
