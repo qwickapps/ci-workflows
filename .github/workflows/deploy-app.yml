@@ -1679,7 +1679,7 @@ jobs:
             STABLE_ARGS+=(--stable-app-url "$STABLE_URL")
           fi
 
-          .github/scripts/setup-qwickway-route.sh \
+          .ci-workflows/scripts/setup-qwickway-route.sh \
             --gateway-app-name "${{ needs.resolve-stage.outputs.gateway_app_name }}" \
             --target-app-url "$TARGET_URL" \
             --route-caprover-url "$GW_URL" \
