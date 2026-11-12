@@ -295,7 +295,7 @@ def main() -> int:
     if entry is None:
         return emit_result(args, status_code=409, failure_type="topology_conflict",
                            reason=f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this")
-    if entry["app"] != registry_app:
+    if caprover_app_name(entry["app"]) != caprover_app_name(registry_app):
         return emit_result(args, status_code=409, failure_type="topology_conflict",
                            reason=f"registry app {registry_app!r} != registered app {entry['app']!r} for {args.hostname!r}")
     if entry["required_host"] != args.target_host:
