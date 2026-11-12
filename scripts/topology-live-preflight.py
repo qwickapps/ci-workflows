@@ -272,6 +272,9 @@ def main() -> int:
     if entry is None:
         return emit_result(args, status_code=409, failure_type="topology_conflict",
                            reason=f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this")
+    if entry["app"] != args.app:
+        return emit_result(args, status_code=409, failure_type="topology_conflict",
+                           reason=f"app {args.app!r} != registry app {entry['app']!r} for {args.hostname!r}")
     if entry["required_host"] != args.target_host:
         return emit_result(args, status_code=409, failure_type="topology_conflict",
                            reason=f"target host {args.target_host!r} != registry required_host {entry['required_host']!r} for {args.hostname!r}")

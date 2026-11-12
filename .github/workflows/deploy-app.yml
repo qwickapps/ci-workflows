@@ -1027,13 +1027,14 @@ jobs:
             *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
             *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; topology admission fails closed"; exit 1 ;;
           esac
+          REGISTRY_APP="$(python3 -c 'import json,sys; services=json.load(open(sys.argv[1], encoding="utf-8"))["services"]; matches=[entry["app"] for entry in services if entry["canonical_hostname"].lower() == sys.argv[2].lower()]; print(matches[0]) if len(matches) == 1 else sys.exit(f"expected exactly one registry identity for {sys.argv[2]!r}, found {len(matches)}")' .ci-workflows/config/service-identities.json "$TS_HOSTNAME")" || { echo "::error::cannot resolve canonical registry app for TS_HOSTNAME=${TS_HOSTNAME}"; exit 1; }
           SOURCE_MERGED=true
           if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
             DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
             git fetch --no-tags origin "$DEFAULT_BRANCH"
             git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}" || SOURCE_MERGED=false
           fi
-          ARGS=(--registry .ci-workflows/config/service-identities.json --host "$HOST_KEY" --platform caprover --app "${{ needs.resolve-stage.outputs.target_app }}" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
+          ARGS=(--registry .ci-workflows/config/service-identities.json --host "$HOST_KEY" --platform caprover --app "$REGISTRY_APP" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
           if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
             ARGS+=(--production --source-sha "${GITHUB_SHA}" --source-merged "$SOURCE_MERGED")
           fi
@@ -1070,9 +1071,11 @@ jobs:
             *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
             *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; live preflight fails closed"; exit 1 ;;
           esac
+          REGISTRY_APP="$(python3 -c 'import json,sys; services=json.load(open(sys.argv[1], encoding="utf-8"))["services"]; matches=[entry["app"] for entry in services if entry["canonical_hostname"].lower() == sys.argv[2].lower()]; print(matches[0]) if len(matches) == 1 else sys.exit(f"expected exactly one registry identity for {sys.argv[2]!r}, found {len(matches)}")' .ci-workflows/config/service-identities.json "$TS_HOSTNAME")" || { echo "::error::cannot resolve canonical registry app for TS_HOSTNAME=${TS_HOSTNAME}"; exit 1; }
           echo "applicable=true" >> "$GITHUB_OUTPUT"
           echo "ts-hostname=$TS_HOSTNAME" >> "$GITHUB_OUTPUT"
           echo "host-key=$HOST_KEY" >> "$GITHUB_OUTPUT"
+          echo "registry-app=$REGISTRY_APP" >> "$GITHUB_OUTPUT"
 
           # TS_API_KEY fallback: same proven pattern as the infra#101 LB
           # guard further below (secrets-service fetch if the GH secret is
@@ -1131,7 +1134,7 @@ jobs:
           python3 .ci-workflows/scripts/topology-live-preflight.py \
             --registry .ci-workflows/config/service-identities.json \
             --hostname "$TS_HOSTNAME" \
-            --app "${{ needs.resolve-stage.outputs.target_app }}" \
+            --app "$REGISTRY_APP" \
             --target-host "$HOST_KEY" \
             --caprover-hosts oci-gateway oci-main server1-qwickforge \
             --ts-api-key "$TS_API_KEY_RESOLVED" \
@@ -1285,6 +1288,7 @@ jobs:
           set -euo pipefail
           TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
           HOST_KEY="${{ steps.topology-live-preflight.outputs.host-key }}"
+          REGISTRY_APP="${{ steps.topology-live-preflight.outputs.registry-app }}"
           PRE_STATE="${{ steps.topology-live-preflight.outputs.pre-mutation-state-path }}"
 
           TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
@@ -1323,7 +1327,7 @@ jobs:
           python3 .ci-workflows/scripts/topology-live-preflight.py \
               --registry .ci-workflows/config/service-identities.json \
               --hostname "$TS_HOSTNAME" \
-              --app "${{ needs.resolve-stage.outputs.target_app }}" \
+              --app "$REGISTRY_APP" \
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
@@ -1354,7 +1358,7 @@ jobs:
             python3 .ci-workflows/scripts/topology-rollback.py \
               --pre-mutation-state "$PRE_STATE" \
               --new-claimant-host "$HOST_KEY" \
-              --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
+              --new-claimant-app "$REGISTRY_APP"
             echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
             exit 1
           fi

@@ -252,5 +252,15 @@ PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=name_conflict "${PREFLIGHT[@]}" --tailscal
   || { echo "PASS denied service-name claimant"; pass=$((pass+1)); }
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
+echo "== stage-derived app differs from registry app => deny before reading live state =="
+start_mock clean 18908
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE" \
+  --hostname qwickapps-mcp --app qwickapps-mcp-live --target-host oci-gateway \
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --tailscale-base-url "http://127.0.0.1:18908" \
+  --coolify-token dummy --coolify-base-url "http://127.0.0.1:18908" \
+  && { echo "FAIL expected deny: registry app mismatch"; fail=$((fail+1)); } \
+  || { echo "PASS denied registry app mismatch"; pass=$((pass+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
 echo "Tests: $pass passed, $fail failed"
 test "$fail" -eq 0

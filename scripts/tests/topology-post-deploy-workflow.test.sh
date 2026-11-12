@@ -16,6 +16,9 @@ require() {
 }
 
 require '--result-json-out "$RESULT_JSON"' 'preflight writes structured result'
+require 'REGISTRY_APP="$(python3 -c' 'workflow resolves canonical registry app from hostname'
+require '--app "$REGISTRY_APP"' 'admission and live preflight use canonical registry app'
+require '--new-claimant-app "$REGISTRY_APP"' 'rollback uses canonical registry app'
 require '"status_code"' 'workflow parses status_code'
 require '"failure_type"' 'workflow parses failure_type'
 require '[ "$STATUS_CODE" = "409" ] && [ "$FAILURE_TYPE" = "topology_conflict" ]' '409 conflict gate exists'
@@ -43,6 +46,40 @@ then
   pass 'rollback is reachable only from confirmed 409 conflict'
 else
   fail 'rollback is reachable only from confirmed 409 conflict'
+fi
+
+if python3 - "$ROOT" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+workflow = (root / ".github/workflows/deploy-app.yml").read_text(encoding="utf-8")
+stage_target_app = "qwickapps-mcp-live"
+registry_app = "srv-captain--qwickapps-mcp"
+assert stage_target_app != registry_app
+assert workflow.count('--app "$REGISTRY_APP"') == 3
+assert '--new-claimant-app "$REGISTRY_APP"' in workflow
+subprocess.run([
+    "python3", str(root / "scripts/topology-admission.py"),
+    "--registry", str(root / "config/service-identities.json"),
+    "--host", "oci-gateway", "--platform", "caprover",
+    "--app", registry_app, "--hostname", "qwickapps-mcp",
+    "--image-ref", "ghcr.io/qwickapps/qwickway:latest",
+], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+bad = subprocess.run([
+    "python3", str(root / "scripts/topology-admission.py"),
+    "--registry", str(root / "config/service-identities.json"),
+    "--host", "oci-gateway", "--platform", "caprover",
+    "--app", stage_target_app, "--hostname", "qwickapps-mcp",
+    "--image-ref", "ghcr.io/qwickapps/qwickway:latest",
+], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+assert bad.returncode == 2
+PY
+then
+  pass 'stage-derived app is mapped to committed canonical registry identity'
+else
+  fail 'stage-derived app is mapped to committed canonical registry identity'
 fi
 
 echo "Tests: $PASS passed, $FAIL failed"
