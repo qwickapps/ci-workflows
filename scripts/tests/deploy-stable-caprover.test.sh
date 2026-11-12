@@ -125,20 +125,41 @@ result = {
     ),
 }
 
-# Confirm no OTHER job in the file references Coolify either -- the
-# orphaned path must be fully removed, not just unreferenced by
-# deploy-stable while dead code lingers elsewhere.
+# Confirm no OTHER job in the file references Coolify EXCEPT the
+# intentional live-claimant topology preflight in deploy-caprover
+# (t_201b42b1: topology-live-preflight.py treats Coolify as a live
+# claimant source alongside CapRover/Tailscale, so deploy-caprover's
+# preflight/post-deploy-conflict steps legitimately pass a
+# --coolify-token). Any mention OUTSIDE a topology-live-preflight.py
+# invocation -- e.g. the orphaned deploy-to-coolify.sh script or a
+# secrets.COOLIFY_URL/COOLIFY_TOKEN reference in a step that is NOT
+# that preflight call -- must still fail: that would be the orphaned
+# deploy path (or a copy-paste of it) coming back, not the live-claimant
+# feature.
 other_jobs_coolify = []
+deploy_caprover_orphan_coolify = False
 for job_id, j in doc.get('jobs', {}).items():
     if job_id == 'deploy-stable' or not isinstance(j, dict):
         continue
+    steps_list = j.get('steps', []) or []
+    if job_id == 'deploy-caprover':
+        for s in steps_list:
+            if not isinstance(s, dict):
+                continue
+            text = ' '.join(filter(None, [s.get('name', ''), s.get('run', '') or ''])).lower()
+            if 'coolify' not in text:
+                continue
+            if 'topology-live-preflight.py' not in text:
+                deploy_caprover_orphan_coolify = True
+        continue
     texts = []
-    for s in j.get('steps', []) or []:
+    for s in steps_list:
         if isinstance(s, dict):
             texts.append(' '.join(filter(None, [s.get('name',''), s.get('run','') or ''])))
     if 'coolify' in ' '.join(texts).lower():
         other_jobs_coolify.append(job_id)
 result['other_jobs_coolify'] = other_jobs_coolify
+result['deploy_caprover_orphan_coolify'] = deploy_caprover_orphan_coolify
 
 print(json.dumps(result))
 ")"
@@ -199,11 +220,14 @@ else
 fi
 
 OTHER_COOLIFY_JOBS="$(get other_jobs_coolify)"
-assert "no other job in deploy-app.yml still mentions coolify" \
+assert "no job besides deploy-stable/deploy-caprover mentions coolify" \
   test "$OTHER_COOLIFY_JOBS" = "[]"
 if [ "$OTHER_COOLIFY_JOBS" != "[]" ]; then
   echo "    jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
 fi
+
+assert "deploy-caprover's coolify references are confined to the live-claimant topology preflight (topology-live-preflight.py), not an orphaned coolify deploy path" \
+  test "$(get deploy_caprover_orphan_coolify)" = "False"
 
 echo ""
 echo "== deploy-app.yml: aos pin-verification mutation gaps (aos#193 review §5, round 2) =="
