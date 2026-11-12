@@ -1072,6 +1072,7 @@ jobs:
             *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; live preflight fails closed"; exit 1 ;;
           esac
           REGISTRY_APP="$(python3 -c 'import json,sys; services=json.load(open(sys.argv[1], encoding="utf-8"))["services"]; matches=[entry["app"] for entry in services if entry["canonical_hostname"].lower() == sys.argv[2].lower()]; print(matches[0]) if len(matches) == 1 else sys.exit(f"expected exactly one registry identity for {sys.argv[2]!r}, found {len(matches)}")' .ci-workflows/config/service-identities.json "$TS_HOSTNAME")" || { echo "::error::cannot resolve canonical registry app for TS_HOSTNAME=${TS_HOSTNAME}"; exit 1; }
+          DEPLOYED_SERVICE="srv-captain--${{ needs.resolve-stage.outputs.target_app }}"
           echo "applicable=true" >> "$GITHUB_OUTPUT"
           echo "ts-hostname=$TS_HOSTNAME" >> "$GITHUB_OUTPUT"
           echo "host-key=$HOST_KEY" >> "$GITHUB_OUTPUT"
@@ -1134,7 +1135,7 @@ jobs:
           python3 .ci-workflows/scripts/topology-live-preflight.py \
             --registry .ci-workflows/config/service-identities.json \
             --hostname "$TS_HOSTNAME" \
-            --app "${{ needs.resolve-stage.outputs.target_app }}" \
+            --app "$DEPLOYED_SERVICE" \
             --registry-app "$REGISTRY_APP" \
             --target-host "$HOST_KEY" \
             --caprover-hosts oci-gateway oci-main server1-qwickforge \
@@ -1290,6 +1291,7 @@ jobs:
           TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
           HOST_KEY="${{ steps.topology-live-preflight.outputs.host-key }}"
           REGISTRY_APP="${{ steps.topology-live-preflight.outputs.registry-app }}"
+          DEPLOYED_SERVICE="srv-captain--${{ needs.resolve-stage.outputs.target_app }}"
           PRE_STATE="${{ steps.topology-live-preflight.outputs.pre-mutation-state-path }}"
 
           TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
@@ -1328,7 +1330,7 @@ jobs:
           python3 .ci-workflows/scripts/topology-live-preflight.py \
               --registry .ci-workflows/config/service-identities.json \
               --hostname "$TS_HOSTNAME" \
-              --app "${{ needs.resolve-stage.outputs.target_app }}" \
+              --app "$DEPLOYED_SERVICE" \
               --registry-app "$REGISTRY_APP" \
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
@@ -1360,7 +1362,7 @@ jobs:
             python3 .ci-workflows/scripts/topology-rollback.py \
               --pre-mutation-state "$PRE_STATE" \
               --new-claimant-host "$HOST_KEY" \
-              --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
+              --new-claimant-app "$DEPLOYED_SERVICE"
             echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
             exit 1
           fi

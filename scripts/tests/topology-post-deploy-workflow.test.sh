@@ -19,8 +19,9 @@ require '--result-json-out "$RESULT_JSON"' 'preflight writes structured result'
 require 'REGISTRY_APP="$(python3 -c' 'workflow resolves canonical registry app from hostname'
 require '--app "$REGISTRY_APP"' 'static admission uses canonical registry app'
 require '--registry-app "$REGISTRY_APP"' 'live preflight validates canonical registry app'
-require '--app "${{ needs.resolve-stage.outputs.target_app }}"' 'live preflight excludes deployed target app'
-require '--new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"' 'rollback neutralizes deployed target app'
+require 'DEPLOYED_SERVICE="srv-captain--${{ needs.resolve-stage.outputs.target_app }}"' 'workflow maps target app to Swarm service identity'
+require '--app "$DEPLOYED_SERVICE"' 'live preflight excludes deployed service'
+require '--new-claimant-app "$DEPLOYED_SERVICE"' 'rollback neutralizes deployed service'
 require '"status_code"' 'workflow parses status_code'
 require '"failure_type"' 'workflow parses failure_type'
 require '[ "$STATUS_CODE" = "409" ] && [ "$FAILURE_TYPE" = "topology_conflict" ]' '409 conflict gate exists'
@@ -62,8 +63,9 @@ registry_app = "srv-captain--qwickapps-mcp"
 assert stage_target_app != registry_app
 assert workflow.count('--app "$REGISTRY_APP"') == 1
 assert workflow.count('--registry-app "$REGISTRY_APP"') == 2
-assert workflow.count('--app "${{ needs.resolve-stage.outputs.target_app }}"') == 2
-assert '--new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"' in workflow
+assert workflow.count('DEPLOYED_SERVICE="srv-captain--${{ needs.resolve-stage.outputs.target_app }}"') == 2
+assert workflow.count('--app "$DEPLOYED_SERVICE"') == 2
+assert '--new-claimant-app "$DEPLOYED_SERVICE"' in workflow
 subprocess.run([
     "python3", str(root / "scripts/topology-admission.py"),
     "--registry", str(root / "config/service-identities.json"),
