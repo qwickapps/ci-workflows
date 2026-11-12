@@ -11,7 +11,7 @@ expect_deny "duplicate canonical claimant" "${ADMIT[@]}" --host oci-gateway --pl
 expect_deny "unmerged source" "${ADMIT[@]}" --host oci-gateway --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged false
 expect_deny "direct untraceable deploy" "${ADMIT[@]}" --host oci-gateway --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-merged true
 expect_deny "attempted canonical rename" "${ADMIT[@]}" --host oci-gateway --platform caprover --app qwickapps-mcp-gateway-retired --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
-expect_pass "canonical owner" "${ADMIT[@]}" --host oci-gateway --platform caprover --app srv-captain--qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
+expect_pass "canonical owner" "${ADMIT[@]}" --host oci-gateway --platform caprover --app qwickapps-mcp --hostname qwickapps-mcp --image-ref ghcr.io/qwickapps/qwickway:latest --production --source-sha 0123456789012345678901234567890123456789 --source-merged true
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 "${ADMIT[@]}" --render-windmill-inventory "$TMP/inventory.json" >/dev/null
 python3 - "$TMP/inventory.json" <<'PY'

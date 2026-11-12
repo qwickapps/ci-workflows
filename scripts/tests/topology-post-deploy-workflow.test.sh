@@ -59,7 +59,7 @@ import sys
 root = Path(sys.argv[1])
 workflow = (root / ".github/workflows/deploy-app.yml").read_text(encoding="utf-8")
 stage_target_app = "qwickapps-mcp-live"
-registry_app = "srv-captain--qwickapps-mcp"
+registry_app = "qwickapps-mcp"
 assert stage_target_app != registry_app
 assert workflow.count('--app "$REGISTRY_APP"') == 1
 assert workflow.count('--registry-app "$REGISTRY_APP"') == 2
