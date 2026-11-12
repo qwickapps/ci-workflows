@@ -83,6 +83,36 @@ JSON
       [[ "$cmd" == *"service ls"* ]] && echo -n ""
     fi
     ;;
+  stage_slot)
+    if [[ "$host" == "oci-gateway" ]]; then
+      if [[ "$cmd" == *"service ls"* ]]; then
+        echo "qwickapps-mcp-live"
+      elif [[ "$cmd" == *"service inspect"* ]]; then
+        cat <<'JSON'
+[{"Spec":{"Name":"qwickapps-mcp-live","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}]
+JSON
+      fi
+    else
+      [[ "$cmd" == *"service ls"* ]] && echo -n ""
+    fi
+    ;;
+  stage_slot_conflict)
+    if [[ "$host" == "oci-gateway" ]]; then
+      if [[ "$cmd" == *"service ls"* ]]; then
+        echo "qwickapps-mcp-live"
+        echo "racing-claimant"
+      elif [[ "$cmd" == *"service inspect"* ]]; then
+        cat <<'JSON'
+[
+  {"Spec":{"Name":"qwickapps-mcp-live","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:latest","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}},
+  {"Spec":{"Name":"racing-claimant","Mode":{"Replicated":{"Replicas":1}},"TaskTemplate":{"ContainerSpec":{"Image":"ghcr.io/qwickapps/qwickway:racer","Env":["TS_HOSTNAME=qwickapps-mcp"]}}}}
+]
+JSON
+      fi
+    else
+      [[ "$cmd" == *"service ls"* ]] && echo -n ""
+    fi
+    ;;
   unreachable)
     echo "ssh: connect to host $host port 22: Connection timed out" >&2
     exit 255
@@ -260,6 +290,42 @@ PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean python3 "$ROOT/scripts/topology-live
   --coolify-token dummy --coolify-base-url "http://127.0.0.1:18908" \
   && { echo "FAIL expected deny: registry app mismatch"; fail=$((fail+1)); } \
   || { echo "PASS denied registry app mismatch"; pass=$((pass+1)); }
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== stage slot uses a distinct registry identity but remains its own claimant =="
+start_mock clean 18909
+STAGE_STATE="$TMP/stage-state.json"
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=stage_slot python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE" \
+  --hostname qwickapps-mcp --app qwickapps-mcp-live --registry-app srv-captain--qwickapps-mcp --target-host oci-gateway \
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy \
+  --tailscale-base-url "http://127.0.0.1:18909" --coolify-base-url "http://127.0.0.1:18909" --pre-mutation-state-out "$STAGE_STATE" \
+  && { echo "PASS stage slot redeploy admitted"; pass=$((pass+1)); } \
+  || { echo "FAIL expected pass: stage slot redeploy admitted"; fail=$((fail+1)); }
+if python3 - "$STAGE_STATE" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["previous_owner"]["name"] == "qwickapps-mcp-live"
+PY
+then
+  echo "PASS stage slot snapshot preserves deployed claimant"; pass=$((pass+1))
+else
+  echo "FAIL stage slot snapshot preserves deployed claimant"; fail=$((fail+1))
+fi
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== post-mutation conflict preserves target slot for rollback =="
+start_mock clean 18910
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=stage_slot_conflict python3 "$ROOT/scripts/topology-live-preflight.py" --registry "$PRE" \
+  --hostname qwickapps-mcp --app qwickapps-mcp-live --registry-app srv-captain--qwickapps-mcp --target-host oci-gateway \
+  --caprover-hosts oci-gateway oci-main server1-qwickforge --ts-api-key dummy --coolify-token dummy \
+  --tailscale-base-url "http://127.0.0.1:18910" --coolify-base-url "http://127.0.0.1:18910" \
+  && { echo "FAIL expected deny: post-mutation competing claimant"; fail=$((fail+1)); } \
+  || { echo "PASS denied post-mutation competing claimant"; pass=$((pass+1)); }
+ROLLBACK_OUTPUT="$(python3 "$ROOT/scripts/topology-rollback.py" --pre-mutation-state "$STAGE_STATE" --new-claimant-host oci-gateway --new-claimant-app qwickapps-mcp-live --dry-run)"
+if [[ "$ROLLBACK_OUTPUT" == *'"service": "qwickapps-mcp-live"'* ]] && [[ "$ROLLBACK_OUTPUT" != *'"service": "srv-captain--qwickapps-mcp"'* ]]; then
+  echo "PASS rollback neutralizes target slot, not registry identity"; pass=$((pass+1))
+else
+  echo "FAIL rollback neutralizes target slot, not registry identity"; fail=$((fail+1))
+fi
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
 echo "Tests: $pass passed, $fail failed"

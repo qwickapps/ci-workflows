@@ -1134,7 +1134,8 @@ jobs:
           python3 .ci-workflows/scripts/topology-live-preflight.py \
             --registry .ci-workflows/config/service-identities.json \
             --hostname "$TS_HOSTNAME" \
-            --app "$REGISTRY_APP" \
+            --app "${{ needs.resolve-stage.outputs.target_app }}" \
+            --registry-app "$REGISTRY_APP" \
             --target-host "$HOST_KEY" \
             --caprover-hosts oci-gateway oci-main server1-qwickforge \
             --ts-api-key "$TS_API_KEY_RESOLVED" \
@@ -1327,7 +1328,8 @@ jobs:
           python3 .ci-workflows/scripts/topology-live-preflight.py \
               --registry .ci-workflows/config/service-identities.json \
               --hostname "$TS_HOSTNAME" \
-              --app "$REGISTRY_APP" \
+              --app "${{ needs.resolve-stage.outputs.target_app }}" \
+              --registry-app "$REGISTRY_APP" \
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
@@ -1358,7 +1360,7 @@ jobs:
             python3 .ci-workflows/scripts/topology-rollback.py \
               --pre-mutation-state "$PRE_STATE" \
               --new-claimant-host "$HOST_KEY" \
-              --new-claimant-app "$REGISTRY_APP"
+              --new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"
             echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
             exit 1
           fi

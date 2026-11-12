@@ -252,7 +252,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", required=True, type=Path)
     parser.add_argument("--hostname", required=True, help="canonical_hostname being deployed")
-    parser.add_argument("--app", required=True, help="CapRover app name being deployed")
+    parser.add_argument("--app", required=True,
+                        help="actual CapRover app/service being deployed and excluded as this deploy's claimant")
+    parser.add_argument("--registry-app", default="",
+                        help="canonical app identity from the registry; defaults to --app for direct callers")
     parser.add_argument("--target-host", required=True, help="required_host for this deploy")
     parser.add_argument("--caprover-hosts", nargs="*", default=DEFAULT_CAPROVER_HOSTS)
     parser.add_argument("--ts-api-key", required=True)
@@ -269,12 +272,13 @@ def main() -> int:
 
     registry = ta.load(args.registry)
     entry = next((e for e in registry if e["canonical_hostname"].lower() == args.hostname.lower()), None)
+    registry_app = args.registry_app or args.app
     if entry is None:
         return emit_result(args, status_code=409, failure_type="topology_conflict",
                            reason=f"hostname {args.hostname!r} has no registry entry; static admission should already have caught this")
-    if entry["app"] != args.app:
+    if entry["app"] != registry_app:
         return emit_result(args, status_code=409, failure_type="topology_conflict",
-                           reason=f"app {args.app!r} != registry app {entry['app']!r} for {args.hostname!r}")
+                           reason=f"registry app {registry_app!r} != registered app {entry['app']!r} for {args.hostname!r}")
     if entry["required_host"] != args.target_host:
         return emit_result(args, status_code=409, failure_type="topology_conflict",
                            reason=f"target host {args.target_host!r} != registry required_host {entry['required_host']!r} for {args.hostname!r}")

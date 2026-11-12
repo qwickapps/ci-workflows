@@ -17,8 +17,10 @@ require() {
 
 require '--result-json-out "$RESULT_JSON"' 'preflight writes structured result'
 require 'REGISTRY_APP="$(python3 -c' 'workflow resolves canonical registry app from hostname'
-require '--app "$REGISTRY_APP"' 'admission and live preflight use canonical registry app'
-require '--new-claimant-app "$REGISTRY_APP"' 'rollback uses canonical registry app'
+require '--app "$REGISTRY_APP"' 'static admission uses canonical registry app'
+require '--registry-app "$REGISTRY_APP"' 'live preflight validates canonical registry app'
+require '--app "${{ needs.resolve-stage.outputs.target_app }}"' 'live preflight excludes deployed target app'
+require '--new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"' 'rollback neutralizes deployed target app'
 require '"status_code"' 'workflow parses status_code'
 require '"failure_type"' 'workflow parses failure_type'
 require '[ "$STATUS_CODE" = "409" ] && [ "$FAILURE_TYPE" = "topology_conflict" ]' '409 conflict gate exists'
@@ -58,8 +60,10 @@ workflow = (root / ".github/workflows/deploy-app.yml").read_text(encoding="utf-8
 stage_target_app = "qwickapps-mcp-live"
 registry_app = "srv-captain--qwickapps-mcp"
 assert stage_target_app != registry_app
-assert workflow.count('--app "$REGISTRY_APP"') == 3
-assert '--new-claimant-app "$REGISTRY_APP"' in workflow
+assert workflow.count('--app "$REGISTRY_APP"') == 1
+assert workflow.count('--registry-app "$REGISTRY_APP"') == 2
+assert workflow.count('--app "${{ needs.resolve-stage.outputs.target_app }}"') == 2
+assert '--new-claimant-app "${{ needs.resolve-stage.outputs.target_app }}"' in workflow
 subprocess.run([
     "python3", str(root / "scripts/topology-admission.py"),
     "--registry", str(root / "config/service-identities.json"),
