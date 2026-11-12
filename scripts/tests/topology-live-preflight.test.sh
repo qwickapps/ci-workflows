@@ -152,6 +152,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
+        if SCENARIO == "ts_unreachable" and "/tailnet/" in self.path:
+            self.send_response(503)
+            self.end_headers()
+            return
+        if SCENARIO == "coolify_unreachable" and self.path.endswith("/applications"):
+            self.send_response(503)
+            self.end_headers()
+            return
         if "/tailnet/" in self.path:
             self._send(TS_DEVICES_GHOST_ONLINE if SCENARIO == "ts_ghost" else TS_DEVICES_CLEAN)
         elif self.path.endswith("/applications"):
@@ -262,6 +270,46 @@ then
   echo "PASS verification structured result is 503/verification_failure"; pass=$((pass+1))
 else
   echo "FAIL verification structured result is 503/verification_failure"; fail=$((fail+1))
+fi
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== unreachable Tailscale source => fail closed with structured verification failure =="
+start_mock ts_unreachable 18911
+TS_VERIFICATION_RESULT="$TMP/ts-verification-result.json"
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18911" --coolify-base-url "http://127.0.0.1:18911" \
+  --result-json-out "$TS_VERIFICATION_RESULT" \
+  && { echo "FAIL expected deny: Tailscale unreachable"; fail=$((fail+1)); } \
+  || { echo "PASS denied Tailscale unreachable (fail-closed)"; pass=$((pass+1)); }
+if python3 - "$TS_VERIFICATION_RESULT" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status_code"] == 503
+assert result["failure_type"] == "verification_failure"
+PY
+then
+  echo "PASS Tailscale failure structured result is 503/verification_failure"; pass=$((pass+1))
+else
+  echo "FAIL Tailscale failure structured result is 503/verification_failure"; fail=$((fail+1))
+fi
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
+
+echo "== unreachable Coolify source => fail closed with structured verification failure =="
+start_mock coolify_unreachable 18912
+COOLIFY_VERIFICATION_RESULT="$TMP/coolify-verification-result.json"
+PATH="$TMP:$PATH" FAKE_SWARM_SCENARIO=clean "${PREFLIGHT[@]}" --tailscale-base-url "http://127.0.0.1:18912" --coolify-base-url "http://127.0.0.1:18912" \
+  --result-json-out "$COOLIFY_VERIFICATION_RESULT" \
+  && { echo "FAIL expected deny: Coolify unreachable"; fail=$((fail+1)); } \
+  || { echo "PASS denied Coolify unreachable (fail-closed)"; pass=$((pass+1)); }
+if python3 - "$COOLIFY_VERIFICATION_RESULT" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status_code"] == 503
+assert result["failure_type"] == "verification_failure"
+PY
+then
+  echo "PASS Coolify failure structured result is 503/verification_failure"; pass=$((pass+1))
+else
+  echo "FAIL Coolify failure structured result is 503/verification_failure"; fail=$((fail+1))
 fi
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null || true
 
