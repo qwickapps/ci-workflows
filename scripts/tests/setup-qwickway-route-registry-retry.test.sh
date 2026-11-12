@@ -88,6 +88,7 @@ case "$url" in
     # This is the TARGET_APP-writing call. Record that it happened so test
     # (b) can prove it was never reached when the registry refresh fails.
     echo "called" >> "$STATE_DIR/appdef_update_calls"
+    printf '%s' "$payload" > "$STATE_DIR/last_appdef_update_payload.json"
     printf '{"status":100}'
     ;;
   */api/v2/user/apps/appDefinitions)
@@ -197,7 +198,7 @@ REGISTRIES_JSON_NO_GHCR='{
   }
 }'
 
-# run_script REGISTRIES_JSON [REGISTRY_USER]
+# run_script REGISTRIES_JSON [REGISTRY_USER] [STABLE_APP_URL]
 # Runs the real script as a subprocess with the fake curl on PATH. Prints
 # combined stdout+stderr to $CASE_OUT and returns the script's exit code
 # (never triggers set -e in the caller -- caller must capture $?).
@@ -210,13 +211,16 @@ REGISTRIES_JSON_NO_GHCR='{
 # unrecognized-flag error, instead of demonstrating the actual regressions).
 # Only case (c) passes a custom user, to test --registry-user itself.
 run_script() {
-  local registries_json="$1" registry_user="${2:-}"
+  local registries_json="$1" registry_user="${2:-}" stable_app_url="${3:-}"
   echo "$registries_json" > "$STATE_DIR/registries.json"
   echo "$APPDEF_JSON" > "$STATE_DIR/appdef.json"
 
   local extra_args=()
   if [ -n "$registry_user" ]; then
     extra_args=(--registry-user "$registry_user")
+  fi
+  if [ -n "$stable_app_url" ]; then
+    extra_args+=(--stable-app-url "$stable_app_url")
   fi
 
   PATH="$FAKE_BIN:$PATH" FAKE_CURL_STATE_DIR="$STATE_DIR" \
@@ -285,6 +289,7 @@ echo ""
 echo "== (c) --registry-user is used consistently in both update and insert payloads =="
 
 CUSTOM_USER="custom-registry-actor"
+STABLE_FALLBACK_URL="https://test-gateway-stable.example.com"
 
 # (c1) update path: an existing default-push ghcr.io entry.
 STATE_DIR="$WORKDIR/case-c-update"
@@ -293,7 +298,7 @@ echo "succeed" > "$STATE_DIR/registry_update_mode"
 CASE_OUT="$WORKDIR/case-c-update.out"
 
 set +e
-run_script "$REGISTRIES_JSON_DEFAULT_PUSH" "$CUSTOM_USER"
+run_script "$REGISTRIES_JSON_DEFAULT_PUSH" "$CUSTOM_USER" "$STABLE_FALLBACK_URL"
 RC_C1=$?
 set -e
 
@@ -301,6 +306,8 @@ assert "(c1) script succeeds against the update path" \
   test "$RC_C1" -eq 0
 assert "(c1) the update payload's registryUser matches --registry-user" \
   bash -c "jq -e --arg u '$CUSTOM_USER' '.registryUser == \$u' '$STATE_DIR/last_update_payload.json' >/dev/null"
+assert "(c1) --stable-app-url is parsed and written as QwickWay's STABLE_APP fallback" \
+  bash -c "jq -e --arg u '$STABLE_FALLBACK_URL' '(.envVars | map(select(.key == \"STABLE_APP\")) | length) == 1 and (.envVars[] | select(.key == \"STABLE_APP\") | .value == \$u)' '$STATE_DIR/last_appdef_update_payload.json' >/dev/null"
 
 # (c2) insert path: no existing ghcr.io entry at all.
 STATE_DIR="$WORKDIR/case-c-insert"

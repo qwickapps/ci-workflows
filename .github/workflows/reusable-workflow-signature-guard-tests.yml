@@ -51,6 +51,9 @@ jobs:
       - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
+          # On PRs test the actual head, not GitHub's synthetic merge ref.
+          # Keep the push trigger usable on main/dev as well.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Install PyYAML
@@ -59,5 +62,12 @@ jobs:
             python3 -m pip install --user PyYAML
           fi
 
+      - name: Ensure PR base commit is available
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin "${{ github.event.pull_request.base.sha }}"
+
       - name: Run check-reusable-workflow-signatures.sh tests
+        env:
+          PR_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/tests/check-reusable-workflow-signatures.test.sh

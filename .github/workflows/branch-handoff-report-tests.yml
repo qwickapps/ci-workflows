@@ -1,0 +1,28 @@
+name: Branch Handoff Report Specificity Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/branch-handoff-report-tests.yml'
+      - 'scripts/validate-branch-handoff-report.py'
+      - 'scripts/tests/branch-handoff-report.test.py'
+      - 'scripts/tests/fixtures/branch-handoff-report/**'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/branch-handoff-report-tests.yml'
+      - 'scripts/validate-branch-handoff-report.py'
+      - 'scripts/tests/branch-handoff-report.test.py'
+      - 'scripts/tests/fixtures/branch-handoff-report/**'
+
+permissions:
+  contents: read
+
+jobs:
+  branch-handoff-report-tests:
+    name: preserved branch handoff specificity tests
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/tests/branch-handoff-report.test.py

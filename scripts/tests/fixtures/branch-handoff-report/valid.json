@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-04T03:00:00+00:00",
+  "coverage": {
+    "qwickapps/example": 1
+  },
+  "total_non_default_branches": 1,
+  "repositories": [
+    {
+      "repository": "qwickapps/example",
+      "branches": [
+        {
+          "branch": "anika/example",
+          "observed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "disposition": "preserve",
+          "ownership_evidence": {
+            "owner": "task t_ab12cd34"
+          },
+          "next_action": "Task t_ab12cd34 must verify PR #90 for branch anika/example at SHA aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa and decide whether to reopen it or preserve unique commits in a replacement PR."
+        }
+      ]
+    }
+  ]
+}

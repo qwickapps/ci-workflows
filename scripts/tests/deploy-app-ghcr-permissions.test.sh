@@ -12,9 +12,8 @@
 #
 # Verifies the jobs with a GHCR-login step each declare an explicit,
 # correctly-scoped `permissions:` block: build (contents: read + packages:
-# write -- it checks out the repo AND pushes), verify-provenance (packages:
-# read only -- no checkout, pull-only), retag (packages: write -- no
-# checkout, writes a new manifest tag).
+# write -- it checks out the repo AND pushes), retag (packages: write --
+# no checkout, writes a new manifest tag).
 #
 # deploy-stable and deploy-caprover do NOT need GHCR package access
 # locally (mcp#392): they deploy via deploy-from-ghcr.sh, which hands
@@ -38,6 +37,17 @@
 # the empirical repro. Landing the needed grants in the 14 callers' own
 # top-level permissions is a required Phase 1b follow-up BEFORE either job
 # can safely carry its own permissions block again.
+#
+# t_b14e0125 (first-stable bootstrap): verify-provenance used to be the
+# THIRD job in this "explicit, correctly-scoped" group (packages: read
+# only). The new bootstrap proof-read step needs checks: read + actions:
+# read, hitting the EXACT same dispatch-time subset wall deploy-caprover/
+# deploy-stable already hit -- so it joined their "NO permissions block,
+# inherit the caller's own top-level grant" camp instead of getting a
+# static checks:read/actions:read block that would break all 14 callers.
+# A caller that wants bootstrap_first_stable: true to work must add those
+# two scopes to ITS OWN top-level permissions (per-caller opt-in); see
+# this job's header comment in deploy-app.yml.
 #
 # A permissions: block on a job REPLACES the job's entire default
 # permission set, not adds to it -- this also checks that no OTHER job in
@@ -118,9 +128,6 @@ assert "workflow file exists" \
 assert "build job: permissions = {contents: read, packages: write}" \
   test "$(job_permissions_json build)" = '{"contents": "read", "packages": "write"}'
 
-assert "verify-provenance job: permissions = {packages: read}" \
-  test "$(job_permissions_json verify-provenance)" = '{"packages": "read"}'
-
 assert "retag job: permissions = {packages: write}" \
   test "$(job_permissions_json retag)" = '{"packages": "write"}'
 
@@ -129,6 +136,9 @@ assert "deploy-caprover job: NO permissions block (aos#193 Phase 1 review round 
 
 assert "deploy-stable job: NO permissions block (aos#193 Phase 1 review round 2 -- see this test's header comment)" \
   test "$(job_permissions_json deploy-stable)" = "null"
+
+assert "verify-provenance job: NO permissions block (t_b14e0125 first-stable bootstrap -- see this test's header comment and this job's header comment in deploy-app.yml)" \
+  test "$(job_permissions_json verify-provenance)" = "null"
 
 echo "== No workflow-level permissions block (per-job scoping only) =="
 TOPLEVEL=$(python3 -c "

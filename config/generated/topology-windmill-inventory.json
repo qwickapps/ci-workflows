@@ -4,7 +4,7 @@
     {
       "hostname": "qwickapps-mcp",
       "platform": "caprover",
-      "app": "srv-captain--qwickapps-mcp",
+      "app": "qwickapps-mcp",
       "host": "oci-gateway",
       "role": "load-balancer",
       "state": {

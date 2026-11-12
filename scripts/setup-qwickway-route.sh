@@ -29,6 +29,7 @@ source "$SCRIPT_DIR/lib/ghcr-token-select.sh"
 #     --github-token <token> \
 #     [--domain <custom-domain>] \
 #     [--health-check-path <path>] \
+#     [--stable-app-url <url>] \
 #     [--github-owner <owner>] \
 #     [--ts-authkey <key>] \
 #     [--ts-hostname <hostname>] \
@@ -197,6 +198,7 @@ ROUTE_CAPROVER_URL=""
 ROUTE_CAPROVER_PASSWORD=""
 DOMAIN=""
 HEALTH_CHECK_PATH="/health"
+STABLE_APP_URL=""
 GITHUB_TOKEN=""
 GITHUB_OWNER="qwickapps"
 TS_AUTHKEY=""
@@ -236,6 +238,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --health-check-path)
       HEALTH_CHECK_PATH="$2"
+      shift 2
+      ;;
+    --stable-app-url)
+      STABLE_APP_URL="$2"
       shift 2
       ;;
     --github-token)
@@ -294,6 +300,9 @@ echo "Target URL:  $TARGET_APP_URL"
 echo "Route CapRover: $ROUTE_CAPROVER_URL"
 echo "Image: $QWICKWAY_IMAGE"
 echo "Health Check Path: $HEALTH_CHECK_PATH"
+if [ -n "$STABLE_APP_URL" ]; then
+  echo "Stable fallback URL: $STABLE_APP_URL"
+fi
 if [ -n "$DOMAIN" ]; then
   echo "Domain: $DOMAIN"
 fi
@@ -682,6 +691,15 @@ ENV_VARS=$(jq -n \
   --arg healthPath "$HEALTH_CHECK_PATH" \
   '[{key: "TARGET_APP", value: $targetApp}, {key: "HEALTH_CHECK_PATH", value: $healthPath}]')
 
+# STABLE_APP is QwickWay's explicit fallback backend. Keep it distinct from
+# TARGET_APP so the gateway preserves primary/live preference while retaining
+# the stable slot for failover. The deploy-app reusable workflow supplies this
+# only when a stable route is configured, so omit the variable otherwise.
+if [ -n "$STABLE_APP_URL" ]; then
+  ENV_VARS=$(echo "$ENV_VARS" | jq --arg stableApp "$STABLE_APP_URL" \
+    '. + [{key: "STABLE_APP", value: $stableApp}]')
+fi
+
 ENV_VARS=$(resolve_ts_env_vars "$CURRENT_DEF_UPDATED" "$ENV_VARS" "$TS_AUTHKEY" "$TS_HOSTNAME" "$TS_TAGS" "$TS_API_KEY" "$TS_EPHEMERAL_AUTHKEY")
 EFFECTIVE_TS_HOSTNAME=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_HOSTNAME") | .value // ""' | head -1)
 EFFECTIVE_TS_API_KEY=$(echo "$ENV_VARS" | jq -r '.[] | select(.key == "TS_API_KEY") | .value // ""' | head -1)
@@ -693,6 +711,9 @@ MERGED=$(echo "$CURRENT_DEF_UPDATED" | jq \
 
 echo "  TARGET_APP=$TARGET_APP_URL"
 echo "  HEALTH_CHECK_PATH=$HEALTH_CHECK_PATH"
+if [ -n "$STABLE_APP_URL" ]; then
+  echo "  STABLE_APP=$STABLE_APP_URL"
+fi
 echo "  Container port: 80"
 echo "  Tailscale hostname: ${EFFECTIVE_TS_HOSTNAME:-<unset>}"
 

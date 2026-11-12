@@ -1,0 +1,52 @@
+name: Deploy App No-Artifact Env Handoff Tests
+
+# Regression gate for t_ffaf9f03: deploy-app.yml must never hand off a
+# rendered app env file via actions/upload-artifact + download-artifact
+# (secrets at rest outside QwickSecrets, plus the org Actions
+# artifact-storage quota wall that broke every dev deploy) or a /tmp
+# fallback path. The env file must render IN the job that consumes it via
+# the required env_render_script input.
+#
+# Tests:
+#   bash scripts/tests/deploy-app-no-artifact-env-handoff.test.sh
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-app-no-artifact-env-handoff-tests.yml'
+      - 'scripts/resolve-docker-endpoint.sh'
+      - 'scripts/tests/deploy-app-no-artifact-env-handoff.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - 'scripts/resolve-docker-endpoint.sh'
+      - 'scripts/tests/deploy-app-no-artifact-env-handoff.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: deploy-app.yml no-artifact env-handoff tests
+    runs-on: [self-hosted, choco]
+    # ci-workflows#184: this repo is public and this job runs on the
+    # fleet's self-hosted choco runner. Without this guard, a
+    # pull_request from a fork would execute its own workflow-file
+    # changes (and step scripts) directly on that host. event_name is
+    # checked first so push (this file's other trigger) is unaffected --
+    # github.event.pull_request is only populated for pull_request events.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Run no-artifact env-handoff contract test
+        run: bash scripts/tests/deploy-app-no-artifact-env-handoff.test.sh
