@@ -1,0 +1,40 @@
+name: Definition of Done Tests
+
+# Regression gate for ci-workflows#147: definition-of-done.yml's
+# "Check 2 — test files in diff" must pass a lockfile-only diff (it has no
+# source change to test) and still fail any diff with a non-lockfile change
+# and no test file.
+#
+# Tests:
+#   bash scripts/tests/definition-of-done-test-files.test.sh
+#     - extracts the step's real `run:` script from the workflow and runs
+#       it against throwaway git repos.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/definition-of-done.yml'
+      - '.github/workflows/definition-of-done-tests.yml'
+      - 'scripts/tests/definition-of-done-test-files.test.sh'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/definition-of-done.yml'
+      - 'scripts/tests/definition-of-done-test-files.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  test-files-check:
+    name: definition-of-done test-files check tests
+    runs-on: [self-hosted, choco]
+    # ci-workflows#184: see the sibling comment in
+    # deploy-app-stage-host-gate-tests.yml for why this guard is needed.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run definition-of-done test-files check tests
+        run: bash scripts/tests/definition-of-done-test-files.test.sh
