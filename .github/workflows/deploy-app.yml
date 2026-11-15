@@ -1152,14 +1152,18 @@ jobs:
           PACKAGE="${PARSED_REF[1]}"
           TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
-              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
-              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            ghcr_probe_pull_token "${{ github.actor }}" "$GH_TOKEN_EPHEMERAL" "$REF_OWNER" "$PACKAGE" "$TAG" || true
-            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+          # t_5e0ee673: ghcr_select_shared_registry_token only lets
+          # github.token through when the PAT is definitively unusable
+          # (unset or rejected); an indeterminate PAT probe fails closed.
+          if ! SOURCE="$(ghcr_select_shared_registry_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "$GH_TOKEN_LEGACY_PAT" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-caprover: no credential may be written into CapRover's shared ghcr.io registry entry for ${REF_OWNER}/${PACKAGE}:${TAG} (see shared-registry token line above; last probe: $(ghcr_describe_probe_failure)) -- refusing to export a token"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
+          if [ "$SOURCE" = "github.token" ]; then
+            echo "::warning::deploy-caprover: GHCR_PULL_TOKEN is unset or rejected by ghcr.io; writing this job's ephemeral github.token into CapRover's SHARED ghcr.io registry entry. It expires when this job ends and later pulls on this cluster will be denied until GHCR_PULL_TOKEN is fixed."
+          fi
           case "$SOURCE" in
             "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
             "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
@@ -2213,14 +2217,16 @@ jobs:
           PACKAGE="${PARSED_REF[1]}"
           TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
-              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
-              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            ghcr_probe_pull_token "${{ github.actor }}" "$GH_TOKEN_EPHEMERAL" "$REF_OWNER" "$PACKAGE" "$TAG" || true
-            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+          # t_5e0ee673: same shared-registry selection as deploy-caprover.
+          if ! SOURCE="$(ghcr_select_shared_registry_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "$GH_TOKEN_LEGACY_PAT" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-stable: no credential may be written into CapRover's shared ghcr.io registry entry for ${REF_OWNER}/${PACKAGE}:${TAG} (see shared-registry token line above; last probe: $(ghcr_describe_probe_failure)) -- refusing to export a token"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
+          if [ "$SOURCE" = "github.token" ]; then
+            echo "::warning::deploy-stable: GHCR_PULL_TOKEN is unset or rejected by ghcr.io; writing this job's ephemeral github.token into CapRover's SHARED ghcr.io registry entry. It expires when this job ends and later pulls on this cluster will be denied until GHCR_PULL_TOKEN is fixed."
+          fi
           case "$SOURCE" in
             "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
             "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
