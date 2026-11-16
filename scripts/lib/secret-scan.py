@@ -212,37 +212,57 @@ def scan_text(text: str, location: str) -> list[Finding]:
     return findings
 
 
-def decompress_and_scan(path: Path) -> list[Finding]:
-    """Decompress a known archive extension and scan its content too
-    (aos#198: "scan the full diff, including compressed files")."""
-    findings: list[Finding] = []
-    name = path.name.lower()
+def _archive_kind(path: Path) -> str | None:
+    """Return an archive kind from content, never a filename extension.
+
+    Reusable CI materializes blobs under neutral numeric names. More
+    importantly, an extension/case check lets a secret hide in `PAYLOAD.GZ`
+    or in archive bytes named `fixture.bin`; the archive bytes are the only
+    trustworthy signal.
+    """
     try:
-        if name.endswith(".gz") and not name.endswith(".tar.gz") and not name.endswith(".tgz"):
+        with path.open("rb") as fh:
+            prefix = fh.read(512)
+    except OSError:
+        return None
+    if prefix.startswith(b"\x1f\x8b"):
+        return "gzip"
+    if prefix.startswith(b"PK\x03\x04") or prefix.startswith(b"PK\x05\x06") or prefix.startswith(b"PK\x07\x08"):
+        return "zip"
+    if len(prefix) >= 262 and prefix[257:262] == b"ustar":
+        return "tar"
+    return None
+
+
+def decompress_and_scan(path: Path) -> list[Finding]:
+    """Scan archive payloads identified by magic bytes, failing closed."""
+    findings: list[Finding] = []
+    kind = _archive_kind(path)
+    if kind is None:
+        return findings
+    try:
+        if kind == "gzip":
             with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
                 findings += scan_text(fh.read(), f"{path} (gunzipped)")
-        elif name.endswith(".tar.gz") or name.endswith(".tgz"):
-            with tarfile.open(path, "r:gz") as tf:
+        elif kind == "tar":
+            with tarfile.open(path, "r:") as tf:
                 for member in tf.getmembers():
                     if not member.isfile():
                         continue
                     fh = tf.extractfile(member)
                     if fh is None:
-                        continue
+                        raise tarfile.TarError("regular member could not be extracted")
                     content = fh.read().decode("utf-8", errors="replace")
                     findings += scan_text(content, f"{path}!{member.name}")
-        elif name.endswith(".zip"):
+        elif kind == "zip":
             with zipfile.ZipFile(path) as zf:
                 for member in zf.namelist():
                     with zf.open(member) as fh:
                         content = fh.read().decode("utf-8", errors="replace")
                         findings += scan_text(content, f"{path}!{member}")
-    except Exception as exc:  # noqa: BLE001 -- a corrupt/unreadable archive must not silently skip scanning
+    except Exception as exc:  # noqa: BLE001 -- an unreadable archive must not silently skip scanning
         findings.append(Finding(f"unreadable-archive ({exc.__class__.__name__})", str(path), 0, str(path)))
     return findings
-
-
-_COMPRESSED_SUFFIXES = (".gz", ".zip", ".tar.gz", ".tgz")
 
 
 def scan_paths(paths: list[str]) -> list[Finding]:
@@ -256,7 +276,7 @@ def scan_paths(paths: list[str]) -> list[Finding]:
             continue
         if not p.is_file():
             continue
-        if str(p).lower().endswith(_COMPRESSED_SUFFIXES):
+        if _archive_kind(p) is not None:
             findings += decompress_and_scan(p)
             continue
         try:
