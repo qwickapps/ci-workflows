@@ -19,8 +19,8 @@ source "${SCRIPT_DIR}/lib/caprover-api.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  caprover-slot-admin.sh wipe --app-name APP --caprover-url URL --caprover-password PASS
-  caprover-slot-admin.sh scale --app-name APP --instance-count N --caprover-url URL --caprover-password PASS
+  caprover-slot-admin.sh wipe --app-name APP --caprover-url URL --caprover-password PASS --gateway-caprover-url URL --gateway-caprover-password PASS
+  caprover-slot-admin.sh scale --app-name APP --instance-count N --caprover-url URL --caprover-password PASS [--gateway-caprover-url URL --gateway-caprover-password PASS]
   caprover-slot-admin.sh image --app-name APP --caprover-url URL --caprover-password PASS
   caprover-slot-admin.sh enable-ssl --app-name APP --caprover-url URL --caprover-password PASS
   caprover-slot-admin.sh copy-config \
@@ -46,6 +46,8 @@ SOURCE_APP_NAME=""
 TARGET_APP_NAME=""
 CAPROVER_URL=""
 CAPROVER_PASSWORD=""
+GATEWAY_CAPROVER_URL=""
+GATEWAY_CAPROVER_PASSWORD=""
 SOURCE_CAPROVER_URL=""
 SOURCE_CAPROVER_PASSWORD=""
 TARGET_CAPROVER_URL=""
@@ -72,6 +74,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --caprover-password)
       CAPROVER_PASSWORD="$2"
+      shift 2
+      ;;
+    --gateway-caprover-url)
+      GATEWAY_CAPROVER_URL="$2"
+      shift 2
+      ;;
+    --gateway-caprover-password)
+      GATEWAY_CAPROVER_PASSWORD="$2"
       shift 2
       ;;
     --source-caprover-url)
@@ -201,12 +211,13 @@ enable_base_domain_ssl() {
 
 case "$command" in
   wipe)
-    if [[ -z "$APP_NAME" || -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" ]]; then
+    if [[ -z "$APP_NAME" || -z "$CAPROVER_URL" || -z "$CAPROVER_PASSWORD" || -z "$GATEWAY_CAPROVER_URL" || -z "$GATEWAY_CAPROVER_PASSWORD" ]]; then
       usage
       exit 1
     fi
 
     token="$(caprover_login "$CAPROVER_URL" "$CAPROVER_PASSWORD")"
+    gateway_token="$(caprover_login "$GATEWAY_CAPROVER_URL" "$GATEWAY_CAPROVER_PASSWORD")"
     if ! existing="$(get_definition "$CAPROVER_URL" "$token" "$APP_NAME")"; then
       echo "Error: failed to inspect app definitions for ${APP_NAME}" >&2
       exit 1
@@ -216,6 +227,8 @@ case "$command" in
       echo "Build slot ${APP_NAME} is absent; nothing to wipe."
       exit 0
     fi
+
+    caprover_assert_not_active_gateway_target "$GATEWAY_CAPROVER_URL" "$gateway_token" "$APP_NAME"
 
     curl_args=()
     caprover_populate_curl_args "$CAPROVER_URL" curl_args
@@ -250,6 +263,15 @@ case "$command" in
     if [[ -z "$current" || "$current" == "null" ]]; then
       echo "Error: app ${APP_NAME} was not found; cannot scale" >&2
       exit 1
+    fi
+
+    if [[ "$INSTANCE_COUNT" == "0" ]]; then
+      if [[ -z "$GATEWAY_CAPROVER_URL" || -z "$GATEWAY_CAPROVER_PASSWORD" ]]; then
+        echo "Error: scaling to zero requires --gateway-caprover-url and --gateway-caprover-password so the lifecycle guard can verify no active gateway routes to ${APP_NAME}" >&2
+        exit 1
+      fi
+      gateway_token="$(caprover_login "$GATEWAY_CAPROVER_URL" "$GATEWAY_CAPROVER_PASSWORD")"
+      caprover_assert_not_active_gateway_target "$GATEWAY_CAPROVER_URL" "$gateway_token" "$APP_NAME"
     fi
 
     updated="$(echo "$current" | jq --argjson count "$INSTANCE_COUNT" '.instanceCount = $count')"

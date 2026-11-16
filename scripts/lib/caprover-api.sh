@@ -204,6 +204,59 @@ caprover_get_app_definitions() {
   printf '%s\n' "$response"
 }
 
+# Refuse destructive lifecycle actions while an active QwickWay gateway still
+# routes traffic to APP_NAME. Query CapRover's appDefinitions API instead of
+# Docker so the result is authoritative from a normal runner.
+# Arguments: GATEWAY_CAPROVER_URL GATEWAY_TOKEN APP_NAME.
+caprover_assert_not_active_gateway_target() {
+  local gateway_url="$1" gateway_token="$2" app_name="$3"
+  local definitions lb_name target domains
+
+  if [[ -z "$gateway_url" || -z "$gateway_token" || -z "$app_name" ]]; then
+    echo "Error: lifecycle guard requires gateway CapRover URL, token, and app name" >&2
+    return 1
+  fi
+  definitions=$(caprover_get_app_definitions "$gateway_url" "$gateway_token") || {
+    echo "Error: lifecycle guard could not read active gateway definitions; refusing destructive action for ${app_name}" >&2
+    return 1
+  }
+
+  while IFS=$'\t' read -r lb_name target domains; do
+    [[ -z "$lb_name" || -z "$target" ]] && continue
+    if caprover_target_matches_app "$target" "$app_name"; then
+      [[ -n "$domains" ]] || domains="${lb_name} (CapRover base domain)"
+      echo "REFUSED: ${app_name} is the active TARGET_APP of gateway ${lb_name} serving ${domains}. Move traffic off this app first, then retry the lifecycle action." >&2
+      return 1
+    fi
+  done < <(echo "$definitions" | jq -r '
+    .data.appDefinitions[]
+    | select((.instanceCount // 0) > 0)
+    | [
+        .appName,
+        ((.envVars // []) | map(select(.key == "TARGET_APP") | .value) | join(",")),
+        ((.customDomain // []) | if type == "array" then join(",") elif type == "string" then . else "" end)
+      ]
+    | @tsv')
+}
+
+# Match a direct target (app-name) or QwickWay's URL form
+# (https://app-name.app.qwickforge.com), without conflating api with api-next.
+caprover_target_matches_app() {
+  local target="$1" app_name="$2" item host
+  IFS=',' read -r -a targets <<< "$target"
+  for item in "${targets[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [[ "$item" == "$app_name" || "$item" == "srv-captain--${app_name}" ]] && return 0
+    host="${item#*://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+    host="${host%%.*}"
+    [[ "$host" == "$app_name" ]] && return 0
+  done
+  return 1
+}
+
 # Upsert GHCR registry credentials on the target CapRover instance.
 # $3 = GitHub personal access token with packages:read.
 # $4 = registry username (default x-access-token) -- ci-workflows: single
@@ -337,6 +390,7 @@ caprover_poll_deployed_image() {
 # Does NOT delete persistent volumes.
 caprover_remove_app() {
   local caprover_url="$1" token="$2" app_name="$3"
+  local gateway_caprover_url="${4:-}" gateway_token="${5:-}"
   local curl_args=()
   caprover_populate_curl_args "$caprover_url" curl_args
 
@@ -351,6 +405,8 @@ caprover_remove_app() {
     echo "  App '${app_name}' not found on ${caprover_url} — nothing to remove"
     return 0
   fi
+
+  caprover_assert_not_active_gateway_target "$gateway_caprover_url" "$gateway_token" "$app_name" || return 1
 
   echo "  Removing app '${app_name}' from ${caprover_url}..."
   local del_resp del_status del_desc
