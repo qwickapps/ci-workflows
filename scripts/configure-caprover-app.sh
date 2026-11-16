@@ -26,6 +26,7 @@ set -euo pipefail
 #     --caprover-url <url> \
 #     --caprover-password <password> \
 #     [--instance-count <count>]   (default 1)
+#     [--gateway-caprover-url <url> --gateway-caprover-password <password>]
 #     [--container-port <port>]    (default 3300)
 #     [--force-ssl true|false]     (default true)
 #     [--enable-ssl true|false]    (default true)
@@ -46,6 +47,8 @@ source "${SCRIPT_DIR}/lib/caprover-api.sh"
 APP_NAME=""
 CAPROVER_URL=""
 CAPROVER_PASSWORD=""
+GATEWAY_CAPROVER_URL=""
+GATEWAY_CAPROVER_PASSWORD=""
 INSTANCE_COUNT=1
 CONTAINER_PORT=3300
 FORCE_SSL="true"
@@ -66,6 +69,8 @@ while [[ $# -gt 0 ]]; do
     --app-name)            APP_NAME="$2";            shift 2 ;;
     --caprover-url)        CAPROVER_URL="$2";        shift 2 ;;
     --caprover-password)   CAPROVER_PASSWORD="$2";   shift 2 ;;
+    --gateway-caprover-url) GATEWAY_CAPROVER_URL="$2"; shift 2 ;;
+    --gateway-caprover-password) GATEWAY_CAPROVER_PASSWORD="$2"; shift 2 ;;
     --instance-count)      INSTANCE_COUNT="$2";      shift 2 ;;
     --container-port)      CONTAINER_PORT="$2";      shift 2 ;;
     --force-ssl)           FORCE_SSL="$2";           shift 2 ;;
@@ -102,6 +107,18 @@ echo ""
 echo "Authenticating with CapRover..."
 TOKEN="$(caprover_login "$CAPROVER_URL" "$CAPROVER_PASSWORD")"
 echo "  Authenticated"
+
+# A scale-to-zero update can make an active public route unavailable just as
+# surely as delete. Before any create/update side effect, make the gateway
+# inventory prove that no active QwickWay TARGET_APP references this app.
+if [ "$INSTANCE_COUNT" = "0" ]; then
+  if [ -z "$GATEWAY_CAPROVER_URL" ] || [ -z "$GATEWAY_CAPROVER_PASSWORD" ]; then
+    echo "Error: --instance-count 0 requires --gateway-caprover-url and --gateway-caprover-password so the lifecycle guard can verify no active gateway routes to ${APP_NAME}" >&2
+    exit 1
+  fi
+  GATEWAY_TOKEN="$(caprover_login "$GATEWAY_CAPROVER_URL" "$GATEWAY_CAPROVER_PASSWORD")"
+  caprover_assert_not_active_gateway_target "$GATEWAY_CAPROVER_URL" "$GATEWAY_TOKEN" "$APP_NAME"
+fi
 
 CURL_ARGS=()
 caprover_populate_curl_args "$CAPROVER_URL" CURL_ARGS
