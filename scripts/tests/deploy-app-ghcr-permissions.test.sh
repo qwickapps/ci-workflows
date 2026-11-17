@@ -74,6 +74,16 @@ assert() {
     fail=$((fail + 1))
   fi
 }
+refute() {
+  local desc="$1"; shift
+  if ! "$@"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc"
+    fail=$((fail + 1))
+  fi
+}
 
 job_permissions_json() {
   local job="$1"
@@ -210,11 +220,59 @@ echo "== ci-workflows#204: CapRover-side selection prefers the PAT, falls back t
 # CapRover registry entry -- the long-lived PAT is preferred there
 # (opposite order from the runner-side jobs above) precisely because it
 # outlives this one job, per this job's own header comment.
+#
+# t_5e0ee673: "PAT listed first" was not enough -- with plain
+# ghcr_select_token ANY PAT probe failure (ghcr.io blip, 5xx, timeout) fell
+# through to github.token and wrote a credential that dies with the job
+# into the shared registry while a valid PAT existed. These jobs must use
+# ghcr_select_shared_registry_token, which only allows the github.token
+# fallback when the PAT is definitively unset/rejected (behaviour covered
+# in ghcr-token-select.test.sh).
 for job in deploy-caprover deploy-stable; do
-  assert "$job: ghcr_select_token is called with GHCR_PULL_TOKEN as the FIRST candidate" \
-    bash -c 'test "$1" = "GHCR_PULL_TOKEN"' _ \
-      "$(step_run "$job" "Select GHCR pull token" | first_ghcr_select_token_label)"
+  SELECT_RUN="$(step_run "$job" "Select GHCR pull token")"
+  assert "$job: selection step exists" test -n "$SELECT_RUN"
+  assert "$job: uses ghcr_select_shared_registry_token" \
+    grep -qF 'ghcr_select_shared_registry_token' <<<"$SELECT_RUN"
+  refute "$job: does not use the order-only ghcr_select_token for the shared registry" \
+    grep -qE '(^|[^_])ghcr_select_token[[:space:]]' <<<"$SELECT_RUN"
+  assert "$job: PAT is passed as the first (preferred) candidate, github.token second" \
+    grep -qF '"$GH_TOKEN_LEGACY_PAT" "$GH_TOKEN_EPHEMERAL"' <<<"$SELECT_RUN"
+  assert "$job: GH_TOKEN_LEGACY_PAT is secrets.GHCR_PULL_TOKEN" \
+    test "$(step_env "$job" "Select GHCR pull token" GH_TOKEN_LEGACY_PAT)" = '${{ secrets.GHCR_PULL_TOKEN }}'
+  DEPLOY_RUN="$(step_run "$job" "Deploy image to")"
+  assert "$job: deploy-from-ghcr.sh step exists" grep -qF 'deploy-from-ghcr.sh' <<<"$DEPLOY_RUN"
+  assert "$job: deploy-from-ghcr.sh only ever receives the selected \$GHCR_PULL_TOKEN" \
+    grep -qF -- '--github-token "$GHCR_PULL_TOKEN"' <<<"$DEPLOY_RUN"
+  refute "$job: deploy-from-ghcr.sh never receives github.token directly" \
+    grep -qF 'github.token' <<<"$DEPLOY_RUN"
 done
+
+echo "== t_5e0ee673: every shared-registry writer in deploy-app.yml is covered =="
+# Any step that hands a token to deploy-from-ghcr.sh or setup-qwickway-route.sh
+# writes CapRover's shared ghcr.io registry entry. None may pass github.token.
+# runs_matching REGEX -- every run: script in the workflow matching REGEX.
+runs_matching() {
+  python3 - "$WORKFLOW" "$1" <<'PYEOF'
+import re, sys, yaml
+with open(sys.argv[1]) as f:
+    doc = yaml.safe_load(f)
+pat = re.compile(sys.argv[2])
+for job in (doc.get('jobs') or {}).values():
+    for step in job.get('steps') or []:
+        run = step.get('run') or ''
+        if pat.search(run):
+            print(run)
+PYEOF
+}
+SHARED_WRITERS="$(runs_matching 'deploy-from-ghcr\.sh|setup-qwickway-route\.sh')"
+assert "found shared-registry writer steps to check" test -n "$SHARED_WRITERS"
+refute "no shared-registry writer passes github.token / GITHUB_TOKEN as --github-token" \
+  grep -qE -- '--github-token[[:space:]]+"?(\$\{\{[[:space:]]*(github\.token|secrets\.GITHUB_TOKEN)|\$GH_TOKEN_EPHEMERAL|\$GITHUB_TOKEN)' <<<"$SHARED_WRITERS"
+QWICKWAY_RUN="$(runs_matching 'setup-qwickway-route\.sh')"
+assert "qwickway route step sources its registry token from secrets.GHCR_PULL_TOKEN" \
+  grep -qF 'GHCR_PULL="${{ secrets.GHCR_PULL_TOKEN }}"' <<<"$QWICKWAY_RUN"
+assert "qwickway route step passes that PAT to setup-qwickway-route.sh" \
+  grep -qF -- '--github-token "$GHCR_PULL"' <<<"$QWICKWAY_RUN"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

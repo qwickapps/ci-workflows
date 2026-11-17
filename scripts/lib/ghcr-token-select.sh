@@ -178,6 +178,53 @@ ghcr_select_token() {
   return 1
 }
 
+# ghcr_select_shared_registry_token <actor> <owner> <package> <tag> <pat> <ephemeral>
+#
+# Selection for credentials that get WRITTEN INTO CapRover's SHARED ghcr.io
+# registry entry (deploy-from-ghcr.sh overwrites it; every app on that
+# CapRover then pulls through it). Unlike ghcr_select_token, the long-lived
+# PAT is not just "listed first": the job's ephemeral github.token is only
+# eligible when the PAT has been DEFINITIVELY shown unusable -- unset
+# (empty_token) or rejected by ghcr.io (token_auth_failed /
+# manifest_auth_failed). Any indeterminate PAT probe result (ghcr.io
+# unreachable, 5xx/429, malformed token response, curl failure, missing
+# manifest) fails closed: a transient blip must never let a credential that
+# dies with this job replace a valid PAT for the whole cluster.
+#
+# Prints "GHCR_PULL_TOKEN" or "github.token" (labels only, never values) and
+# returns 0; returns 1 (nothing on stdout) when no candidate may be written.
+# GHCR_SHARED_REGISTRY_PAT_REASON holds the PAT probe reason afterwards so
+# callers can explain a fallback or a refusal.
+ghcr_select_shared_registry_token() {
+  local actor="$1" owner="$2" package="$3" tag="$4" pat="$5" ephemeral="$6"
+
+  GHCR_SHARED_REGISTRY_PAT_REASON="unknown"
+  if ghcr_probe_pull_token "$actor" "$pat" "$owner" "$package" "$tag"; then
+    GHCR_SHARED_REGISTRY_PAT_REASON="ok"
+    printf '%s\n' "GHCR_PULL_TOKEN"
+    return 0
+  fi
+  GHCR_SHARED_REGISTRY_PAT_REASON="${GHCR_PROBE_REASON:-unknown}"
+
+  case "$GHCR_SHARED_REGISTRY_PAT_REASON" in
+    empty_token|token_auth_failed|manifest_auth_failed)
+      echo "shared-registry token: GHCR_PULL_TOKEN unusable (${GHCR_SHARED_REGISTRY_PAT_REASON}); considering github.token fallback" >&2
+      ;;
+    *)
+      # Indeterminate: the PAT may well be valid. Refuse rather than write
+      # the ephemeral token over the shared registry entry.
+      echo "shared-registry token: GHCR_PULL_TOKEN probe indeterminate (${GHCR_SHARED_REGISTRY_PAT_REASON}); refusing github.token fallback for the shared registry" >&2
+      return 1
+      ;;
+  esac
+
+  if ghcr_probe_pull_token "$actor" "$ephemeral" "$owner" "$package" "$tag"; then
+    printf '%s\n' "github.token"
+    return 0
+  fi
+  return 1
+}
+
 # ghcr_describe_probe_failure
 # Prints a non-secret, operator-actionable explanation of the most recent
 # ghcr_probe_pull_token failure.  In particular, a 404 is a missing image/tag,
