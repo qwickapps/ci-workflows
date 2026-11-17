@@ -6,7 +6,7 @@
 # The contract is universal, not presence-only:
 #   * every `actions/checkout` step that targets qwickapps/ci-workflows is
 #     classified by its `path:`; the helper checkout (.ci-workflows) must be
-#     pinned to github.job_workflow_sha and sparse-check `scripts`; the
+#     pinned to job.workflow_sha and sparse-check `scripts`; the
 #     stable-host policy checkout (.ci-workflows-policy, ci-workflows#239) is
 #     the one documented main-tracked exception and may only carry the
 #     policy data file and its evaluator; any other target path fails.
@@ -24,7 +24,7 @@ WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/promote-to-stable.yml}"
 HELPER_PATH=".ci-workflows"
 POLICY_PATH=".ci-workflows-policy"
 # shellcheck disable=SC2016 # GitHub expression is intentionally literal.
-PINNED_REF='ref: ${{ github.job_workflow_sha }}'
+PINNED_REF='ref: ${{ job.workflow_sha }}'
 
 # Shared helpers the promote workflow must only ever run from the pinned
 # helper checkout.
@@ -82,7 +82,7 @@ while IFS= read -r -d '' block; do
   name="$(block_name "$block")"
   if grep -Eq "^[[:space:]]*path: ${HELPER_PATH}[[:space:]]*$" <<<"$block"; then
     helper_checkouts=$((helper_checkouts + 1))
-    block_has "$block" "$PINNED_REF" || bad_checkouts+=("helper checkout '$name' is not pinned to github.job_workflow_sha")
+    block_has "$block" "$PINNED_REF" || bad_checkouts+=("helper checkout '$name' is not pinned to job.workflow_sha")
     entries="$(sparse_entries "$block")"
     [ "$entries" = "scripts" ] || bad_checkouts+=("helper checkout '$name' must sparse-check exactly 'scripts' (got: ${entries:-<none>})")
   elif grep -Eq "^[[:space:]]*path: ${POLICY_PATH}[[:space:]]*$" <<<"$block"; then

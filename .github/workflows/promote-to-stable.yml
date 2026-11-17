@@ -195,7 +195,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qwickapps/ci-workflows
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ job.workflow_sha }}
           path: .ci-workflows
           sparse-checkout: |
             scripts
@@ -470,7 +470,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qwickapps/ci-workflows
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ job.workflow_sha }}
           path: .ci-workflows
           sparse-checkout: |
             scripts
