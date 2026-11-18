@@ -1,14 +1,13 @@
 name: "Org GHCR Prune"
 
 # Scheduled, live-ref-aware GHCR prune for the qwickapps org
-# (scripts/ghcr-prune.py, ci-workflows#220). The weekly scheduled sweep
-# enforces the decided retention policy: keep the five newest versions per
-# package and delete only versions that pass every safety predicate. Manual
-# workflow_dispatch remains dry-run by default so humans can inspect a JSONL
-# report before choosing an explicit enforcing run.
+# (scripts/ghcr-prune.py, ci-workflows#220). The weekly scheduled sweep is
+# audit-only: it writes a JSONL report and never deletes versions. A real
+# deletion run requires an explicit workflow_dispatch with enforce=true after
+# review of the dry-run report.
 
 on:
-  # The scheduled sweep enforces retention; manual runs default to dry-run.
+  # The scheduled sweep is audit-only and never performs deletion.
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
@@ -49,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(--org qwickapps --keep "${INPUT_KEEP:-5}" --output /tmp/ghcr-prune-report.jsonl)
-          if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; }; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; then
             args+=(--enforce)
           fi
           python3 scripts/ghcr-prune.py "${args[@]}"

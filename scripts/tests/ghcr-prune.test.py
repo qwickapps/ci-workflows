@@ -370,9 +370,10 @@ class WorkflowRetentionContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            'if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; }; then',
+            'if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; then',
             workflow,
         )
+        self.assertNotIn('EVENT_NAME" = "schedule"', workflow)
 
 
 class ScriptSelfChecksTests(unittest.TestCase):
