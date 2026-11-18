@@ -9,6 +9,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("ghcr_prune", ROOT / "scripts/ghcr-prune.py")
@@ -196,6 +197,25 @@ class RateLimitGateTests(unittest.TestCase):
         self.assertFalse(result.ok)
 
 
+class GitHubApiPathTests(unittest.TestCase):
+    def test_org_package_listing_uses_a_host_pinned_relative_api_path(self):
+        calls = []
+
+        def fake_run(args, capture_output, text):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+
+        with mock.patch.object(ghcr_prune.subprocess, "run", side_effect=fake_run):
+            result = ghcr_prune.list_org_packages(ghcr_prune.GitHub(), ORG)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(calls, [[
+            "gh", "api", "--hostname", "github.com",
+            "orgs/qwickapps/packages?package_type=container&per_page=100",
+            "--paginate",
+        ]])
+
+
 class RestoreLogTests(unittest.TestCase):
     def test_report_includes_a_working_restore_command_for_every_deletion(self):
         versions = make_versions(8)
@@ -339,6 +359,20 @@ class RepoDigestBatchMisalignmentTests(unittest.TestCase):
         self.assertEqual(result.value[refs[0]], [digest_a])
         self.assertEqual(result.value[refs[1]], [])
         self.assertEqual(calls["batch"], 1)
+
+
+class WorkflowRetentionContractTests(unittest.TestCase):
+    def test_prune_workflow_uses_the_retention_runner_contract(self):
+        workflow = (ROOT / ".github/workflows/ghcr-prune.yml").read_text()
+        self.assertIn("runs-on: [self-hosted, macmini]", workflow)
+        self.assertIn(
+            "GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}",
+            workflow,
+        )
+        self.assertIn(
+            'if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; }; then',
+            workflow,
+        )
 
 
 class ScriptSelfChecksTests(unittest.TestCase):
