@@ -1475,6 +1475,19 @@ jobs:
             --github-token "$GHCR_PULL_TOKEN" \
             --github-owner "${{ env.OWNER }}"
 
+      - name: Verify target service runs requested image
+        # A 504/non-JSON reply from CapRover may mean the request was accepted
+        # asynchronously, but it is not proof that Swarm replaced the old task.
+        # Verify the actual oci-main service task image before its HTTP health
+        # endpoint can be accepted and before retag consumes the success result.
+        run: |
+          .ci-workflows/scripts/verify-caprover-service-image.sh \
+            --ssh-host oci-main \
+            --service "srv-captain--${{ needs.resolve-stage.outputs.target_app }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --max-attempts 15 \
+            --sleep 10
+
       - name: Validate target slot health
         run: |
           .github/scripts/validate-deployment-health.sh \
@@ -2568,6 +2581,21 @@ jobs:
             --caprover-password "$CAPROVER_PASSWORD" \
             --github-token "$GHCR_PULL_TOKEN" \
             --github-owner "${{ env.OWNER }}"
+
+      - name: Verify stable service runs requested image
+        run: |
+          set -euo pipefail
+          case "$CAPROVER_URL" in
+            *captain.app.qwickforge.com*) SSH_TARGET=oci-main ;;
+            *macmini-devserver*) SSH_TARGET=macmini ;;
+            *) echo "ERROR: no SSH service-readback target is mapped for CapRover URL $CAPROVER_URL"; exit 1 ;;
+          esac
+          .ci-workflows/scripts/verify-caprover-service-image.sh \
+            --ssh-host "$SSH_TARGET" \
+            --service "srv-captain--${{ needs.resolve-stage.outputs.target_app }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --max-attempts 15 \
+            --sleep 10
 
       - name: Validate target slot health
         run: |
