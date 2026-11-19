@@ -288,6 +288,21 @@ IN_DEPLOYMENT_LANE=secondary IN_STAGE=live IN_APP_NAME=demo IN_CAPROVER_HOST=cap
 IN_DEPLOYMENT_LANE=secondary IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_fails_with "secondary stable fails closed" "secondary deployment lane supports only explicit build and uat"
 
+# t_ba218534: primary-only safety features are refused on the secondary lane,
+# never skipped, and an explicit CapRover override cannot steer it to OCI-main.
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+IN_CAPROVER_URL=https://captain.app.qwickforge.com \
+  assert_fails_with "secondary refuses a caprover_url override" "does not implement: caprover_url; refusing instead of skipping"
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+IN_CMD='node server.js' \
+  assert_fails_with "secondary refuses a custom cmd" "does not implement: cmd; refusing instead of skipping"
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+IN_REQUIRE_LIVE_APPROVAL_CHECK=true IN_RECORD_FIRST_STABLE_EVIDENCE=true \
+  assert_fails_with "secondary lists every unsupported input in one refusal" "does not implement: record_first_stable_evidence require_live_approval_check;"
+IN_DEPLOYMENT_LANE=primary IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+IN_CAPROVER_URL=https://captain.app.qwickforge.com \
+  assert_succeeds "primary build still accepts a caprover_url override (primary unchanged)"
+
 IN_DEPLOYMENT_LANE=tertiary IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
   assert_fails_with "unknown lane value is refused (closed contract)" "invalid lane 'tertiary'"
 

@@ -319,6 +319,9 @@ jobs:
             [ "${{ inputs.bootstrap_first_stable }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED bootstrap_first_stable"
             [ "${{ inputs.require_live_approval_check }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED require_live_approval_check"
             [ -z "${{ inputs.cmd }}" ] || UNSUPPORTED="$UNSUPPORTED cmd"
+            # An explicit CapRover override is a caller error on the Coolify
+            # lane. caprover_host is required for every caller and is ignored.
+            [ -z "${{ inputs.caprover_url }}" ] || UNSUPPORTED="$UNSUPPORTED caprover_url"
             if [ -n "$UNSUPPORTED" ]; then
               echo "ERROR: secondary (Momo Coolify) lane does not implement:${UNSUPPORTED}; refusing instead of skipping. Use lane=primary for these features."
               exit 1
@@ -1099,7 +1102,7 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
     concurrency:
-      group: coolify-momo-${{ inputs.app_name }}-build
+      group: coolify-momo-secondary-v1-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -1107,16 +1110,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qwickapps/ci-workflows
-          ref: main
+          # job.workflow_sha is the immutable commit of THIS reusable workflow
+          # (github.workflow_sha names the caller). Helpers must match the
+          # workflow under test, never main.
+          ref: ${{ job.workflow_sha }}
           path: .ci-workflows
           sparse-checkout: |
             .github/actions/coolify-validation
             scripts
             config/coolify-secondary-validation.json
           sparse-checkout-cone-mode: false
-      - name: Deploy explicit Momo build validation slot
-        uses: ./.ci-workflows/.github/actions/coolify-validation
-        env: &coolify_validation_env
+      - name: Render app env file (caller secrets, this step only)
+        id: env-file
+        env: &coolify_render_env
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
           QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
@@ -1134,21 +1140,49 @@ jobs:
           QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
           TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: |
+          set -euo pipefail
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/coolify-build-${{ inputs.app_name }}.env"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; secondary lane fails closed"
+            exit 1
+          fi
+          chmod 600 "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+      - name: Enforce exclusive Momo Coolify deploy token
+        run: python3 .ci-workflows/scripts/validate-coolify-token-exclusivity.py --root .ci-workflows
+      - name: Resolve scoped Momo validation credentials
+        # Only this step sees the secrets-service key. It exports just
+        # COOLIFY_MOMO_DEPLOY_TOKEN and TS_API_KEY_RESOLVED (masked); the
+        # composite action strips both before running any caller code.
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
           COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
+      - name: Deploy explicit Momo build validation slot
+        uses: ./.ci-workflows/.github/actions/coolify-validation
         with:
           role: build
           app-name: ${{ inputs.app_name }}
           resource-name: ${{ needs.resolve-stage.outputs.target_app }}
           environment: ${{ inputs.environment }}
-          env-render-script: ${{ inputs.env_render_script }}
+          env-file: ${{ steps.env-file.outputs.path }}
           image-ref: ${{ needs.resolve-stage.outputs.image_ref }}
           image-digest: ${{ needs.verify-provenance.outputs.image_digest }}
           container-port: ${{ inputs.container_port }}
           health-path: ${{ inputs.health_path }}
           target-url: ${{ needs.resolve-stage.outputs.target_app_url }}
           critical-subsystems: ${{ inputs.critical_subsystems }}
+          prod-critical-subsystems: ${{ inputs.prod_critical_subsystems }}
           warning-subsystems: ${{ inputs.warning_subsystems }}
           smoke-test-path: ${{ inputs.smoke_test_path }}
           smoke-test-command: ${{ inputs.smoke_test_command }}
@@ -1168,7 +1202,7 @@ jobs:
       needs.build.result == 'skipped'
     runs-on: [self-hosted, macmini]
     concurrency:
-      group: coolify-momo-${{ inputs.app_name }}-uat
+      group: coolify-momo-secondary-v1-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -1176,28 +1210,61 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qwickapps/ci-workflows
-          ref: main
+          # job.workflow_sha is the immutable commit of THIS reusable workflow
+          # (github.workflow_sha names the caller). Helpers must match the
+          # workflow under test, never main.
+          ref: ${{ job.workflow_sha }}
           path: .ci-workflows
           sparse-checkout: |
             .github/actions/coolify-validation
             scripts
             config/coolify-secondary-validation.json
           sparse-checkout-cone-mode: false
+      - name: Render app env file (caller secrets, this step only)
+        id: env-file
+        env: *coolify_render_env
+        run: |
+          set -euo pipefail
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/coolify-uat-${{ inputs.app_name }}.env"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; secondary lane fails closed"
+            exit 1
+          fi
+          chmod 600 "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+      - name: Enforce exclusive Momo Coolify deploy token
+        run: python3 .ci-workflows/scripts/validate-coolify-token-exclusivity.py --root .ci-workflows
+      - name: Resolve scoped Momo validation credentials
+        # Only this step sees the secrets-service key. It exports just
+        # COOLIFY_MOMO_DEPLOY_TOKEN and TS_API_KEY_RESOLVED (masked); the
+        # composite action strips both before running any caller code.
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+        run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
       - name: Deploy explicit Momo UAT validation slot
         uses: ./.ci-workflows/.github/actions/coolify-validation
-        env: *coolify_validation_env
         with:
           role: uat
           app-name: ${{ inputs.app_name }}
           resource-name: ${{ needs.resolve-stage.outputs.target_app }}
           environment: ${{ inputs.environment }}
-          env-render-script: ${{ inputs.env_render_script }}
+          env-file: ${{ steps.env-file.outputs.path }}
           image-ref: ${{ needs.resolve-stage.outputs.image_ref }}
           image-digest: ${{ needs.verify-provenance.outputs.image_digest }}
           container-port: ${{ inputs.container_port }}
           health-path: ${{ inputs.health_path }}
           target-url: ${{ needs.resolve-stage.outputs.target_app_url }}
           critical-subsystems: ${{ inputs.critical_subsystems }}
+          prod-critical-subsystems: ${{ inputs.prod_critical_subsystems }}
           warning-subsystems: ${{ inputs.warning_subsystems }}
           smoke-test-path: ${{ inputs.smoke_test_path }}
           smoke-test-command: ${{ inputs.smoke_test_command }}
@@ -2293,18 +2360,22 @@ jobs:
     needs: [resolve-stage, retag]
     if: always() && needs.resolve-stage.result == 'success' && needs.retag.result == 'success' && needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.deployment_lane == 'secondary'
     runs-on: [self-hosted, macmini]
-    # Same group as deploy-coolify-build so a stop can never interleave with
-    # a newer run's deploy of the same slot. The coolify-momo- prefix is
-    # disjoint from caprover-deploy-*, so neither lane queues behind the other.
+    # Same per-slot lock as deploy-coolify-build (t_2740078a contract), so a
+    # stop can never interleave with a newer run's deploy of the same slot.
+    # The coolify-momo-secondary-v1- prefix is disjoint from caprover-deploy-*,
+    # so neither lane queues behind or cancels the other.
     concurrency:
-      group: coolify-momo-${{ inputs.app_name }}-build
+      group: coolify-momo-secondary-v1-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
       cancel-in-progress: false
     steps:
       - name: Checkout explicit Momo validation implementation
         uses: actions/checkout@v4
         with:
           repository: qwickapps/ci-workflows
-          ref: main
+          # job.workflow_sha is the immutable commit of THIS reusable workflow
+          # (github.workflow_sha names the caller). Helpers must match the
+          # workflow under test, never main.
+          ref: ${{ job.workflow_sha }}
           path: .ci-workflows
           sparse-checkout: |
             scripts

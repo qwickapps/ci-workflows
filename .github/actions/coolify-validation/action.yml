@@ -1,5 +1,13 @@
 name: Momo Coolify validation deployment
 description: Closed build/UAT validation deployment with topology checks and rollback
+# Contract with deploy-app.yml (the only caller):
+# - The caller job renders the app env file in its own step (the only step that
+#   sees caller/QwickSecrets material) and passes the path as env-file.
+# - The caller job resolves COOLIFY_MOMO_DEPLOY_TOKEN and TS_API_KEY_RESOLVED
+#   into the job env with scripts/resolve-coolify-validation-credentials.sh.
+#   This action never receives the secrets-service key.
+# - Every step that runs caller-supplied code (deep health script, smoke
+#   command, E2E, migrations) unsets both deploy credentials first.
 inputs:
   role:
     required: true
@@ -9,7 +17,7 @@ inputs:
     required: true
   environment:
     required: true
-  env-render-script:
+  env-file:
     required: true
   image-ref:
     required: true
@@ -24,6 +32,9 @@ inputs:
   critical-subsystems:
     required: false
     default: postgres
+  prod-critical-subsystems:
+    required: false
+    default: ''
   warning-subsystems:
     required: false
     default: ''
@@ -51,24 +62,19 @@ runs:
         python3 "${{ github.action_path }}/../../../scripts/validate-coolify-token-exclusivity.py" \
           --root "${{ github.action_path }}/../../.."
 
-    - name: Resolve scoped Momo validation credentials
+    - name: Require resolved credentials and rendered env
       shell: bash
-      run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
-
-    - name: Render app env file in job-local storage
-      id: env-file
-      shell: bash
+      env:
+        ENV_FILE: ${{ inputs.env-file }}
       run: |
         set -euo pipefail
-        SCRIPT="${{ inputs.env-render-script }}"
-        OUT="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}.env"
-        [ -f "$SCRIPT" ] || { echo "::error::env_render_script '$SCRIPT' not found"; exit 1; }
-        chmod +x "$SCRIPT"
-        "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app-name }}" "$OUT"
-        [ -s "$OUT" ] || { echo "::error::env renderer produced no non-empty file"; exit 1; }
-        echo "path=$OUT" >> "$GITHUB_OUTPUT"
+        [ -n "${COOLIFY_MOMO_DEPLOY_TOKEN:-}" ] || { echo "::error::COOLIFY_MOMO_DEPLOY_TOKEN not resolved before the Momo validation action; failing closed"; exit 1; }
+        [ -n "${TS_API_KEY_RESOLVED:-}" ] || { echo "::error::TS_API_KEY_RESOLVED not resolved before the Momo validation action; topology verification cannot be skipped"; exit 1; }
+        [ -n "$ENV_FILE" ] && [ -s "$ENV_FILE" ] || { echo "::error::rendered env file missing or empty; secondary lane fails closed"; exit 1; }
+        [ -x .github/scripts/deep-health-check.sh ] || { echo "::error::deep-health-check.sh not found in caller repo; secondary lane cannot verify subsystem health, failing closed"; exit 1; }
 
     - name: Live topology preflight for Momo validation slot
+      id: preflight
       shell: bash
       run: |
         set -euo pipefail
@@ -85,7 +91,9 @@ runs:
       run: |
         set -euo pipefail
         SNAPSHOT="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-snapshot.json"
+        EVIDENCE="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-evidence.json"
         echo "snapshot=$SNAPSHOT" >> "$GITHUB_OUTPUT"
+        echo "evidence=$EVIDENCE" >> "$GITHUB_OUTPUT"
         python3 .ci-workflows/scripts/coolify-validation-deploy.py deploy \
           --config .ci-workflows/config/coolify-secondary-validation.json \
           --role "${{ inputs.role }}" \
@@ -93,17 +101,14 @@ runs:
           --resource-name "${{ inputs.resource-name }}" \
           --image-ref "${{ inputs.image-ref }}" \
           --image-digest "${{ inputs.image-digest }}" \
-          --env-file "${{ steps.env-file.outputs.path }}" \
+          --env-file "${{ inputs.env-file }}" \
           --container-port "${{ inputs.container-port }}" \
           --snapshot "$SNAPSHOT" \
-          --evidence-out "${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-evidence.json"
-        EVIDENCE="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-evidence.json"
+          --evidence-out "$EVIDENCE"
         [ -s "$EVIDENCE" ] || { echo "::error::Coolify deploy produced no evidence record; failing closed"; exit 1; }
-        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-          { echo "### Momo Coolify ${{ inputs.role }} validation evidence"; echo '```json'; cat "$EVIDENCE"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-        fi
 
     - name: Validate Momo validation health
+      id: health
       shell: bash
       run: |
         set -euo pipefail
@@ -117,16 +122,29 @@ runs:
         exit 1
 
     - name: Deep subsystem health check
+      id: deep-health
       shell: bash
+      env:
+        CRITICAL: ${{ inputs.critical-subsystems }}
+        PROD_CRITICAL: ${{ inputs.prod-critical-subsystems }}
+        WARNING: ${{ inputs.warning-subsystems }}
+        ROLE: ${{ inputs.role }}
       run: |
         set -euo pipefail
+        unset COOLIFY_MOMO_DEPLOY_TOKEN TS_API_KEY_RESOLVED
+        # Same promotion as the primary lane: prod-critical subsystems are
+        # critical in every non-build stage, so uat never silently drops them.
+        if [ -n "$PROD_CRITICAL" ] && [ "$ROLE" != "build" ]; then
+          CRITICAL="${CRITICAL:+${CRITICAL},}${PROD_CRITICAL}"
+        fi
         ARGS=(--url "${{ inputs.target-url }}${{ inputs.health-path }}" --timeout 15 --max-attempts 3 --sleep 10)
-        [ -z "${{ inputs.critical-subsystems }}" ] || ARGS+=(--critical-subsystems "${{ inputs.critical-subsystems }}")
-        [ -z "${{ inputs.warning-subsystems }}" ] || ARGS+=(--warning-subsystems "${{ inputs.warning-subsystems }}")
+        [ -z "$CRITICAL" ] || ARGS+=(--critical-subsystems "$CRITICAL")
+        [ -z "$WARNING" ] || ARGS+=(--warning-subsystems "$WARNING")
         [ -z "${GITHUB_STEP_SUMMARY:-}" ] || ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
         .github/scripts/deep-health-check.sh "${ARGS[@]}"
 
     - name: Smoke test path
+      id: smoke-path
       if: inputs.smoke-test-path != ''
       shell: bash
       run: |
@@ -134,6 +152,7 @@ runs:
         curl -fsS --retry 2 --retry-delay 10 --max-time 15 "${{ inputs.target-url }}${{ inputs.smoke-test-path }}" >/dev/null
 
     - name: Smoke test command
+      id: smoke-command
       if: inputs.smoke-test-command != ''
       shell: bash
       env:
@@ -142,23 +161,31 @@ runs:
         IMAGE_REF: ${{ inputs.image-ref }}
         APP_NAME: ${{ inputs.app-name }}
         ENV_LABEL: ${{ inputs.role }}
-      run: ${{ inputs.smoke-test-command }}
+        SMOKE_TEST_COMMAND: ${{ inputs.smoke-test-command }}
+      run: |
+        set -e
+        unset COOLIFY_MOMO_DEPLOY_TOKEN TS_API_KEY_RESOLVED
+        eval "$SMOKE_TEST_COMMAND"
 
     - name: Optional E2E dependencies and suite
+      id: e2e-suite
       if: inputs.run-e2e == 'true'
       shell: bash
       run: |
         set -euo pipefail
+        unset COOLIFY_MOMO_DEPLOY_TOKEN TS_API_KEY_RESOLVED
         corepack enable
         corepack install
         pnpm install --no-frozen-lockfile --store-dir .pnpm-store
         pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
 
     - name: Migration check
+      id: migrations
       if: inputs.run-migrations == 'true'
       shell: bash
       run: |
         set -euo pipefail
+        unset COOLIFY_MOMO_DEPLOY_TOKEN TS_API_KEY_RESOLVED
         if [ -x .github/scripts/check-migrations.sh ]; then
           .github/scripts/check-migrations.sh
         elif [ -x .github/scripts/run-migrations.sh ]; then
@@ -169,6 +196,7 @@ runs:
         fi
 
     - name: Real E2E command
+      id: e2e-command
       if: inputs.e2e-command != ''
       shell: bash
       env:
@@ -177,9 +205,14 @@ runs:
         IMAGE_REF: ${{ inputs.image-ref }}
         APP_NAME: ${{ inputs.app-name }}
         ENV_LABEL: ${{ inputs.role }}
-      run: ${{ inputs.e2e-command }}
+        E2E_COMMAND: ${{ inputs.e2e-command }}
+      run: |
+        set -e
+        unset COOLIFY_MOMO_DEPLOY_TOKEN TS_API_KEY_RESOLVED
+        eval "$E2E_COMMAND"
 
     - name: Post-deploy topology conflict check
+      id: postcheck
       shell: bash
       run: |
         set -euo pipefail
@@ -191,6 +224,7 @@ runs:
           --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN"
 
     - name: Roll back Momo validation mutation on failure
+      id: rollback
       if: failure() && steps.deploy.outcome == 'success'
       shell: bash
       run: |
@@ -201,8 +235,35 @@ runs:
           --resource-name "${{ inputs.resource-name }}" \
           --snapshot "${{ steps.deploy.outputs.snapshot }}"
 
+    - name: Final validation evidence record
+      # Records the validated state, not just the deploy: every gate outcome
+      # plus rollback. Step summary is the evidence sink (no artifact upload).
+      if: always() && steps.deploy.outputs.evidence != ''
+      shell: bash
+      env:
+        EVIDENCE: ${{ steps.deploy.outputs.evidence }}
+        O_PREFLIGHT: ${{ steps.preflight.outcome }}
+        O_DEPLOY: ${{ steps.deploy.outcome }}
+        O_HEALTH: ${{ steps.health.outcome }}
+        O_DEEP_HEALTH: ${{ steps.deep-health.outcome }}
+        O_SMOKE_PATH: ${{ steps.smoke-path.outcome }}
+        O_SMOKE_COMMAND: ${{ steps.smoke-command.outcome }}
+        O_E2E_SUITE: ${{ steps.e2e-suite.outcome }}
+        O_MIGRATIONS: ${{ steps.migrations.outcome }}
+        O_E2E_COMMAND: ${{ steps.e2e-command.outcome }}
+        O_POSTCHECK: ${{ steps.postcheck.outcome }}
+        O_ROLLBACK: ${{ steps.rollback.outcome }}
+      run: |
+        set -euo pipefail
+        python3 .ci-workflows/scripts/coolify-validation-evidence.py \
+          --deploy-evidence "$EVIDENCE" \
+          --out "${EVIDENCE%.json}-final.json"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          { echo "### Momo Coolify ${{ inputs.role }} validation evidence"; echo '```json'; cat "${EVIDENCE%.json}-final.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
     - name: Remove job-local secret files
       if: always()
       shell: bash
       run: |
-        rm -f "${{ steps.env-file.outputs.path }}" "${{ steps.deploy.outputs.snapshot }}"
+        rm -f "${{ inputs.env-file }}" "${{ steps.deploy.outputs.snapshot }}"
