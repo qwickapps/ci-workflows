@@ -8,7 +8,9 @@ name: Deploy Stable CapRover Tests
 # edit that reintroduces the Coolify path (e.g. a bad merge or revert)
 # fails the PR instead of silently resurrecting it.
 #
-# Test: bash scripts/tests/deploy-stable-caprover.test.sh
+# Tests:
+#   bash scripts/tests/deploy-stable-caprover.test.sh
+#   bash scripts/tests/verify-caprover-service-image.test.sh
 
 on:
   pull_request:
@@ -17,12 +19,17 @@ on:
       - 'scripts/aos-manifest/prime-manifest.yaml'
       - '.github/workflows/deploy-stable-caprover-tests.yml'
       - 'scripts/tests/deploy-stable-caprover.test.sh'
+      - 'scripts/verify-caprover-service-image.sh'
+      - 'scripts/tests/verify-caprover-service-image.test.sh'
   push:
     branches: [main, dev]
     paths:
       - '.github/workflows/deploy-app.yml'
       - 'scripts/aos-manifest/prime-manifest.yaml'
+      - '.github/workflows/deploy-stable-caprover-tests.yml'
       - 'scripts/tests/deploy-stable-caprover.test.sh'
+      - 'scripts/verify-caprover-service-image.sh'
+      - 'scripts/tests/verify-caprover-service-image.test.sh'
 
 permissions:
   contents: read
@@ -44,3 +51,6 @@ jobs:
 
       - name: Run deploy-stable CapRover contract test
         run: bash scripts/tests/deploy-stable-caprover.test.sh
+
+      - name: Run Swarm task-image verifier execution test
+        run: bash scripts/tests/verify-caprover-service-image.test.sh

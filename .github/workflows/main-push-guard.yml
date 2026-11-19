@@ -27,10 +27,10 @@ on:
         type: string
         default: '20'
       runs_on:
-        description: 'Runner label(s) as a JSON array string'
+        description: 'Deprecated compatibility input. Runner selection is fixed to the owner-approved choco label set.'
         required: false
         type: string
-        default: '["self-hosted", "macmini"]'
+        default: '["self-hosted", "choco"]'
       enforce_blue_green_deploy_contract:
         description: 'Fail changed .github/workflows/*deploy*.yml files unless they call the canonical blue-green reusable workflow or carry an exemption.'
         required: false
@@ -69,7 +69,7 @@ jobs:
   blue-green-deploy-contract:
     name: Blue-Green Deploy Contract
     if: inputs.enforce_blue_green_deploy_contract
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, choco]
     steps:
       - name: Checkout calling repo
         uses: actions/checkout@v4
@@ -118,7 +118,7 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: Test
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, choco]
     steps:
       - name: Prepare runner (per-job hygiene)
         shell: bash
@@ -189,7 +189,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-push:
     name: Build and Push Docker Image
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, choco]
     needs: [test]
     permissions:
       contents: read

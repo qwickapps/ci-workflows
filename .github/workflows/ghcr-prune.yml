@@ -1,0 +1,63 @@
+name: "Org GHCR Prune"
+
+# Scheduled, live-ref-aware GHCR prune for the qwickapps org
+# (scripts/ghcr-prune.py, ci-workflows#220). Dry-run by default: the
+# scheduled sweep only ever writes a JSONL report and never deletes
+# anything, mirroring org-branch-hygiene.yml's audit-only pattern. A real
+# deletion run requires an explicit workflow_dispatch with enforce=true,
+# and must only happen after a human has reviewed the dry-run report
+# (see PR #220's description for the last full-org dry-run: 653
+# versions, keep=527/delete=126, 0 false positives).
+
+on:
+  # The scheduled sweep is audit-only and never performs deletion.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      enforce:
+        description: "Actually delete after all safety checks (default: dry-run only)"
+        required: false
+        type: boolean
+        default: false
+      keep:
+        description: "Versions to keep per package"
+        required: false
+        type: string
+        default: "5"
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  prune:
+    name: "Live-ref-aware GHCR prune"
+    runs-on: [self-hosted, choco]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+
+      - name: Run org-wide GHCR prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ENFORCE: ${{ inputs.enforce }}
+          INPUT_KEEP: ${{ inputs.keep }}
+        run: |
+          set -euo pipefail
+          args=(--org qwickapps --keep "${INPUT_KEEP:-5}" --output /tmp/ghcr-prune-report.jsonl)
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; then
+            args+=(--enforce)
+          fi
+          python3 scripts/ghcr-prune.py "${args[@]}"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghcr-prune-report-${{ github.run_id }}
+          path: /tmp/ghcr-prune-report.jsonl
+          retention-days: 30
+          if-no-files-found: warn

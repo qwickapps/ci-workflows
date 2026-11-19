@@ -44,6 +44,32 @@ on:
         required: false
         default: 'build'
 
+      # -- Env rendering (t_ffaf9f03) ------------------------------------------
+      # The caller's rendered app env file used to be produced by a separate
+      # job/workflow and handed to validate-env/deploy-caprover/deploy-stable
+      # via actions/upload-artifact + actions/download-artifact, with /tmp
+      # fallback paths. Two problems killed that: (1) the file holds secret
+      # values, and a GitHub Actions artifact is retained and downloadable by
+      # anyone with repo read access -- secrets at rest outside QwickSecrets;
+      # (2) the org's Actions artifact-storage quota sits at/near its cap, so
+      # the upload step itself routinely fails ("Failed to CreateArtifact:
+      # Artifact storage quota has been hit"), breaking every dev deploy.
+      # env_render_script closes both: the caller provides an executable that
+      # renders the env file IN the same job that consumes it, so the
+      # contents never leave that job's filesystem and nothing is ever
+      # uploaded as an artifact. There is no /tmp fallback -- an env_render_script
+      # that produces no file (or an empty one) fails the job loudly.
+      env_render_script:
+        description: >-
+          Path (from the caller repo root) to an executable script this
+          workflow runs IN-JOB to render the app env file. Invoked as
+          `env_render_script <environment> <app_name> <output_path>` inside
+          validate-env, deploy-caprover, and deploy-stable (each renders its
+          own copy independently -- nothing is shared across jobs). Must
+          write a non-empty file to <output_path> or exit non-zero.
+        type: string
+        required: true
+
       # -- Build --------------------------------------------------------------
       dockerfile_path:
         description: 'Path to Dockerfile from repo root'
@@ -146,6 +172,11 @@ on:
         type: string
         default: ''
 
+      route_gateway:
+        description: 'Whether a live-stage deployment may update qwickway routing after health checks'
+        type: boolean
+        default: true
+
       # -- CMD override ----------------------------------------------------
       cmd:
         description: 'Container CMD override sent to configure-caprover-app'
@@ -173,11 +204,23 @@ on:
           about to deploy, conclusion==success, plus a passing `aos
           directive verify` result over its embedded payload (aos#193
           Phase 1 §5). Default false preserves today's deploy-stable
-          behavior exactly. NOTE: the signing bridge that would let a real
-          directive get attached to that check run is not built yet
-          (aos#193, latest comment) -- setting this true cannot succeed in
-          production today and is not yet meant to be used there; it fails
-          closed by design, not by omission.
+          behavior exactly.
+        type: boolean
+        default: false
+
+      record_first_stable_evidence:
+        description: >-
+          Opt in a build or UAT run to write its digest-bound first-stable
+          qualification record. Requires the caller to grant checks: write;
+          false leaves ordinary callers unchanged.
+        type: boolean
+        default: false
+
+      bootstrap_first_stable:
+        description: >-
+          Permit exactly one stable-slot bootstrap from a digest-pinned
+          release image when no :stable tag exists. Stable stage only;
+          default false preserves existing callers unchanged.
         type: boolean
         default: false
 
@@ -206,9 +249,20 @@ jobs:
       caprover_required: ${{ steps.meta.outputs.caprover_required }}
       run_migrations_for_stage: ${{ steps.meta.outputs.run_migrations_for_stage }}
       build_required: ${{ steps.meta.outputs.build_required }}
+      bootstrap_first_stable: ${{ steps.meta.outputs.bootstrap_first_stable }}
       canary: ${{ steps.meta.outputs.canary }}
       deploy_start_epoch: ${{ steps.meta.outputs.deploy_start_epoch }}
     steps:
+      - name: Checkout stable-host policy
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows-policy
+          sparse-checkout: |
+            config/stable-host-policy.json
+            scripts/stable-host-policy.sh
+          sparse-checkout-cone-mode: false
       - name: Resolve canonical stage contract
         id: meta
         run: |
@@ -236,6 +290,17 @@ jobs:
           if [ -z "$APP_NAME" ]; then
             echo "ERROR: app_name is required"
             exit 1
+          fi
+          BOOTSTRAP_FIRST_STABLE="${{ inputs.bootstrap_first_stable }}"
+          if [ "$BOOTSTRAP_FIRST_STABLE" = "true" ]; then
+            if [ "$STAGE_INPUT" != "stable" ]; then
+              echo "ERROR: bootstrap_first_stable is allowed only for stage stable"
+              exit 1
+            fi
+            if ! [[ "$INPUT_IMAGE" =~ ^.+@sha256:[a-f0-9]{64}$ ]]; then
+              echo "ERROR: bootstrap_first_stable requires image_ref pinned as <base>@sha256:<64 lowercase hex>; mutable tags are refused"
+              exit 1
+            fi
           fi
           if [ -z "${{ inputs.container_port }}" ]; then
             echo "ERROR: container_port is required"
@@ -304,9 +369,33 @@ jobs:
           elif [ -n "${{ inputs.caprover_host }}" ]; then
             RESOLVED_HOST="$(normalize_host "${{ inputs.caprover_host }}")"
           fi
+          # App-to-host policy table. Most stable slots remain on the
+          # canonical oci-main CapRover, but infra#41 assigns Forge's stable
+          # slot to macmini-devserver. Do not fold this into a Forge-only
+          # exception below: this table is deliberately the single extension
+          # point for future placement exceptions.
+          FORGE_STABLE_HOST="macmini-devserver"
+          POLICY_APP="$APP_NAME"
+          while :; do
+            case "$POLICY_APP" in
+              *-live) POLICY_APP="${POLICY_APP%-live}" ;;
+              *-uat) POLICY_APP="${POLICY_APP%-uat}" ;;
+              *-stable) POLICY_APP="${POLICY_APP%-stable}" ;;
+              *) break ;;
+            esac
+          done
+          if [ "$STAGE_INPUT" = "stable" ]; then
+            bash .ci-workflows-policy/scripts/stable-host-policy.sh "$APP_NAME" prod "$RESOLVED_HOST"
+          fi
           case "$STAGE_INPUT" in
             build) EXPECTED_HOST="$CANONICAL_DEV_HOST" ;;
-            uat|live|stable) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+            uat|live) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+            stable)
+              case "$POLICY_APP" in
+                qwickapps-forge) EXPECTED_HOST="$FORGE_STABLE_HOST" ;;
+                *) EXPECTED_HOST="$CANONICAL_MAIN_HOST" ;;
+              esac
+              ;;
             # Unreachable today -- STAGE_INPUT is validated to be one of
             # build|uat|live|stable above. Kept as an explicit fail-closed
             # arm so that if a stage is ever added to that allow-list
@@ -323,7 +412,11 @@ jobs:
             exit 1
           fi
           if [ "$RESOLVED_HOST" != "$EXPECTED_HOST" ]; then
-            echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
+            if [ "$STAGE_INPUT" = "stable" ] && [ "$POLICY_APP" = "qwickapps-forge" ]; then
+              echo "ERROR: infra#41: forge stable must deploy to '$EXPECTED_HOST', not '$RESOLVED_HOST'"
+            else
+              echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
+            fi
             exit 1
           fi
 
@@ -434,6 +527,9 @@ jobs:
               GATEWAY_APP_NAME="${APP_NAME}"
               ENV_LABEL="stable"
               PRIOR_TAG="${IMAGE_BASE}:stable"
+              if [ "$BOOTSTRAP_FIRST_STABLE" = "true" ]; then
+                PRIOR_TAG="${IMAGE_BASE}:release"
+              fi
               NEXT_TAG=""
               STABLE_APP_URL="${{ inputs.gateway_stable_url }}"
               RUN_MIGRATIONS_FOR_STAGE="false"
@@ -528,6 +624,7 @@ jobs:
           echo "caprover_required=${CAPROVER_REQUIRED}" >> "$GITHUB_OUTPUT"
           echo "run_migrations_for_stage=${RUN_MIGRATIONS_FOR_STAGE}" >> "$GITHUB_OUTPUT"
           echo "build_required=${BUILD_REQUIRED}" >> "$GITHUB_OUTPUT"
+          echo "bootstrap_first_stable=${BOOTSTRAP_FIRST_STABLE}" >> "$GITHUB_OUTPUT"
           echo "canary=${CANARY}" >> "$GITHUB_OUTPUT"
 
   # -- Immutable env var gate -----------------------------------------------
@@ -535,35 +632,55 @@ jobs:
     needs: [resolve-stage]
     runs-on: [self-hosted, macmini]
     steps:
-      - name: Download rendered env file artifact (if present)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
-          path: .deploy-app-env
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Resolve env file path
+      - name: Render app env file (in-job, no artifact handoff)
         id: env-file
+        # Inherited caller secrets are only exposed to this renderer process.
+        # Do not promote them to job/workflow scope or persist them as output.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          # App-specific runtime secrets (e.g. memories' READ/WRITE tokens)
+          # are caller-owned and not in the fixed list above. The caller's
+          # renderer -- its own code, already trusted via `secrets: inherit`
+          # -- picks an explicit allowlist out of this JSON object. Values are
+          # still individually log-masked; this stays step-local like the rest.
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/app-env-${{ inputs.environment }}-${{ inputs.app_name }}.env"
 
-          for candidate in \
-            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
-            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${ENV}-${APP}.env" \
-            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${APP}.env"; do
-            if [ -f "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
 
-          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
-          exit 1
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; there is no artifact or /tmp fallback"
+            exit 1
+          fi
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
@@ -573,6 +690,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Reject ephemeral node production deployment inputs
@@ -650,10 +768,27 @@ jobs:
             --product "$CLIENT_DIR" \
             --packages "${{ inputs.workspace_packages }}"
 
+      - name: Checkout ci-workflows scripts
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          ref: main
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
+      # t_ffaf9f03: this used to run `.github/scripts/resolve-docker-endpoint.sh`
+      # FROM THE CALLER REPO unconditionally, but no caller ships that script
+      # -- the step only ever worked by accident, when the runner's default
+      # Docker client already happened to be reachable. Ship the canonical
+      # copy inside ci-workflows (same pattern validate-env-values.sh and
+      # configure-caprover-app.sh already use) so every caller gets it for
+      # free instead of needing to fork it in.
       - name: Ensure Docker endpoint
         run: |
-          chmod +x .github/scripts/resolve-docker-endpoint.sh
-          .github/scripts/resolve-docker-endpoint.sh
+          chmod +x .ci-workflows/scripts/resolve-docker-endpoint.sh
+          .ci-workflows/scripts/resolve-docker-endpoint.sh
 
       - name: Login to GHCR
         env:
@@ -684,6 +819,13 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          # t_a4d33238: run-scoped name (kept under the "builder-" prefix so
+          # the resulting buildx_buildkit_builder-<run_id>0_state volume
+          # still matches the qwick-guard sop-074 allow-regex and the fleet
+          # reaper's filter) plus cleanup: true, so this builder is torn
+          # down even when setup-buildx-action's own post-step runs.
+          name: builder-${{ github.run_id }}
+          cleanup: true
 
       - name: Build and push immutable image
         uses: docker/build-push-action@v6
@@ -696,6 +838,13 @@ jobs:
           tags: |
             ${{ needs.resolve-stage.outputs.image_ref }}
 
+      # t_a4d33238: second-chance teardown for when the job process survives
+      # (failed build step) but setup-buildx-action's post-step cleanup
+      # mechanism doesn't get a chance to run; harmless if already gone.
+      - name: Tear down buildx builder
+        if: always()
+        run: docker buildx rm "builder-${{ github.run_id }}" || true
+
   # -- Provenance gate (all stages require stage image; non-build requires prior)
   verify-provenance:
     needs: [resolve-stage, build, validate-env]
@@ -704,15 +853,46 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
-    # ci-workflows#137: same permissions-gap reasoning as the build job, but
-    # this job only pulls/inspects images -- packages: read is enough, no
-    # contents: read. The "Checkout ci-workflows scripts" step below fetches
-    # ci-workflows' OWN public repo via a `repository:` override (same
-    # pattern validate-env/deploy-caprover/deploy-stable/scale-build-slot
-    # already use with no permissions block at all), not this workflow's
-    # calling repo -- it does not need contents: read on the caller.
-    permissions:
-      packages: read
+    # ci-workflows#137: this job only pulls/inspects images -- packages:
+    # read was enough, no contents: read. The "Checkout ci-workflows
+    # scripts" step below fetches ci-workflows' OWN public repo via a
+    # `repository:` override (same pattern validate-env/deploy-caprover/
+    # deploy-stable/scale-build-slot already use with no permissions block
+    # at all), not this workflow's calling repo -- it does not need
+    # contents: read on the caller.
+    #
+    # t_b14e0125 (first-stable bootstrap): this job used to carry an
+    # explicit `permissions: {packages: read}` block. The new "Verify
+    # first-stable bootstrap proof" step (gated behind
+    # bootstrap_first_stable == true) needs `checks: read` + `actions:
+    # read` to read the digest-bound build/UAT proof check-runs. A job's
+    # requested permissions must be a SUBSET of what the calling workflow's
+    # OWN top-level `permissions:` grants, and GitHub validates this for
+    # the WHOLE workflow_call at dispatch time -- not lazily per job, and
+    # not skipped for a step whose `if:` evaluates false (empirically
+    # confirmed for this exact job class; see deploy-caprover's and
+    # deploy-stable's header comments / aos#193 Phase 1 review round 2).
+    # None of the current 14 org callers grant `checks`/`actions`, so
+    # adding those scopes to a STATIC explicit block here would break
+    # every one of them at dispatch time the moment this merges -- not
+    # just bootstrap ones.
+    #
+    # Resolution: mirror the already-accepted deploy-caprover/deploy-
+    # stable pattern exactly -- drop the explicit permissions block
+    # entirely so this job inherits whatever its calling workflow's own
+    # top-level `permissions:` grants. Every current caller already grants
+    # at least packages: read at its top level (this job's packages: read
+    # requirement has worked unmodified since ci-workflows#137), so
+    # removing the explicit block changes nothing for existing callers or
+    # non-bootstrap stages. A caller that wants bootstrap_first_stable:
+    # true to actually succeed must ALSO add `checks: read` + `actions:
+    # read` to ITS OWN top-level permissions -- a per-caller opt-in (only
+    # relevant to a brand-new app's very first stable promotion), not an
+    # org-wide rollout. Until a caller opts in, the bootstrap proof-read
+    # steps fail closed with a clear `gh api` permission error -- exactly
+    # the same already-documented, already-accepted state
+    # require_live_approval_check is in today (see deploy-caprover's
+    # header comment).
     steps:
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
@@ -722,6 +902,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Write GHCR credentials directly (bypasses osxkeychain on headless runner)
@@ -752,7 +933,8 @@ jobs:
           if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "github.token" "$GHCR_TOKEN_EPHEMERAL" \
               "GHCR_PULL_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
-            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            ghcr_probe_pull_token "${{ github.actor }}" "$GHCR_TOKEN_LEGACY" "$REF_OWNER" "$PACKAGE" "$TAG" || true
+            echo "::error::verify-provenance: neither github.token nor GHCR_PULL_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to write an unusable GHCR credential"
             exit 1
           fi
           echo "GHCR pull token source: $SOURCE"
@@ -807,6 +989,21 @@ jobs:
             fi
             docker buildx imagetools inspect "$PRIOR_TAG" >/dev/null
           fi
+      - name: Verify first-stable bootstrap proof
+        if: needs.resolve-stage.outputs.bootstrap_first_stable == 'true'
+        id: first-stable-bootstrap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          .ci-workflows/scripts/verify-first-stable-bootstrap.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --sha "${{ github.sha }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --image-base "${{ needs.resolve-stage.outputs.image_name }}"
+
       - name: Remove GHCR credentials
         if: always()
         run: |
@@ -884,6 +1081,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Resolve CapRover credentials
@@ -967,13 +1165,18 @@ jobs:
           PACKAGE="${PARSED_REF[1]}"
           TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
-              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
-              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-caprover: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+          # t_5e0ee673: ghcr_select_shared_registry_token only lets
+          # github.token through when the PAT is definitively unusable
+          # (unset or rejected); an indeterminate PAT probe fails closed.
+          if ! SOURCE="$(ghcr_select_shared_registry_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "$GH_TOKEN_LEGACY_PAT" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-caprover: no credential may be written into CapRover's shared ghcr.io registry entry for ${REF_OWNER}/${PACKAGE}:${TAG} (see shared-registry token line above; last probe: $(ghcr_describe_probe_failure)) -- refusing to export a token"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
+          if [ "$SOURCE" = "github.token" ]; then
+            echo "::warning::deploy-caprover: GHCR_PULL_TOKEN is unset or rejected by ghcr.io; writing this job's ephemeral github.token into CapRover's SHARED ghcr.io registry entry. It expires when this job ends and later pulls on this cluster will be denied until GHCR_PULL_TOKEN is fixed."
+          fi
           case "$SOURCE" in
             "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
             "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
@@ -986,35 +1189,186 @@ jobs:
           chmod +x .github/scripts/*.sh
           chmod +x .ci-workflows/scripts/*.sh
 
-      - name: Download rendered env file artifact (if present)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
-          path: .deploy-app-env
-
-      - name: Resolve env file path
+      - name: Render app env file (in-job, no artifact handoff)
         id: env-file
+        # These inherited secrets are intentionally available only while this
+        # caller-provided renderer runs; empty inherited values are permitted.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          # App-specific runtime secrets (e.g. memories' READ/WRITE tokens)
+          # are caller-owned and not in the fixed list above. The caller's
+          # renderer -- its own code, already trusted via `secrets: inherit`
+          # -- picks an explicit allowlist out of this JSON object. Values are
+          # still individually log-masked; this stays step-local like the rest.
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/app-env-${{ inputs.environment }}-${{ inputs.app_name }}.env"
 
-          for candidate in \
-            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
-            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${ENV}-${APP}.env" \
-            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${APP}.env"; do
-            if [ -f "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
+
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; there is no artifact or /tmp fallback"
+            exit 1
+          fi
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Topology admission before mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+          TS_HOSTNAME="$(grep -E '^[[:space:]]*TS_HOSTNAME=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          if [ -z "$TS_HOSTNAME" ] && [[ "${IMAGE_REF,,}" != *qwickway* ]]; then
+            echo "No Tailscale/QwickWay configuration in this deploy; topology admission not applicable."
+            exit 0
+          fi
+          [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
+          case "${CAPROVER_URL,,}" in
+            *route.qwickforge.com*|*oci-gateway*) HOST_KEY=oci"-"gateway ;;
+            *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
+            *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; topology admission fails closed"; exit 1 ;;
+          esac
+          REGISTRY_APP="$(python3 -c 'import json,sys; services=json.load(open(sys.argv[1], encoding="utf-8"))["services"]; matches=[entry["app"] for entry in services if entry["canonical_hostname"].lower() == sys.argv[2].lower()]; print(matches[0]) if len(matches) == 1 else sys.exit(f"expected exactly one registry identity for {sys.argv[2]!r}, found {len(matches)}")' .ci-workflows/config/service-identities.json "$TS_HOSTNAME")" || { echo "::error::cannot resolve canonical registry app for TS_HOSTNAME=${TS_HOSTNAME}"; exit 1; }
+          SOURCE_MERGED=true
+          if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
+            DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}" || SOURCE_MERGED=false
+          fi
+          ARGS=(--registry .ci-workflows/config/service-identities.json --host "$HOST_KEY" --platform caprover --app "$REGISTRY_APP" --hostname "$TS_HOSTNAME" --image-ref "$IMAGE_REF")
+          if [ "${{ needs.resolve-stage.outputs.stage }}" != build ]; then
+            ARGS+=(--production --source-sha "${GITHUB_SHA}" --source-merged "$SOURCE_MERGED")
+          fi
+          python3 .ci-workflows/scripts/topology-admission.py "${ARGS[@]}"
+
+      - name: Live-state topology preflight (CapRover+Tailscale+Coolify)
+        # t_fbb1ae02 decision #1: topology-admission.py (above) only checks
+        # the declared input tuple against the static registry. This step
+        # reads REAL live state -- docker swarm services on every reachable
+        # CapRover host, Tailscale device state, and Coolify app state --
+        # and denies if any OTHER claimant already holds this hostname.
+        # Fail-closed: an unreachable live source is a deny, never a skip
+        # (see scripts/topology-live-preflight.py).
+        id: topology-live-preflight
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+          # The live momo API token is the scoped deploy token. Do not use
+          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="${{ steps.env-file.outputs.path }}"
+          TS_HOSTNAME="$(grep -E '^[[:space:]]*TS_HOSTNAME=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          if [ -z "$TS_HOSTNAME" ] && [[ "${IMAGE_REF,,}" != *qwickway* ]]; then
+            echo "applicable=false" >> "$GITHUB_OUTPUT"
+            echo "No Tailscale/QwickWay configuration in this deploy; live topology preflight not applicable."
+            exit 0
+          fi
+          [ -n "$TS_HOSTNAME" ] || { echo "::error::QwickWay deployment must declare TS_HOSTNAME in the rendered env file"; exit 1; }
+          case "${CAPROVER_URL,,}" in
+            *route.qwickforge.com*|*oci-gateway*) HOST_KEY=oci"-"gateway ;;
+            *app.qwickforge.com*|*oci-main*) HOST_KEY=oci"-"main ;;
+            *) echo "::error::unmapped CapRover target ${CAPROVER_URL}; live preflight fails closed"; exit 1 ;;
+          esac
+          REGISTRY_APP="$(python3 -c 'import json,sys; services=json.load(open(sys.argv[1], encoding="utf-8"))["services"]; matches=[entry["app"] for entry in services if entry["canonical_hostname"].lower() == sys.argv[2].lower()]; print(matches[0]) if len(matches) == 1 else sys.exit(f"expected exactly one registry identity for {sys.argv[2]!r}, found {len(matches)}")' .ci-workflows/config/service-identities.json "$TS_HOSTNAME")" || { echo "::error::cannot resolve canonical registry app for TS_HOSTNAME=${TS_HOSTNAME}"; exit 1; }
+          DEPLOYED_SERVICE="srv-captain--${{ needs.resolve-stage.outputs.target_app }}"
+          echo "applicable=true" >> "$GITHUB_OUTPUT"
+          echo "ts-hostname=$TS_HOSTNAME" >> "$GITHUB_OUTPUT"
+          echo "host-key=$HOST_KEY" >> "$GITHUB_OUTPUT"
+          echo "registry-app=$REGISTRY_APP" >> "$GITHUB_OUTPUT"
+
+          # TS_API_KEY fallback: same proven pattern as the infra#101 LB
+          # guard further below (secrets-service fetch if the GH secret is
+          # stale or the '-' placeholder). Duplicated rather than threaded
+          # through step outputs -- this repo's existing convention (the
+          # two "Verify LB target..." steps) already duplicates this block
+          # per call site rather than pass resolved secrets between steps.
+          TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
+          if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              echo "::warning::TS_API_KEY is missing/placeholder; fetching from secrets service"
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/tailscale/TS_API_KEY" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_API_KEY=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_API_KEY" ] && [ "$_SEC_API_KEY" != "-" ]; then
+                  TS_API_KEY_RESOLVED="$_SEC_API_KEY"
+                  echo "::warning::Using TS_API_KEY from secrets service"
+                fi
+              fi
             fi
-          done
+          fi
+          if [ -z "$TS_API_KEY_RESOLVED" ] || [ "$TS_API_KEY_RESOLVED" = "-" ]; then
+            echo "::error::TS_API_KEY unresolved; live preflight cannot verify Tailscale state, failing closed"
+            exit 1
+          fi
 
-          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
-          exit 1
+          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
+          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
+                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
+                fi
+              fi
+            fi
+          fi
+          if [ -z "$COOLIFY_TOKEN_RESOLVED" ] || [ "$COOLIFY_TOKEN_RESOLVED" = "-" ]; then
+            echo "::error::Coolify API token unresolved; Coolify is a live claimant source and cannot be skipped, failing closed"
+            exit 1
+          fi
+
+          PRE_STATE="${RUNNER_TEMP}/topology-pre-mutation-state-${{ github.run_id }}-${{ github.run_attempt }}.json"
+          echo "pre-mutation-state-path=$PRE_STATE" >> "$GITHUB_OUTPUT"
+
+          # t_fbb1ae02 decision #1(a): inspect every registered CapRover
+          # host, not just the one being deployed to. A conflicting claimant
+          # on a different host is exactly the 2026-10-08 incident shape.
+          # server1-qwickforge is deliberately included: unreachable live
+          # state is a deny, never a reason to silently reduce coverage.
+          python3 .ci-workflows/scripts/topology-live-preflight.py \
+            --registry .ci-workflows/config/service-identities.json \
+            --hostname "$TS_HOSTNAME" \
+            --app "$DEPLOYED_SERVICE" \
+            --registry-app "$REGISTRY_APP" \
+            --target-host "$HOST_KEY" \
+            --caprover-hosts oci-gateway oci-main server1-qwickforge \
+            --ts-api-key "$TS_API_KEY_RESOLVED" \
+            --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+            --pre-mutation-state-out "$PRE_STATE"
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
         # aos#193 review finding #2: gated behind require_live_approval_check
@@ -1131,6 +1485,19 @@ jobs:
             --github-token "$GHCR_PULL_TOKEN" \
             --github-owner "${{ env.OWNER }}"
 
+      - name: Verify target service runs requested image
+        # A 504/non-JSON reply from CapRover may mean the request was accepted
+        # asynchronously, but it is not proof that Swarm replaced the old task.
+        # Verify the actual oci-main service task image before its HTTP health
+        # endpoint can be accepted and before retag consumes the success result.
+        run: |
+          .ci-workflows/scripts/verify-caprover-service-image.sh \
+            --ssh-host oci-main \
+            --service "srv-captain--${{ needs.resolve-stage.outputs.target_app }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --max-attempts 15 \
+            --sleep 10
+
       - name: Validate target slot health
         run: |
           .github/scripts/validate-deployment-health.sh \
@@ -1141,6 +1508,115 @@ jobs:
             --health-path "${{ inputs.health_path }}" \
             --max-attempts 15 \
             --sleep 20
+
+      - name: Post-deploy topology conflict check + rollback
+        # t_fbb1ae02 decision #2: re-read live state immediately after
+        # mutation. The preflight step above already denied any
+        # pre-existing conflict, so the only way this can now show one is a
+        # race -- another deploy claimed the same canonical hostname
+        # between our preflight read and our mutation. On that race: scale
+        # THIS deploy's new claimant to 0 and restore whatever the
+        # preflight step recorded as the previous owner. This never
+        # renames/edits the registry's own canonical app identity (see
+        # scripts/topology-rollback.py and its test).
+        if: steps.topology-live-preflight.outputs.applicable == 'true'
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+          # The live momo API token is the scoped deploy token. Do not use
+          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
+          HOST_KEY="${{ steps.topology-live-preflight.outputs.host-key }}"
+          REGISTRY_APP="${{ steps.topology-live-preflight.outputs.registry-app }}"
+          DEPLOYED_SERVICE="srv-captain--${{ needs.resolve-stage.outputs.target_app }}"
+          PRE_STATE="${{ steps.topology-live-preflight.outputs.pre-mutation-state-path }}"
+
+          TS_API_KEY_RESOLVED="${TS_API_KEY:-}"
+          if [ "$TS_API_KEY_RESOLVED" = "-" ] || [ -z "$TS_API_KEY_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/tailscale/TS_API_KEY" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_API_KEY=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_API_KEY" ] && [ "$_SEC_API_KEY" != "-" ]; then
+                  TS_API_KEY_RESOLVED="$_SEC_API_KEY"
+                fi
+              fi
+            fi
+          fi
+
+          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
+          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+            if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
+              _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
+              _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
+                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+              if [ -n "$_SEC_RESP" ]; then
+                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
+                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
+                fi
+              fi
+            fi
+          fi
+
+          RESULT_JSON="${RUNNER_TEMP}/post-deploy-topology-result.json"
+          rm -f "$RESULT_JSON"
+          set +e
+          python3 .ci-workflows/scripts/topology-live-preflight.py \
+              --registry .ci-workflows/config/service-identities.json \
+              --hostname "$TS_HOSTNAME" \
+              --app "$DEPLOYED_SERVICE" \
+              --registry-app "$REGISTRY_APP" \
+              --target-host "$HOST_KEY" \
+              --caprover-hosts oci-gateway oci-main server1-qwickforge \
+              --ts-api-key "$TS_API_KEY_RESOLVED" \
+              --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+              --result-json-out "$RESULT_JSON"
+          PREFLIGHT_EXIT=$?
+          set -e
+          if [ "$PREFLIGHT_EXIT" -eq 0 ]; then
+            echo "No post-deploy topology conflict detected."
+            exit 0
+          fi
+
+          # The script's JSON result is authoritative: exit code 2 merely
+          # means deny and cannot encode 409/503 safely on Unix.
+          if [ ! -s "$RESULT_JSON" ]; then
+            echo "::error::post-deploy topology verification failed closed (400): no structured result; deployment will not be mutated"
+            exit 1
+          fi
+          if ! RESULT_FIELDS=$(python3 -c 'import json,sys; result=json.load(open(sys.argv[1], encoding="utf-8")); status=result.get("status_code"); failure_type=result.get("failure_type"); isinstance(status,int) and isinstance(failure_type,str) or sys.exit("invalid structured topology result"); print(status, failure_type)' "$RESULT_JSON"); then
+            echo "::error::post-deploy topology verification failed closed (400): malformed structured result; deployment will not be mutated"
+            exit 1
+          fi
+          read -r STATUS_CODE FAILURE_TYPE <<< "$RESULT_FIELDS"
+          echo "Post-deploy topology result: status_code=${STATUS_CODE} failure_type=${FAILURE_TYPE}"
+
+          if [ "$STATUS_CODE" = "409" ] && [ "$FAILURE_TYPE" = "topology_conflict" ]; then
+            echo "::error::post-deploy topology conflict detected for ${TS_HOSTNAME}; rolling back the new claimant"
+            python3 .ci-workflows/scripts/topology-rollback.py \
+              --pre-mutation-state "$PRE_STATE" \
+              --new-claimant-host "$HOST_KEY" \
+              --new-claimant-app "$DEPLOYED_SERVICE"
+            echo "::error::deploy rolled back due to a live topology conflict introduced during mutation; this deploy did NOT complete successfully"
+            exit 1
+          fi
+
+          # SSH, Tailscale, and Coolify source errors arrive as 503
+          # verification_failure. Do not attempt a rollback: the live owner
+          # is unverified, so any deployment mutation would be unsafe.
+          if [ "$STATUS_CODE" = "503" ] && [ "$FAILURE_TYPE" = "verification_failure" ]; then
+            echo "::error::post-deploy topology verification failed closed (400): live ownership is unverified; deployment will not be mutated"
+            exit 1
+          fi
+
+          echo "::error::post-deploy topology verification failed closed (400): unexpected status_code=${STATUS_CODE} failure_type=${FAILURE_TYPE}; deployment will not be mutated"
+          exit 1
 
       - name: Deep subsystem health check
         run: |
@@ -1261,6 +1737,56 @@ jobs:
           E2E_DIGEST="$(printf '%s' "${E2E_COMMAND}|${IMAGE_REF}|${{ github.sha }}" | sha256sum | awk '{print $1}')"
           echo "e2e_digest=sha256:${E2E_DIGEST}" >> "$GITHUB_OUTPUT"
 
+      - name: Record first-stable build proof
+        if: needs.resolve-stage.outputs.stage == 'build' && inputs.record_first_stable_evidence == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${{ needs.resolve-stage.outputs.image_ref }}")"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::build proof digest malformed"; exit 1; }
+          OUTPUT_JSON="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg digest "$DIGEST" \
+            '{schema:"first-stable-source-proof/v1",kind:"build",repo:$repo,app_name:$app,source_sha:$sha,image_digest:$digest}')"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-build/${{ inputs.app_name }}" \
+            --title "First-stable build qualification" \
+            --summary "Build stage completed for the immutable image digest; a later bootstrap must also carry matching UAT proof." \
+            --output-json "$OUTPUT_JSON" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied fail
+
+      - name: Record first-stable UAT proof
+        if: needs.resolve-stage.outputs.stage == 'uat' && inputs.record_first_stable_evidence == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${{ needs.resolve-stage.outputs.image_ref }}")"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::UAT proof digest malformed"; exit 1; }
+          OUTPUT_JSON="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg digest "$DIGEST" \
+            '{schema:"first-stable-source-proof/v1",kind:"uat",repo:$repo,app_name:$app,source_sha:$sha,image_digest:$digest,stage:"uat"}')"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-uat/${{ inputs.app_name }}" \
+            --title "First-stable UAT qualification" \
+            --summary "UAT stage completed for the immutable image digest; a later bootstrap may use it only with its matching build proof." \
+            --output-json "$OUTPUT_JSON" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --on-permission-denied fail
+
       - name: Create live-e2e-approved check run (aos#193 Phase 1 §1)
         # Only created when the caller has opted into
         # require_live_approval_check AND actually ran a real e2e_command
@@ -1380,7 +1906,7 @@ jobs:
             --on-permission-denied skip
 
       - name: Route qwickway to ordered live/stable for live stage
-        if: needs.resolve-stage.outputs.stage == 'live'
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.route_gateway == true
         run: |
           set -euo pipefail
           GW_URL="${{ secrets.OCI_GATEWAY_CAPROVER_URL }}"
@@ -1426,7 +1952,7 @@ jobs:
             STABLE_ARGS+=(--stable-app-url "$STABLE_URL")
           fi
 
-          .github/scripts/setup-qwickway-route.sh \
+          .ci-workflows/scripts/setup-qwickway-route.sh \
             --gateway-app-name "${{ needs.resolve-stage.outputs.gateway_app_name }}" \
             --target-app-url "$TARGET_URL" \
             --route-caprover-url "$GW_URL" \
@@ -1438,7 +1964,7 @@ jobs:
             "${STABLE_ARGS[@]}"
 
       - name: Verify LB target resolves to the node just deployed (infra#101 guard)
-        if: needs.resolve-stage.outputs.stage == 'live'
+        if: needs.resolve-stage.outputs.stage == 'live' && inputs.route_gateway == true
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
@@ -1535,6 +2061,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Authenticate to GHCR for retag (direct config write — no docker login/keychain)
@@ -1562,7 +2089,8 @@ jobs:
           if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
               "github.token" "$GHCR_TOKEN_EPHEMERAL" \
               "GHCR_PUSH_TOKEN" "$GHCR_TOKEN_LEGACY")"; then
-            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to write an unusable GHCR credential"
+            ghcr_probe_pull_token "${{ github.actor }}" "$GHCR_TOKEN_LEGACY" "$REF_OWNER" "$PACKAGE" "$TAG" || true
+            echo "::error::retag: neither github.token nor GHCR_PUSH_TOKEN can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io ($(ghcr_describe_probe_failure)) -- refusing to write an unusable GHCR credential"
             exit 1
           fi
           echo "GHCR token source: $SOURCE"
@@ -1602,6 +2130,7 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
 
       - name: Resolve CapRover credentials
@@ -1697,7 +2226,30 @@ jobs:
           path: .ci-workflows
           sparse-checkout: |
             scripts
+            config/service-identities.json
           sparse-checkout-cone-mode: false
+
+      - name: Refuse unsupported Forge stable deployment before CapRover access
+        run: |
+          # infra#41 assigns Forge stable to macmini-devserver. This workflow
+          # only has the oci-main CapRover credential/deploy implementation;
+          # it must never fall back to that cluster and create the forbidden
+          # slot while the macmini deployment mechanism is absent.
+          POLICY_APP="${{ inputs.app_name }}"
+          while :; do
+            case "$POLICY_APP" in
+              *-live) POLICY_APP="${POLICY_APP%-live}" ;;
+              *-uat) POLICY_APP="${POLICY_APP%-uat}" ;;
+              *-stable) POLICY_APP="${POLICY_APP%-stable}" ;;
+              *) break ;;
+            esac
+          done
+          case "$POLICY_APP" in
+            qwickapps-forge)
+              echo "::error::infra#41: forge-stable must run on macmini-devserver; deploy-app has no supported macmini stable deployment mechanism"
+              exit 1
+              ;;
+          esac
 
       - name: Verify live-e2e-approved + directive signature (aos#193 Phase 1 §1/§5)
         # Runs BEFORE any CapRover credential resolution or deploy step
@@ -1937,13 +2489,16 @@ jobs:
           PACKAGE="${PARSED_REF[1]}"
           TAG="${PARSED_REF[2]}"
           SOURCE=""
-          if ! SOURCE="$(ghcr_select_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
-              "GHCR_PULL_TOKEN" "$GH_TOKEN_LEGACY_PAT" \
-              "github.token" "$GH_TOKEN_EPHEMERAL")"; then
-            echo "::error::deploy-stable: neither GHCR_PULL_TOKEN nor github.token can pull ${REF_OWNER}/${PACKAGE}:${TAG} from ghcr.io -- refusing to export an unusable token into CapRover's shared ghcr.io registry entry"
+          # t_5e0ee673: same shared-registry selection as deploy-caprover.
+          if ! SOURCE="$(ghcr_select_shared_registry_token "${{ github.actor }}" "$REF_OWNER" "$PACKAGE" "$TAG" \
+              "$GH_TOKEN_LEGACY_PAT" "$GH_TOKEN_EPHEMERAL")"; then
+            echo "::error::deploy-stable: no credential may be written into CapRover's shared ghcr.io registry entry for ${REF_OWNER}/${PACKAGE}:${TAG} (see shared-registry token line above; last probe: $(ghcr_describe_probe_failure)) -- refusing to export a token"
             exit 1
           fi
           echo "GHCR pull token source for CapRover: $SOURCE"
+          if [ "$SOURCE" = "github.token" ]; then
+            echo "::warning::deploy-stable: GHCR_PULL_TOKEN is unset or rejected by ghcr.io; writing this job's ephemeral github.token into CapRover's SHARED ghcr.io registry entry. It expires when this job ends and later pulls on this cluster will be denied until GHCR_PULL_TOKEN is fixed."
+          fi
           case "$SOURCE" in
             "GHCR_PULL_TOKEN") CHOSEN_TOKEN="$GH_TOKEN_LEGACY_PAT" ;;
             "github.token") CHOSEN_TOKEN="$GH_TOKEN_EPHEMERAL" ;;
@@ -1956,43 +2511,52 @@ jobs:
           chmod +x .github/scripts/*.sh
           chmod +x .ci-workflows/scripts/*.sh
 
-      - name: Download rendered env file artifact (if present)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: app-env-${{ inputs.environment }}-${{ inputs.app_name }}
-          path: .deploy-app-env
-
-      - name: Resolve env file path
+      - name: Render app env file (in-job, no artifact handoff)
         id: env-file
+        # These inherited secrets are intentionally available only while this
+        # caller-provided renderer runs; empty inherited values are permitted.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          # App-specific runtime secrets (e.g. memories' READ/WRITE tokens)
+          # are caller-owned and not in the fixed list above. The caller's
+          # renderer -- its own code, already trusted via `secrets: inherit`
+          # -- picks an explicit allowlist out of this JSON object. Values are
+          # still individually log-masked; this stays step-local like the rest.
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          STAGE_LABEL="${{ needs.resolve-stage.outputs.env_label }}"
-          APP="${{ inputs.app_name }}"
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/app-env-${{ inputs.environment }}-${{ inputs.app_name }}.env"
 
-          for candidate in \
-            ".deploy-app-env/app-env-${ENV}-${APP}.env" \
-            ".deploy-app-env/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${ENV}-${APP}.env" \
-            "/tmp/app-env-${STAGE_LABEL}-${APP}.env" \
-            "/tmp/app-env-${APP}.env"; do
-            if [ -f "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-
-          echo "::error::env file not found for app=${APP} env=${ENV} stage=${STAGE_LABEL}"
-          exit 1
-
-      - name: Validate stable env file
-        run: |
-          ENV_FILE="${{ steps.env-file.outputs.path }}"
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "ERROR: missing required stable env file ${ENV_FILE}"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
             exit 1
           fi
+          chmod +x "$SCRIPT"
+
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; there is no artifact or /tmp fallback"
+            exit 1
+          fi
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Configure target slot (atomic env + config)
         run: |
@@ -2027,6 +2591,21 @@ jobs:
             --caprover-password "$CAPROVER_PASSWORD" \
             --github-token "$GHCR_PULL_TOKEN" \
             --github-owner "${{ env.OWNER }}"
+
+      - name: Verify stable service runs requested image
+        run: |
+          set -euo pipefail
+          case "$CAPROVER_URL" in
+            *captain.app.qwickforge.com*) SSH_TARGET=oci-main ;;
+            *macmini-devserver*) SSH_TARGET=macmini ;;
+            *) echo "ERROR: no SSH service-readback target is mapped for CapRover URL $CAPROVER_URL"; exit 1 ;;
+          esac
+          .ci-workflows/scripts/verify-caprover-service-image.sh \
+            --ssh-host "$SSH_TARGET" \
+            --service "srv-captain--${{ needs.resolve-stage.outputs.target_app }}" \
+            --image-ref "${{ needs.resolve-stage.outputs.image_ref }}" \
+            --max-attempts 15 \
+            --sleep 10
 
       - name: Validate target slot health
         run: |
@@ -2170,3 +2749,34 @@ jobs:
             --ts-api-key "$TS_API_KEY_RESOLVED" \
             --canonical-hostname "$CANONICAL_HOSTNAME" \
             --deploy-start-epoch "${{ needs.resolve-stage.outputs.deploy_start_epoch }}"
+
+      - name: Record first-stable bootstrap authorization
+        if: needs.resolve-stage.outputs.bootstrap_first_stable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
+          IMAGE_BASE="${{ needs.resolve-stage.outputs.image_name }}"
+          SOURCE_DIGEST="${IMAGE_REF##*@}"
+          RELEASE_DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "${IMAGE_BASE}:release")"
+          [ "$SOURCE_DIGEST" = "$RELEASE_DIGEST" ] || { echo "::error::bootstrap digest changed after verification"; exit 1; }
+          PAYLOAD="$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg app "${{ inputs.app_name }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg source "$SOURCE_DIGEST" \
+            --arg release "$RELEASE_DIGEST" \
+            --arg actor "${{ github.actor }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{repo:$repo, app_name:$app, sha:$sha, source_digest:$source, release_digest:$release, actor:$actor, run_url:$run_url}')"
+          printf '## First stable bootstrap\n\n%s\n' "$PAYLOAD" >> "$GITHUB_STEP_SUMMARY"
+          .ci-workflows/scripts/create-blue-green-check-run.sh \
+            --github-token "$GH_TOKEN" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --name "blue-green/first-stable-bootstrap/${{ inputs.app_name }}" \
+            --title "First stable bootstrap authorized" \
+            --summary "Stable slot bootstrapped from the verified release digest; normal live promotion remains the only path that creates :stable." \
+            --output-json "$PAYLOAD" \
+            --external-id "${{ github.run_id }}-${{ github.run_attempt }}"

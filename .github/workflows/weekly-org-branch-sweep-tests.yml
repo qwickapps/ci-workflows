@@ -1,0 +1,34 @@
+name: Weekly Org Branch Sweep Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/weekly-org-branch-sweep.yml'
+      - '.github/workflows/weekly-org-branch-sweep-tests.yml'
+      - 'scripts/weekly-org-branch-sweep.py'
+      - 'scripts/configure-org-merge-settings.py'
+      - 'scripts/tests/weekly-org-branch-sweep.test.py'
+      - 'scripts/tests/configure-org-merge-settings.test.py'
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/weekly-org-branch-sweep.yml'
+      - '.github/workflows/weekly-org-branch-sweep-tests.yml'
+      - 'scripts/weekly-org-branch-sweep.py'
+      - 'scripts/configure-org-merge-settings.py'
+      - 'scripts/tests/weekly-org-branch-sweep.test.py'
+      - 'scripts/tests/configure-org-merge-settings.test.py'
+
+permissions:
+  contents: read
+
+jobs:
+  branch-sweep-tests:
+    name: weekly branch sweep safety tests
+    runs-on: [self-hosted, choco]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 scripts/tests/weekly-org-branch-sweep.test.py
+          python3 scripts/tests/configure-org-merge-settings.test.py

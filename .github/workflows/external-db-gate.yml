@@ -27,7 +27,7 @@ permissions:
 jobs:
   scan:
     name: Scan changed files for forbidden DB references
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, choco]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

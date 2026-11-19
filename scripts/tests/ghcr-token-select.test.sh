@@ -77,12 +77,15 @@ curl() {
       done
       local presented_token="${user_pass#*:}"
       if [ "$presented_token" = "$VALID_TOKEN" ]; then
-        printf '{"token":"bearer-for-valid"}'
+        printf '{"token":"bearer-for-valid"}\n200'
         return 0
       elif [ "$presented_token" = "$INVALID_TOKEN" ]; then
-        # Real ghcr.io returns 401 for a genuinely bad credential; -f
-        # makes curl itself fail (non-zero exit, no stdout) on that, same
-        # as the real binary would.
+        # ghcr_probe_pull_token asks curl to append an HTTP status via -w;
+        # ghcr_probe_auth_only uses curl -f and must fail on the same 401.
+        if [[ " ${args[*]} " == *" -w "* ]]; then
+          printf '{"errors":[{"code":"UNAUTHORIZED"}]}\n401'
+          return 0
+        fi
         return 22
       else
         return 22
@@ -116,6 +119,12 @@ assert "valid token probes successfully" \
 
 refute "invalid (stale) token fails the probe" \
   ghcr_probe_pull_token "actor" "$INVALID_TOKEN" "qwickapps" "img-secrets" "sha-abc123"
+
+assert "401 token endpoint failure is classified as authorization, not a missing manifest" \
+  test "$GHCR_PROBE_REASON" = "token_auth_failed"
+
+assert "401 diagnostic is credential authorization, not missing image/tag" \
+  test "$(ghcr_describe_probe_failure)" = "credential is not authorized to pull this image"
 
 refute "empty token fails the probe without ever calling curl" \
   ghcr_probe_pull_token "actor" "" "qwickapps" "img-secrets" "sha-abc123"
@@ -240,7 +249,7 @@ curl() {
 
   case "$url" in
     https://ghcr.io/token\?*)
-      printf '{"token":"bearer-oci-probe"}'
+      printf '{"token":"bearer-oci-probe"}\n200'
       return 0
       ;;
     https://ghcr.io/v2/*/manifests/*)
@@ -260,6 +269,123 @@ curl() {
 
 assert "probe succeeds for a single-arch OCI image once Accept includes application/vnd.oci.image.manifest.v1+json" \
   ghcr_probe_pull_token "actor" "some-token" "qwickapps" "img-secrets" "sha-e5b8c6f"
+
+echo "== ghcr_probe_pull_token: manifest 404 is not auth failure =="
+curl() {
+  local url=""
+  for arg in "$@"; do
+    case "$arg" in https://*) url="$arg" ;; esac
+  done
+  case "$url" in
+    https://ghcr.io/token\?*) printf '{"token":"bearer-missing"}\n200' ;;
+    https://ghcr.io/v2/*/manifests/*) printf '404' ;;
+    *) return 1 ;;
+  esac
+}
+set +e
+ghcr_probe_pull_token "actor" "some-token" "qwickapps" "img-secrets" "release"
+RC=$?
+set -e
+assert "404 manifest probe fails" test "$RC" -ne 0
+assert "404 manifest is classified as missing image/tag" test "$GHCR_PROBE_REASON" = "manifest_missing"
+assert "404 diagnostic says missing image/tag, not authorization" \
+  test "$(ghcr_describe_probe_failure)" = "manifest is missing (image/tag does not exist)"
+
+echo "== t_5e0ee673: shared CapRover registry never gets github.token while the PAT may be valid =="
+# deploy-from-ghcr.sh overwrites CapRover's SHARED ghcr.io registry entry
+# with the selected token. github.token dies with the job, so it may only be
+# chosen when the PAT is DEFINITIVELY unusable (unset or rejected by
+# ghcr.io). Any indeterminate PAT probe result must fail closed. Hermetic:
+# fake ghcr.io below; PAT behaviour driven by PAT_MODE.
+SHARED_PAT="fake-long-lived-pat-marker"
+SHARED_EPHEMERAL="fake-ephemeral-job-token-marker"
+PAT_MODE="ok"
+curl() {
+  local args=("$@") url="" user_pass="" auth_header=""
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in https://*) url="${args[$i]}" ;; esac
+    [ "${args[$i]}" = "-u" ] && user_pass="${args[$((i + 1))]}"
+    if [ "${args[$i]}" = "-H" ] && [[ "${args[$((i + 1))]}" == Authorization:* ]]; then
+      auth_header="${args[$((i + 1))]}"
+    fi
+  done
+  case "$url" in
+    https://ghcr.io/token\?*)
+      if [ "${user_pass#*:}" = "$SHARED_EPHEMERAL" ]; then
+        printf '{"token":"bearer-ephemeral"}\n200'; return 0
+      fi
+      case "$PAT_MODE" in
+        ok|manifest_403|manifest_404|manifest_500|manifest_curl_fail) printf '{"token":"bearer-pat"}\n200' ;;
+        token_401) printf '{"errors":[]}\n401' ;;
+        token_403) printf '{"errors":[]}\n403' ;;
+        token_500) printf 'oops\n500' ;;
+        token_429) printf 'slow down\n429' ;;
+        token_garbage) printf 'not-json\n200' ;;
+        unreachable) return 7 ;;
+      esac
+      return 0
+      ;;
+    https://ghcr.io/v2/*/manifests/*)
+      if [[ "$auth_header" == *bearer-ephemeral* ]]; then printf '200'; return 0; fi
+      case "$PAT_MODE" in
+        ok) printf '200' ;;
+        manifest_403) printf '403' ;;
+        manifest_404) printf '404' ;;
+        manifest_500) printf '500' ;;
+        manifest_curl_fail) return 28 ;;
+        *) printf '403' ;;
+      esac
+      return 0
+      ;;
+    *) echo "unexpected curl invocation in test stub: ${args[*]}" >&2; return 1 ;;
+  esac
+}
+
+# shared_select PAT_MODE PAT -> sets SEL_OUT (stdout), SEL_ERR (stderr), SEL_RC
+shared_select() {
+  PAT_MODE="$1"
+  local errf
+  errf="$(mktemp)"
+  set +e
+  SEL_OUT="$(ghcr_select_shared_registry_token "actor" "qwickapps" "img-x" "sha-1" "$2" "$SHARED_EPHEMERAL" 2>"$errf")"
+  SEL_RC=$?
+  set -e
+  SEL_ERR="$(cat "$errf")"
+  rm -f "$errf"
+}
+
+shared_select ok "$SHARED_PAT"
+assert "valid PAT: selects GHCR_PULL_TOKEN" test "$SEL_RC" -eq 0 -a "$SEL_OUT" = "GHCR_PULL_TOKEN"
+
+for mode in token_500 token_429 token_garbage unreachable manifest_500 manifest_curl_fail manifest_404; do
+  shared_select "$mode" "$SHARED_PAT"
+  assert "PAT probe indeterminate ($mode): selection refuses (non-zero)" test "$SEL_RC" -ne 0
+  refute "PAT probe indeterminate ($mode): github.token is NOT selected for the shared registry" \
+    test "$SEL_OUT" = "github.token"
+  assert "PAT probe indeterminate ($mode): refusal is explained on stderr" \
+    grep -qF 'refusing github.token fallback' <<<"$SEL_ERR"
+done
+
+for mode in token_401 token_403 manifest_403; do
+  shared_select "$mode" "$SHARED_PAT"
+  assert "PAT definitively rejected ($mode): falls back to github.token" \
+    test "$SEL_RC" -eq 0 -a "$SEL_OUT" = "github.token"
+done
+
+shared_select ok ""
+assert "PAT unset: falls back to github.token" test "$SEL_RC" -eq 0 -a "$SEL_OUT" = "github.token"
+
+assert "contrast: order-only ghcr_select_token WOULD hand github.token to the shared registry on a ghcr.io 500" \
+  test "github.token" = \
+    "$(PAT_MODE=token_500; ghcr_select_token actor qwickapps img-x sha-1 GHCR_PULL_TOKEN "$SHARED_PAT" github.token "$SHARED_EPHEMERAL" 2>/dev/null || true)"
+
+ALL_SHARED_OUTPUT=""
+for mode in ok token_401 token_500 unreachable manifest_404; do
+  shared_select "$mode" "$SHARED_PAT"
+  ALL_SHARED_OUTPUT+="$SEL_OUT$SEL_ERR"
+done
+refute "shared selection never prints the PAT value" grep -qF "$SHARED_PAT" <<<"$ALL_SHARED_OUTPUT"
+refute "shared selection never prints the ephemeral token value" grep -qF "$SHARED_EPHEMERAL" <<<"$ALL_SHARED_OUTPUT"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

@@ -152,18 +152,18 @@ case "\$url" in
         ;;
     esac
     ;;
-  *orgs/*/packages*package_type=container*)
-    # aos#193 review finding #2 repro (round 2): the positive-visibility
-    # probe queried before a 404 is ever trusted as absence.
-    case "\${MOCK_VISIBILITY_MODE:-visible}" in
+  *packages/container/*)
+    # Target-specific package-readability probe (t_b14e0125 review finding):
+    # a 404 on /versions is indistinguishable from "this token cannot read
+    # THIS package" -- visibility of some unrelated org package proves
+    # nothing about the target, so the shared helper now requires a
+    # positive, target-named readability check before trusting 404-as-absence.
+    case "\${MOCK_READABLE_MODE:-visible}" in
       visible)
-        echo '[{"id":1,"name":"some-other-package","package_type":"container"}]'
+        echo '{"name":"img-demo"}'
         ;;
-      empty)
-        echo '[]'
-        ;;
-      fails)
-        echo "gh: Forbidden (HTTP 403)" >&2
+      denied)
+        echo "gh: Not Found (HTTP 404)" >&2
         exit 1
         ;;
     esac
@@ -209,7 +209,7 @@ run_sut() {
     export PATH="$TMPDIR/bin:$PATH"
     export MOCK_CAPROVER_MODE="${MOCK_CAPROVER_MODE:-absent}"
     export MOCK_GHCR_MODE="${MOCK_GHCR_MODE:-none}"
-    export MOCK_VISIBILITY_MODE="${MOCK_VISIBILITY_MODE:-visible}"
+    export MOCK_READABLE_MODE="${MOCK_READABLE_MODE:-visible}"
     export MOCK_MARKER_MODE="${MOCK_MARKER_MODE:-none}"
     export MOCK_MARKER_TEXT_JSON="${MOCK_MARKER_TEXT_JSON:-$(jq -nc --arg v "$VALID_MARKER_JSON" '$v')}"
     export MOCK_MARKER_APP_SLUG="${MOCK_MARKER_APP_SLUG:-github-actions}"
@@ -277,8 +277,8 @@ echo "== check-first-deploy-proof.sh: 3-way verdict logic =="
 MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=none MOCK_MARKER_MODE=none \
   assert_verdict "all three absent -> first_deploy=true (genuinely new app)" "true"
 
-MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_genuine MOCK_VISIBILITY_MODE=visible MOCK_MARKER_MODE=none \
-  assert_verdict "GHCR package never published (genuine 404, positive 'Package not found' evidence, AND confirmed token package-visibility) counts as absent, combined with the other two -> true" "true"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_genuine MOCK_READABLE_MODE=visible MOCK_MARKER_MODE=none \
+  assert_verdict "GHCR package never published (genuine 404, positive 'Package not found' evidence, AND confirmed TARGET package readability) counts as absent, combined with the other two -> true" "true"
 
 MOCK_CAPROVER_MODE=exists MOCK_GHCR_MODE=none MOCK_MARKER_MODE=none \
   assert_verdict "CapRover <app>-stable exists -> false" "false"
@@ -420,13 +420,21 @@ MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_permission_denied MOCK_MARKER_MODE=
   assert_hard_failure "GHCR 404 WITHOUT the specific 'Package not found' message (e.g. a private/inaccessible package) is a hard failure, never read as absence" "query failed unexpectedly"
 
 echo ""
-echo "== check-first-deploy-proof.sh: GHCR 404 positive-visibility probe (aos#193 review finding #2, round 2) =="
+echo "== check-first-deploy-proof.sh: GHCR 404 positive target-readability probe (aos#193 review finding #2 / t_b14e0125 meera review) =="
 
-MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_genuine MOCK_VISIBILITY_MODE=empty MOCK_MARKER_MODE=none \
-  assert_hard_failure "a 404 'Package not found' WITH an empty org-packages visibility probe is INDETERMINATE, never read as absence" "could not positively confirm this token can see ANY container package"
+# t_b14e0125 (meera, round: GHCR denied-target bypass): reproduces the exact
+# bug anika found -- this token can see SOME unrelated container package in
+# the org (proving the API token generally works) but is DENIED read access
+# to the specific target package. The old check only verified "can I see
+# ANY container package" and would wrongly treat the target's 404 as
+# absence in this case (rc=0, result=false). The shared helper must now
+# refuse closed instead, because visibility of an unrelated package is not
+# evidence about this one.
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_genuine MOCK_READABLE_MODE=denied MOCK_MARKER_MODE=none \
+  assert_hard_failure "denied-target/unrelated-visible-package bypass: target package 404 must NOT be treated as absence just because some other package would have been visible" "target package visibility could not be positively confirmed"
 
-MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_genuine MOCK_VISIBILITY_MODE=fails MOCK_MARKER_MODE=none \
-  assert_hard_failure "a 404 'Package not found' WITH a failing org-packages visibility probe is INDETERMINATE, never read as absence" "could not positively confirm this token can see ANY container package"
+MOCK_CAPROVER_MODE=absent MOCK_GHCR_MODE=404_genuine MOCK_READABLE_MODE=visible MOCK_MARKER_MODE=none \
+  assert_verdict "GHCR 404 'Package not found' combined with CONFIRMED target-package readability is accepted as genuine absence" "true"
 
 echo ""
 echo "== deploy-app.yml wiring: --image-name must be resolve-stage's real image_name, not a derived app_name string (aos#193 review finding #3) =="

@@ -1,0 +1,70 @@
+name: Weekly Org Branch Sweep
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Classify only; no comments, tags, or deletes"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  sweep:
+    name: "Safe weekly branch sweep"
+    runs-on: [self-hosted, choco]
+    timeout-minutes: 120
+    env:
+      # Org-wide operations require the contents-write token sourced from
+      # QwickSecrets and installed as this repository Actions secret.
+      GH_TOKEN: ${{ secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Classify branches (dry-run by default)
+        id: sweep
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          dry_run=true
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            dry_run="${INPUT_DRY_RUN:-true}"
+          fi
+          python3 scripts/weekly-org-branch-sweep.py --org qwickapps --dry-run "$dry_run" --output /tmp/weekly-org-branch-sweep.json
+      - name: Write per-repository summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from collections import defaultdict
+          from pathlib import Path
+          report = json.loads(Path('/tmp/weekly-org-branch-sweep.json').read_text())
+          grouped = defaultdict(list)
+          for row in report['records']:
+              grouped[row['repo']].append(row)
+          print('## Weekly organization branch sweep')
+          print(f"Dry run: `{report['dry_run']}`")
+          for repo, rows in sorted(grouped.items()):
+              counts = defaultdict(int)
+              for row in rows: counts[row['action']] += 1
+              print(f"### {repo}")
+              print(' | '.join(f"{name}: {count}" for name, count in sorted(counts.items())))
+              for row in rows:
+                  print(f"- `{row['branch']}` — {row['action']}: {row['reason']}")
+          PY
+      - name: Upload classified report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-org-branch-sweep-${{ github.run_id }}
+          path: /tmp/weekly-org-branch-sweep.json
+          retention-days: 30
+          if-no-files-found: error

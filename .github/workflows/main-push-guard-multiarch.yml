@@ -50,7 +50,7 @@ on:
         type: string
         default: '20'
       runs_on:
-        description: 'Runner label(s) as a JSON array string'
+        description: 'Deprecated compatibility input. Multi-arch work is fixed to the owner-approved macmini label set.'
         required: false
         type: string
         default: '["self-hosted", "macmini"]'
@@ -84,7 +84,7 @@ jobs:
   # ---------------------------------------------------------------------------
   validate-platforms:
     name: Validate platforms input
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Reject empty/malformed platforms
         env:
@@ -107,7 +107,7 @@ jobs:
   blue-green-deploy-contract:
     name: Blue-Green Deploy Contract
     if: inputs.enforce_blue_green_deploy_contract
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout calling repo
         uses: actions/checkout@v4
@@ -157,7 +157,7 @@ jobs:
   test:
     name: Test
     needs: [validate-platforms]
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     steps:
       - name: Validate package_manager input
         # Fleet follow-up on ci-workflows#181: every install/build/test step
@@ -262,8 +262,24 @@ jobs:
   # ---------------------------------------------------------------------------
   build-push:
     name: Build and Push Multi-Arch Docker Image
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    runs-on: [self-hosted, macmini]
     needs: [validate-platforms, test]
+    # t_712427a0: serialize multi-arch builds per caller repository. Every
+    # build-push job lands on the same macmini Docker VM, and a QEMU-emulated
+    # linux/amd64 + native linux/arm64 buildx build (pnpm install inside the
+    # image) is memory-heavy. Two callers in one run (raajkumars/qwickapps
+    # qwickapps-website + qwickforge-website) ran concurrently and both died
+    # with BuildKit "ResourceExhausted: cannot allocate memory" (run
+    # 42151708576). This lock lets exactly one build-push run at a time per
+    # repository; the platform list is unchanged.
+    #
+    # cancel-in-progress: false keeps the running build alive. GitHub keeps at
+    # most ONE pending job per group and a newer pending job replaces (cancels)
+    # an older pending one, so a caller workflow must not fan out more than two
+    # build-push jobs at once; chain extra callers with `needs:` instead.
+    concurrency:
+      group: main-push-guard-multiarch-build-push-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -333,6 +349,19 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          # BuildKit otherwise schedules the linux/amd64 (QEMU) and linux/arm64
+          # graphs concurrently. On the 5.77GiB macmini Docker VM, concurrent
+          # dependency installs exhaust memory even when this job is the only
+          # build-push job running. Serialize work inside this multi-platform
+          # builder without changing the required platform list.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+          # t_a4d33238: run-scoped name under the "builder-" prefix (matches
+          # qwick-guard sop-074's allow-regex and the fleet reaper's filter)
+          # plus cleanup: true.
+          name: builder-${{ github.run_id }}
+          cleanup: true
 
       - name: Authenticate to GHCR (direct config write — no docker login/keychain)
         # See main-push-guard.yml's build-push job for why: docker/login-action
@@ -364,3 +393,8 @@ jobs:
             -t "$IMAGE_REF" \
             -f "$DOCKERFILE_PATH" \
             .
+
+      # t_a4d33238: second-chance teardown (see deploy-app.yml for rationale).
+      - name: Tear down buildx builder
+        if: always()
+        run: docker buildx rm "builder-${{ github.run_id }}" || true

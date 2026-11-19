@@ -12,9 +12,8 @@
 #
 # Verifies the jobs with a GHCR-login step each declare an explicit,
 # correctly-scoped `permissions:` block: build (contents: read + packages:
-# write -- it checks out the repo AND pushes), verify-provenance (packages:
-# read only -- no checkout, pull-only), retag (packages: write -- no
-# checkout, writes a new manifest tag).
+# write -- it checks out the repo AND pushes), retag (packages: write --
+# no checkout, writes a new manifest tag).
 #
 # deploy-stable and deploy-caprover do NOT need GHCR package access
 # locally (mcp#392): they deploy via deploy-from-ghcr.sh, which hands
@@ -39,6 +38,17 @@
 # top-level permissions is a required Phase 1b follow-up BEFORE either job
 # can safely carry its own permissions block again.
 #
+# t_b14e0125 (first-stable bootstrap): verify-provenance used to be the
+# THIRD job in this "explicit, correctly-scoped" group (packages: read
+# only). The new bootstrap proof-read step needs checks: read + actions:
+# read, hitting the EXACT same dispatch-time subset wall deploy-caprover/
+# deploy-stable already hit -- so it joined their "NO permissions block,
+# inherit the caller's own top-level grant" camp instead of getting a
+# static checks:read/actions:read block that would break all 14 callers.
+# A caller that wants bootstrap_first_stable: true to work must add those
+# two scopes to ITS OWN top-level permissions (per-caller opt-in); see
+# this job's header comment in deploy-app.yml.
+#
 # A permissions: block on a job REPLACES the job's entire default
 # permission set, not adds to it -- this also checks that no OTHER job in
 # the file (which doesn't have a GHCR-login step, including
@@ -57,6 +67,16 @@ fail=0
 assert() {
   local desc="$1"; shift
   if "$@"; then
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $desc"
+    fail=$((fail + 1))
+  fi
+}
+refute() {
+  local desc="$1"; shift
+  if ! "$@"; then
     echo "  PASS: $desc"
     pass=$((pass + 1))
   else
@@ -118,9 +138,6 @@ assert "workflow file exists" \
 assert "build job: permissions = {contents: read, packages: write}" \
   test "$(job_permissions_json build)" = '{"contents": "read", "packages": "write"}'
 
-assert "verify-provenance job: permissions = {packages: read}" \
-  test "$(job_permissions_json verify-provenance)" = '{"packages": "read"}'
-
 assert "retag job: permissions = {packages: write}" \
   test "$(job_permissions_json retag)" = '{"packages": "write"}'
 
@@ -129,6 +146,9 @@ assert "deploy-caprover job: NO permissions block (aos#193 Phase 1 review round 
 
 assert "deploy-stable job: NO permissions block (aos#193 Phase 1 review round 2 -- see this test's header comment)" \
   test "$(job_permissions_json deploy-stable)" = "null"
+
+assert "verify-provenance job: NO permissions block (t_b14e0125 first-stable bootstrap -- see this test's header comment and this job's header comment in deploy-app.yml)" \
+  test "$(job_permissions_json verify-provenance)" = "null"
 
 echo "== No workflow-level permissions block (per-job scoping only) =="
 TOPLEVEL=$(python3 -c "
@@ -200,11 +220,59 @@ echo "== ci-workflows#204: CapRover-side selection prefers the PAT, falls back t
 # CapRover registry entry -- the long-lived PAT is preferred there
 # (opposite order from the runner-side jobs above) precisely because it
 # outlives this one job, per this job's own header comment.
+#
+# t_5e0ee673: "PAT listed first" was not enough -- with plain
+# ghcr_select_token ANY PAT probe failure (ghcr.io blip, 5xx, timeout) fell
+# through to github.token and wrote a credential that dies with the job
+# into the shared registry while a valid PAT existed. These jobs must use
+# ghcr_select_shared_registry_token, which only allows the github.token
+# fallback when the PAT is definitively unset/rejected (behaviour covered
+# in ghcr-token-select.test.sh).
 for job in deploy-caprover deploy-stable; do
-  assert "$job: ghcr_select_token is called with GHCR_PULL_TOKEN as the FIRST candidate" \
-    bash -c 'test "$1" = "GHCR_PULL_TOKEN"' _ \
-      "$(step_run "$job" "Select GHCR pull token" | first_ghcr_select_token_label)"
+  SELECT_RUN="$(step_run "$job" "Select GHCR pull token")"
+  assert "$job: selection step exists" test -n "$SELECT_RUN"
+  assert "$job: uses ghcr_select_shared_registry_token" \
+    grep -qF 'ghcr_select_shared_registry_token' <<<"$SELECT_RUN"
+  refute "$job: does not use the order-only ghcr_select_token for the shared registry" \
+    grep -qE '(^|[^_])ghcr_select_token[[:space:]]' <<<"$SELECT_RUN"
+  assert "$job: PAT is passed as the first (preferred) candidate, github.token second" \
+    grep -qF '"$GH_TOKEN_LEGACY_PAT" "$GH_TOKEN_EPHEMERAL"' <<<"$SELECT_RUN"
+  assert "$job: GH_TOKEN_LEGACY_PAT is secrets.GHCR_PULL_TOKEN" \
+    test "$(step_env "$job" "Select GHCR pull token" GH_TOKEN_LEGACY_PAT)" = '${{ secrets.GHCR_PULL_TOKEN }}'
+  DEPLOY_RUN="$(step_run "$job" "Deploy image to")"
+  assert "$job: deploy-from-ghcr.sh step exists" grep -qF 'deploy-from-ghcr.sh' <<<"$DEPLOY_RUN"
+  assert "$job: deploy-from-ghcr.sh only ever receives the selected \$GHCR_PULL_TOKEN" \
+    grep -qF -- '--github-token "$GHCR_PULL_TOKEN"' <<<"$DEPLOY_RUN"
+  refute "$job: deploy-from-ghcr.sh never receives github.token directly" \
+    grep -qF 'github.token' <<<"$DEPLOY_RUN"
 done
+
+echo "== t_5e0ee673: every shared-registry writer in deploy-app.yml is covered =="
+# Any step that hands a token to deploy-from-ghcr.sh or setup-qwickway-route.sh
+# writes CapRover's shared ghcr.io registry entry. None may pass github.token.
+# runs_matching REGEX -- every run: script in the workflow matching REGEX.
+runs_matching() {
+  python3 - "$WORKFLOW" "$1" <<'PYEOF'
+import re, sys, yaml
+with open(sys.argv[1]) as f:
+    doc = yaml.safe_load(f)
+pat = re.compile(sys.argv[2])
+for job in (doc.get('jobs') or {}).values():
+    for step in job.get('steps') or []:
+        run = step.get('run') or ''
+        if pat.search(run):
+            print(run)
+PYEOF
+}
+SHARED_WRITERS="$(runs_matching 'deploy-from-ghcr\.sh|setup-qwickway-route\.sh')"
+assert "found shared-registry writer steps to check" test -n "$SHARED_WRITERS"
+refute "no shared-registry writer passes github.token / GITHUB_TOKEN as --github-token" \
+  grep -qE -- '--github-token[[:space:]]+"?(\$\{\{[[:space:]]*(github\.token|secrets\.GITHUB_TOKEN)|\$GH_TOKEN_EPHEMERAL|\$GITHUB_TOKEN)' <<<"$SHARED_WRITERS"
+QWICKWAY_RUN="$(runs_matching 'setup-qwickway-route\.sh')"
+assert "qwickway route step sources its registry token from secrets.GHCR_PULL_TOKEN" \
+  grep -qF 'GHCR_PULL="${{ secrets.GHCR_PULL_TOKEN }}"' <<<"$QWICKWAY_RUN"
+assert "qwickway route step passes that PAT to setup-qwickway-route.sh" \
+  grep -qF -- '--github-token "$GHCR_PULL"' <<<"$QWICKWAY_RUN"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

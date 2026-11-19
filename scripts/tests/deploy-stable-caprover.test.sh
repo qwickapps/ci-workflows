@@ -45,6 +45,17 @@ with open('$WORKFLOW') as f:
 
 job = doc['jobs']['deploy-stable']
 steps = job.get('steps', [])
+forge_gate_index = next(
+    (i for i, s in enumerate(steps)
+     if (s.get('name') or '').startswith('Refuse unsupported Forge stable deployment')),
+    None,
+)
+caprover_credentials_index = next(
+    (i for i, s in enumerate(steps)
+     if 'caprover credentials' in (s.get('name') or '').lower()),
+    None,
+)
+forge_gate_run = '' if forge_gate_index is None else (steps[forge_gate_index].get('run') or '')
 
 def step_texts():
     for s in steps:
@@ -61,6 +72,20 @@ result = {
     'has_deploy_from_ghcr': 'deploy-from-ghcr.sh' in all_text,
     'has_validate_deployment_health': 'validate-deployment-health.sh' in all_text,
     'has_caprover_credentials_step': any('caprover credentials' in (s.get('name','') or '').lower() for s in steps),
+    'forge_gate_before_caprover_credentials': (
+        forge_gate_index is not None
+        and caprover_credentials_index is not None
+        and forge_gate_index < caprover_credentials_index
+        and 'qwickapps-forge)' in forge_gate_run
+        and 'qwickapps-forge|*-forge)' not in forge_gate_run
+        and 'exit 1' in forge_gate_run
+    ),
+    'forge_gate_normalizes_aliases': (
+        'POLICY_APP=' in forge_gate_run
+        and '*-live)' in forge_gate_run
+        and '*-uat)' in forge_gate_run
+        and '*-stable)' in forge_gate_run
+    ),
     'uses_resolved_target_app': 'needs.resolve-stage.outputs.target_app' in all_text,
     'no_hardcoded_app_stable_suffix': (\"inputs.app_name }}-stable\" not in all_text) and (\"inputs.app_name}}-stable\" not in all_text),
     # aos#193 Phase 1 review (round 2): deploy-stable carries NO explicit
@@ -100,20 +125,41 @@ result = {
     ),
 }
 
-# Confirm no OTHER job in the file references Coolify either -- the
-# orphaned path must be fully removed, not just unreferenced by
-# deploy-stable while dead code lingers elsewhere.
+# Confirm no OTHER job in the file references Coolify EXCEPT the
+# intentional live-claimant topology preflight in deploy-caprover
+# (t_201b42b1: topology-live-preflight.py treats Coolify as a live
+# claimant source alongside CapRover/Tailscale, so deploy-caprover's
+# preflight/post-deploy-conflict steps legitimately pass a
+# --coolify-token). Any mention OUTSIDE a topology-live-preflight.py
+# invocation -- e.g. the orphaned deploy-to-coolify.sh script or a
+# secrets.COOLIFY_URL/COOLIFY_TOKEN reference in a step that is NOT
+# that preflight call -- must still fail: that would be the orphaned
+# deploy path (or a copy-paste of it) coming back, not the live-claimant
+# feature.
 other_jobs_coolify = []
+deploy_caprover_orphan_coolify = False
 for job_id, j in doc.get('jobs', {}).items():
     if job_id == 'deploy-stable' or not isinstance(j, dict):
         continue
+    steps_list = j.get('steps', []) or []
+    if job_id == 'deploy-caprover':
+        for s in steps_list:
+            if not isinstance(s, dict):
+                continue
+            text = ' '.join(filter(None, [s.get('name', ''), s.get('run', '') or ''])).lower()
+            if 'coolify' not in text:
+                continue
+            if 'topology-live-preflight.py' not in text:
+                deploy_caprover_orphan_coolify = True
+        continue
     texts = []
-    for s in j.get('steps', []) or []:
+    for s in steps_list:
         if isinstance(s, dict):
             texts.append(' '.join(filter(None, [s.get('name',''), s.get('run','') or ''])))
     if 'coolify' in ' '.join(texts).lower():
         other_jobs_coolify.append(job_id)
 result['other_jobs_coolify'] = other_jobs_coolify
+result['deploy_caprover_orphan_coolify'] = deploy_caprover_orphan_coolify
 
 print(json.dumps(result))
 ")"
@@ -146,6 +192,12 @@ assert "deploy-stable: uses validate-deployment-health.sh (same as deploy-caprov
 assert "deploy-stable: has a 'Resolve CapRover credentials'-style step" \
   test "$(get has_caprover_credentials_step)" = "True"
 
+assert "infra#41: Forge stable refusal precedes CapRover credentials and exits" \
+  test "$(get forge_gate_before_caprover_credentials)" = "True"
+
+assert "infra#41: Forge stable refusal normalizes stable-slot aliases before CapRover credentials" \
+  test "$(get forge_gate_normalizes_aliases)" = "True"
+
 assert "deploy-stable: resolves its target app name via resolve-stage's target_app output" \
   test "$(get uses_resolved_target_app)" = "True"
 
@@ -168,11 +220,14 @@ else
 fi
 
 OTHER_COOLIFY_JOBS="$(get other_jobs_coolify)"
-assert "no other job in deploy-app.yml still mentions coolify" \
+assert "no job besides deploy-stable/deploy-caprover mentions coolify" \
   test "$OTHER_COOLIFY_JOBS" = "[]"
 if [ "$OTHER_COOLIFY_JOBS" != "[]" ]; then
   echo "    jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
 fi
+
+assert "deploy-caprover's coolify references are confined to the live-claimant topology preflight (topology-live-preflight.py), not an orphaned coolify deploy path" \
+  test "$(get deploy_caprover_orphan_coolify)" = "False"
 
 echo ""
 echo "== deploy-app.yml: aos pin-verification mutation gaps (aos#193 review §5, round 2) =="
