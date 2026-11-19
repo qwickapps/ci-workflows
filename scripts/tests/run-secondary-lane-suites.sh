@@ -15,7 +15,8 @@ for t in scripts/tests/deploy-app-stage-host-gate.test.sh \
 done
 for t in scripts/tests/coolify-validation-safety.test.py \
          scripts/tests/validate-coolify-token-exclusivity.test.py \
-         scripts/tests/coolify-validation-evidence.test.py; do
+         scripts/tests/coolify-validation-evidence.test.py \
+         scripts/tests/lane-regression.test.py; do
   [ -f "$t" ] || continue
   echo "== $t"
   if python3 "$t" > "${TMPDIR:-/tmp}/suite.out" 2>&1; then tail -2 "${TMPDIR:-/tmp}/suite.out"; else tail -25 "${TMPDIR:-/tmp}/suite.out"; FAILED+=("$t"); fi
