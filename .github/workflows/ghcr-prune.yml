@@ -39,12 +39,23 @@ jobs:
       - name: Checkout scripts
         uses: actions/checkout@v4
 
+      - name: Verify GHCR package-list credential
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GHCR_PULL_TOKEN is not configured"
+            exit 1
+          fi
+          gh api --hostname github.com "orgs/qwickapps/packages?package_type=container&per_page=1" >/dev/null
+
       - name: Run org-wide GHCR prune
         env:
-          # github.token cannot enumerate org-owned packages. Prefer the
-          # repository-scoped GHCR credential, then retain the org PAT and
-          # default-token fallbacks for repositories where it is unavailable.
-          GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}
+          # Org package enumeration requires the package-capable credential.
+          # Do not fall back to the contents PAT or repository GITHUB_TOKEN:
+          # both are known to lack access to this org-owned package endpoint.
+          GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_ENFORCE: ${{ inputs.enforce }}
           INPUT_KEEP: ${{ inputs.keep }}

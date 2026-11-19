@@ -366,9 +366,16 @@ class WorkflowRetentionContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ghcr-prune.yml").read_text()
         self.assertIn("runs-on: [self-hosted, macmini]", workflow)
         self.assertIn(
-            "GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS || github.token }}",
+            "GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}",
             workflow,
         )
+        self.assertIn("Verify GHCR package-list credential", workflow)
+        self.assertIn(
+            'gh api --hostname github.com "orgs/qwickapps/packages?package_type=container&per_page=1" >/dev/null',
+            workflow,
+        )
+        self.assertNotIn("secrets.GITHUB_PAT_RW_QWICKAPPS_CONTENTS", workflow)
+        self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow)
         self.assertIn(
             'if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ENFORCE" = "true" ]; then',
             workflow,
