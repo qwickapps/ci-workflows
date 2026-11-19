@@ -668,6 +668,25 @@ def t5_workflow_maps_only_the_scoped_secret():
     walk(yaml.safe_load(ACTION.read_text()))
 
 
+def t5_cleanup_inherits_resolved_token_from_github_env():
+    steps = JOBS["stop-coolify-build-slot"]["steps"]
+    resolver = next(s for s in steps if s.get("name") == "Resolve scoped Momo validation credentials")
+    cleanup = next(s for s in steps if s.get("name") == "Stop build validation resource")
+    assert "resolve-coolify-validation-credentials.sh" in resolver["run"]
+    assert "COOLIFY_MOMO_DEPLOY_TOKEN" not in cleanup.get("env", {}), cleanup.get("env")
+
+    rc, values, _, output = run_resolver({**TS_OK, "COOLIFY_MOMO_DEPLOY_TOKEN": "cleanup-scoped"}, {})
+    assert rc == 0, output
+    inherited = {**os.environ, **values}
+    proc = subprocess.run(
+        ["bash", "-c", 'test "$COOLIFY_MOMO_DEPLOY_TOKEN" = cleanup-scoped'],
+        env=inherited,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def t5_exclusivity_validator_rejects_stale_names():
     validator = ROOT / "scripts/validate-coolify-token-exclusivity.py"
     with tempfile.TemporaryDirectory() as tmp:

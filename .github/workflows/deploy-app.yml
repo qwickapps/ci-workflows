@@ -2388,8 +2388,6 @@ jobs:
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
         run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
       - name: Stop build validation resource
-        env:
-          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ env.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           python3 .ci-workflows/scripts/coolify-validation-deploy.py stop \
