@@ -45,6 +45,12 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Enforce exclusive Momo Coolify deploy token
+      shell: bash
+      run: |
+        python3 "${{ github.action_path }}/../../../scripts/validate-coolify-token-exclusivity.py" \
+          --root "${{ github.action_path }}/../../.."
+
     - name: Resolve scoped Momo validation credentials
       shell: bash
       run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
@@ -66,20 +72,18 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
         python3 .ci-workflows/scripts/coolify-validation-topology.py \
           --hostname "${{ inputs.resource-name }}" \
           --resource-name "${{ inputs.resource-name }}" \
           --caprover-hosts oci-gateway oci-main server1-qwickforge \
           --ts-api-key "$TS_API_KEY_RESOLVED" \
-          --coolify-token "$COOLIFY_TOKEN"
+          --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN"
 
     - name: Deploy immutable image and verify Coolify readback
       id: deploy
       shell: bash
       run: |
         set -euo pipefail
-        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
         SNAPSHOT="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-snapshot.json"
         echo "snapshot=$SNAPSHOT" >> "$GITHUB_OUTPUT"
         python3 .ci-workflows/scripts/coolify-validation-deploy.py deploy \
@@ -91,7 +95,13 @@ runs:
           --image-digest "${{ inputs.image-digest }}" \
           --env-file "${{ steps.env-file.outputs.path }}" \
           --container-port "${{ inputs.container-port }}" \
-          --snapshot "$SNAPSHOT"
+          --snapshot "$SNAPSHOT" \
+          --evidence-out "${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-evidence.json"
+        EVIDENCE="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-evidence.json"
+        [ -s "$EVIDENCE" ] || { echo "::error::Coolify deploy produced no evidence record; failing closed"; exit 1; }
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          { echo "### Momo Coolify ${{ inputs.role }} validation evidence"; echo '```json'; cat "$EVIDENCE"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        fi
 
     - name: Validate Momo validation health
       shell: bash
@@ -173,19 +183,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
         python3 .ci-workflows/scripts/coolify-validation-topology.py \
           --hostname "${{ inputs.resource-name }}" \
           --resource-name "${{ inputs.resource-name }}" \
           --caprover-hosts oci-gateway oci-main server1-qwickforge \
           --ts-api-key "$TS_API_KEY_RESOLVED" \
-          --coolify-token "$COOLIFY_TOKEN"
+          --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN"
 
     - name: Roll back Momo validation mutation on failure
       if: failure() && steps.deploy.outcome == 'success'
       shell: bash
       run: |
-        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
         python3 .ci-workflows/scripts/coolify-validation-deploy.py rollback \
           --config .ci-workflows/config/coolify-secondary-validation.json \
           --role "${{ inputs.role }}" \

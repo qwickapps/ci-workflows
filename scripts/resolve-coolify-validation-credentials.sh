@@ -5,7 +5,7 @@
 set -euo pipefail
 
 : "${GITHUB_ENV:?GITHUB_ENV is required}"
-COOLIFY_RESOLVED="${COOLIFY_TOKEN:-}"
+COOLIFY_MOMO_DEPLOY_TOKEN="${COOLIFY_MOMO_DEPLOY_TOKEN:-}"
 TS_RESOLVED="${TS_API_KEY:-}"
 
 fetch_secret() {
@@ -18,14 +18,14 @@ fetch_secret() {
   printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value", ""))'
 }
 
-if [ -z "$COOLIFY_RESOLVED" ] || [ "$COOLIFY_RESOLVED" = "-" ]; then
-  COOLIFY_RESOLVED="$(fetch_secret infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN || true)"
+if [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ] || [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ]; then
+  COOLIFY_MOMO_DEPLOY_TOKEN="$(fetch_secret infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN || true)"
 fi
 if [ -z "$TS_RESOLVED" ] || [ "$TS_RESOLVED" = "-" ]; then
   TS_RESOLVED="$(fetch_secret infrastructure/tailscale/TS_API_KEY || true)"
 fi
 
-if [ -z "$COOLIFY_RESOLVED" ] || [ "$COOLIFY_RESOLVED" = "-" ]; then
+if [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ] || [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ]; then
   echo "::error::scoped COOLIFY_MOMO_DEPLOY_TOKEN could not be resolved; refusing secondary deployment"
   exit 1
 fi
@@ -34,9 +34,9 @@ if [ -z "$TS_RESOLVED" ] || [ "$TS_RESOLVED" = "-" ]; then
   exit 1
 fi
 
-echo "::add-mask::$COOLIFY_RESOLVED"
+echo "::add-mask::$COOLIFY_MOMO_DEPLOY_TOKEN"
 echo "::add-mask::$TS_RESOLVED"
 {
-  echo "COOLIFY_TOKEN_RESOLVED=$COOLIFY_RESOLVED"
+  echo "COOLIFY_MOMO_DEPLOY_TOKEN=$COOLIFY_MOMO_DEPLOY_TOKEN"
   echo "TS_API_KEY_RESOLVED=$TS_RESOLVED"
 } >> "$GITHUB_ENV"

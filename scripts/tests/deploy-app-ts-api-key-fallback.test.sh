@@ -76,7 +76,7 @@ SERVICE_KEY_ENV_COUNT=$(grep -c 'SECRETS_SERVICE_KEY: \${{ secrets.SECRETS_SERVI
 assert "SECRETS_SERVICE_KEY threaded into four primary checks and both explicit secondary jobs" \
   test "$SERVICE_KEY_ENV_COUNT" -eq 6
 
-COOLIFY_SECRET_COUNT=$(grep -c 'COOLIFY_TOKEN: \${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}' "$WORKFLOW" || true)
+COOLIFY_SECRET_COUNT=$(grep -c 'COOLIFY_MOMO_DEPLOY_TOKEN: \${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}' "$WORKFLOW" || true)
 assert "the live momo scoped deploy token is threaded into both primary checks and both secondary jobs" \
   test "$COOLIFY_SECRET_COUNT" -eq 4
 
@@ -84,9 +84,8 @@ COOLIFY_PATH_COUNT=$(grep -c '\${_SEC_URL}/v1/secrets/infrastructure/caprover/CO
 assert "Coolify fallback reads the live scoped momo deploy token, not unprovisioned/stale aliases" \
   test "$COOLIFY_PATH_COUNT" -eq 2
 
-COOLIFY_BAD_ALIAS_COUNT=$(grep -c 'secrets.COOLIFY_API_TOKEN\|/coolify/COOLIFY_API_TOKEN' "$WORKFLOW" || true)
-assert "no unprovisioned COOLIFY_API_TOKEN secret reference or fallback path remains" \
-  test "$COOLIFY_BAD_ALIAS_COUNT" -eq 0
+assert "exclusive token-name policy passes the complete deployment pipeline" \
+  python3 "$ROOT_DIR/scripts/validate-coolify-token-exclusivity.py" --root "$ROOT_DIR"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

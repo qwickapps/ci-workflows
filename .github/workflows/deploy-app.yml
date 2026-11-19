@@ -311,6 +311,19 @@ jobs:
             echo "ERROR: secondary deployment lane supports only explicit build and uat validation slots; live/stable fail closed"
             exit 1
           fi
+          # Primary-only safety features have no Momo Coolify implementation.
+          # Requesting one on the secondary lane is refused, never skipped.
+          if [ "$DEPLOYMENT_LANE" = "secondary" ]; then
+            UNSUPPORTED=""
+            [ "${{ inputs.record_first_stable_evidence }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED record_first_stable_evidence"
+            [ "${{ inputs.bootstrap_first_stable }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED bootstrap_first_stable"
+            [ "${{ inputs.require_live_approval_check }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED require_live_approval_check"
+            [ -z "${{ inputs.cmd }}" ] || UNSUPPORTED="$UNSUPPORTED cmd"
+            if [ -n "$UNSUPPORTED" ]; then
+              echo "ERROR: secondary (Momo Coolify) lane does not implement:${UNSUPPORTED}; refusing instead of skipping. Use lane=primary for these features."
+              exit 1
+            fi
+          fi
 
           if [ -z "$APP_NAME" ]; then
             echo "ERROR: app_name is required"
@@ -1121,7 +1134,7 @@ jobs:
           QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
           TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
           CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
         with:
@@ -1451,9 +1464,8 @@ jobs:
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          # The live momo API token is the scoped deploy token. Do not use
-          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          # The live Momo API credential uses the single approved scoped name.
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           ENV_FILE="${{ steps.env-file.outputs.path }}"
@@ -1504,21 +1516,17 @@ jobs:
             exit 1
           fi
 
-          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
-          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+          if [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ] || [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ]; then
             if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
               _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
               _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
-                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+                -H "x-service-key: $SECRETS_SERVICE_KEY" 2>/dev/null || echo "")
               if [ -n "$_SEC_RESP" ]; then
-                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
-                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
-                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
-                fi
+                COOLIFY_MOMO_DEPLOY_TOKEN=$(printf '%s' "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
               fi
             fi
           fi
-          if [ -z "$COOLIFY_TOKEN_RESOLVED" ] || [ "$COOLIFY_TOKEN_RESOLVED" = "-" ]; then
+          if [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ] || [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ]; then
             echo "::error::Coolify API token unresolved; Coolify is a live claimant source and cannot be skipped, failing closed"
             exit 1
           fi
@@ -1539,7 +1547,7 @@ jobs:
             --target-host "$HOST_KEY" \
             --caprover-hosts oci-gateway oci-main server1-qwickforge \
             --ts-api-key "$TS_API_KEY_RESOLVED" \
-            --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+            --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN" \
             --pre-mutation-state-out "$PRE_STATE"
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
@@ -1695,9 +1703,8 @@ jobs:
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          # The live momo API token is the scoped deploy token. Do not use
-          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          # The live Momo API credential uses the single approved scoped name.
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
@@ -1721,17 +1728,13 @@ jobs:
             fi
           fi
 
-          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
-          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+          if [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ] || [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ]; then
             if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
               _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
               _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
-                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+                -H "x-service-key: $SECRETS_SERVICE_KEY" 2>/dev/null || echo "")
               if [ -n "$_SEC_RESP" ]; then
-                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
-                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
-                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
-                fi
+                COOLIFY_MOMO_DEPLOY_TOKEN=$(printf '%s' "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
               fi
             fi
           fi
@@ -1747,7 +1750,7 @@ jobs:
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
-              --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+              --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN" \
               --result-json-out "$RESULT_JSON"
           PREFLIGHT_EXIT=$?
           set -e
@@ -2290,6 +2293,12 @@ jobs:
     needs: [resolve-stage, retag]
     if: always() && needs.resolve-stage.result == 'success' && needs.retag.result == 'success' && needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.deployment_lane == 'secondary'
     runs-on: [self-hosted, macmini]
+    # Same group as deploy-coolify-build so a stop can never interleave with
+    # a newer run's deploy of the same slot. The coolify-momo- prefix is
+    # disjoint from caprover-deploy-*, so neither lane queues behind the other.
+    concurrency:
+      group: coolify-momo-${{ inputs.app_name }}-build
+      cancel-in-progress: false
     steps:
       - name: Checkout explicit Momo validation implementation
         uses: actions/checkout@v4
@@ -2303,13 +2312,13 @@ jobs:
           sparse-checkout-cone-mode: false
       - name: Resolve scoped Momo validation credentials
         env:
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
         run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
       - name: Stop build validation resource
         env:
-          COOLIFY_TOKEN: ${{ env.COOLIFY_TOKEN_RESOLVED }}
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ env.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           python3 .ci-workflows/scripts/coolify-validation-deploy.py stop \

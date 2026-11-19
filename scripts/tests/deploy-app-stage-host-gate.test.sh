@@ -62,7 +62,10 @@ else:
     -e 's/\$\{\{ inputs\.image_ref \}\}/$IN_IMAGE_REF/g' \
     -e 's/\$\{\{ inputs\.package_json_path \}\}/$IN_PACKAGE_JSON_PATH/g' \
     -e 's/\$\{\{ inputs\.run_migrations \}\}/$IN_RUN_MIGRATIONS/g' \
-    -e 's/\$\{\{ inputs\.stage \}\}/$IN_STAGE/g'
+    -e 's/\$\{\{ inputs\.stage \}\}/$IN_STAGE/g' \
+    -e 's/\$\{\{ inputs\.record_first_stable_evidence \}\}/${IN_RECORD_FIRST_STABLE_EVIDENCE:-false}/g' \
+    -e 's/\$\{\{ inputs\.require_live_approval_check \}\}/${IN_REQUIRE_LIVE_APPROVAL_CHECK:-false}/g' \
+    -e 's/\$\{\{ inputs\.cmd \}\}/${IN_CMD:-}/g'
 }
 
 extract_script > "$TMPDIR/resolve-stage.sh"

@@ -15,7 +15,7 @@ check "build job is secondary-only" grep -q "deployment_lane == 'secondary'" "$W
 check "explicit config defines only build and uat slots" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert set(d["slots"])=={"build","uat"}; assert d["server"]["name"]=="localhost"' "$CONFIG"
 check "only scoped Momo deploy secret is selected" grep -q 'secrets.COOLIFY_MOMO_DEPLOY_TOKEN' "$WF"
 check "resolver fallback uses exact scoped secret path" grep -q 'infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN' "$RESOLVER"
-check "generic or stale Coolify aliases are absent from new lane" bash -c '! grep -E "COOLIFY_API_TOKEN|COOLIFY_ADMIN_TOKEN|COOLIFY_MANAGE_TOKEN" "$1" "$2" "$3"' _ "$ACTION" "$RESOLVER" "$CONFIG"
+check "exclusive token-name policy passes the deployment pipeline" python3 "$ROOT/scripts/validate-coolify-token-exclusivity.py" --root "$ROOT"
 check "secondary action runs pre and post topology checks" test "$(grep -c 'coolify-validation-topology.py' "$ACTION")" -eq 2
 check "secondary action has rollback" grep -q 'coolify-validation-deploy.py rollback' "$ACTION"
 check "CapRover deployment is primary-only" grep -A12 '^  deploy-caprover:' "$WF" | grep -q "deployment_lane == 'primary'"

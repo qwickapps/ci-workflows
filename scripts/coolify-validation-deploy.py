@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Deploy one closed secondary validation slot to Momo Coolify.
 
-The scoped Coolify token is read only from COOLIFY_TOKEN. Secret values are
-never printed. Existing resources must match the exact configured Momo
+The scoped Coolify token is read only from COOLIFY_MOMO_DEPLOY_TOKEN. Secret
+values are never printed. Existing resources must match the exact configured Momo
 server/destination; a same-named resource elsewhere is refused.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,12 +20,44 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-IMAGE_RE = re.compile(r"^(.+):([^/:]+)$")
-DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 
 
 class DeployError(RuntimeError):
     pass
+
+
+def image_base(image_ref: str) -> str:
+    """Strip an optional @digest and an optional :tag (never a registry port)."""
+    base = image_ref.split("@", 1)[0]
+    last_slash = base.rfind("/")
+    colon = base.find(":", last_slash + 1)
+    return base[:colon] if colon != -1 else base
+
+
+def pinned_image(image_ref: str, image_digest: str) -> tuple[str, str]:
+    """Return Coolify's native digest form (name='<base>@sha256', tag='<hex>').
+
+    Coolify 4.x deploys `{name}:{tag}`, so this pulls `<base>@sha256:<hex>`:
+    the exact digest verify-provenance resolved, never a movable tag such as
+    release-candidate. A ref that already carries a different digest is a
+    provenance mismatch and is refused.
+    """
+    match = DIGEST_RE.fullmatch(image_digest or "")
+    if not match:
+        raise DeployError("Coolify validation requires the verified sha256 image digest from verify-provenance")
+    if "@" in image_ref and image_ref.split("@", 1)[1] != image_digest:
+        raise DeployError("image_ref digest differs from the verified provenance digest; refusing deployment")
+    base = image_base(image_ref)
+    if not base:
+        raise DeployError("image_ref has no repository component")
+    return f"{base}@sha256", match.group(1)
+
+
+def env_evidence(envs: list[dict]) -> dict:
+    """Non-secret fingerprint of the rendered env: key names plus a digest."""
+    canonical = "\n".join(f"{e['key']}={e['value']}" for e in envs).encode()
+    return {"keys": [e["key"] for e in envs], "sha256": hashlib.sha256(canonical).hexdigest()}
 
 
 class Coolify:
@@ -125,7 +158,7 @@ def write_snapshot(path: Path, snapshot: dict) -> None:
     path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
-def trigger_and_wait(api: Coolify, uuid: str) -> None:
+def trigger_and_wait(api: Coolify, uuid: str) -> str:
     result = api.request("POST", f"/deploy?uuid={urllib.parse.quote(uuid)}&force=false")
     deployments = result.get("deployments") or []
     deployment_uuid = deployments[0].get("deployment_uuid") if deployments else None
@@ -136,7 +169,7 @@ def trigger_and_wait(api: Coolify, uuid: str) -> None:
         status = record.get("status", "unknown")
         print(f"Coolify deployment status: {status}")
         if status == "finished":
-            return
+            return deployment_uuid
         if status in {"failed", "cancelled-by-user", "error"}:
             raise DeployError(f"Coolify deployment entered terminal state {status!r}")
         time.sleep(10)
@@ -166,10 +199,7 @@ def deploy(args, cfg: dict, api: Coolify) -> None:
     expected_name = args.app_name + slot["suffix"]
     if args.resource_name != expected_name:
         raise DeployError(f"resource name must be the closed {args.role} slot {expected_name!r}")
-    match = IMAGE_RE.fullmatch(args.image_ref)
-    if not match or not DIGEST_RE.fullmatch(args.image_digest):
-        raise DeployError("Coolify validation requires an image tag plus its verified sha256 digest")
-    image_name, image_tag = match.groups()
+    image_name, image_tag = pinned_image(args.image_ref, args.image_digest)
     envs = parse_env(args.env_file, expected_name)
 
     existing = find_app(api, expected_name)
@@ -182,6 +212,7 @@ def deploy(args, cfg: dict, api: Coolify) -> None:
         created = api.request("POST", "/applications/dockerimage", {
             "project_uuid": cfg["project"]["uuid"],
             "server_uuid": cfg["server"]["uuid"],
+            "destination_uuid": cfg["server"]["destination_uuid"],
             "environment_name": cfg["project"]["environment_name"],
             "docker_registry_image_name": image_name,
             "docker_registry_image_tag": image_tag,
@@ -196,13 +227,17 @@ def deploy(args, cfg: dict, api: Coolify) -> None:
     write_snapshot(args.snapshot, snapshot)
 
     try:
+        if snapshot["created"]:
+            # A new resource must land on the exact Momo destination before
+            # anything is deployed to it; otherwise it is removed again.
+            assert_target(api.request("GET", f"/applications/{uuid}"), cfg, expected_name)
         api.request("PATCH", f"/applications/{uuid}", {
             "docker_registry_image_name": image_name,
             "docker_registry_image_tag": image_tag,
             "ports_exposes": str(args.container_port),
         })
         api.request("PATCH", f"/applications/{uuid}/envs/bulk", {"data": envs}, secret_body=True)
-        trigger_and_wait(api, uuid)
+        deployment_uuid = trigger_and_wait(api, uuid)
         current = api.request("GET", f"/applications/{uuid}")
         current_envs = api.request("GET", f"/applications/{uuid}/envs")
         current_map = {e.get("key"): e.get("value", "") for e in current_envs}
@@ -211,6 +246,23 @@ def deploy(args, cfg: dict, api: Coolify) -> None:
             raise DeployError("Coolify image readback did not match the requested immutable image")
         if any(current_map.get(k) != v for k, v in expected_map.items()):
             raise DeployError("Coolify rendered-env readback did not match the requested values")
+        if args.evidence_out:
+            args.evidence_out.write_text(json.dumps({
+                "schema": "coolify-secondary-validation-evidence/v1",
+                "lane": "secondary",
+                "backend": "coolify-momo",
+                "role": args.role,
+                "resource_name": expected_name,
+                "resource_uuid": uuid,
+                "created": bool(snapshot["created"]),
+                "server_uuid": cfg["server"]["uuid"],
+                "destination_uuid": cfg["server"]["destination_uuid"],
+                "image": f"{image_name}:{image_tag}",
+                "image_digest": args.image_digest,
+                "deployment_uuid": deployment_uuid,
+                "rendered_env": env_evidence(envs),
+                "rollback": "previous image+env snapshot" if not snapshot["created"] else "delete created resource",
+            }, sort_keys=True) + "\n")
         print(f"Coolify validation resource {expected_name} deployed and read back successfully")
     except Exception:
         try:
@@ -233,10 +285,11 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--container-port", type=int)
     parser.add_argument("--snapshot", required=True, type=Path)
+    parser.add_argument("--evidence-out", type=Path)
     args = parser.parse_args()
-    token = os.environ.get("COOLIFY_TOKEN", "")
+    token = os.environ.get("COOLIFY_MOMO_DEPLOY_TOKEN", "")
     if not token or token == "-":
-        raise DeployError("COOLIFY_TOKEN is missing; only the scoped COOLIFY_MOMO_DEPLOY_TOKEN source is supported")
+        raise DeployError("COOLIFY_MOMO_DEPLOY_TOKEN is missing; secondary deployment fails closed")
     cfg = load_config(args.config)
     api = Coolify(cfg["api_base_url"], token)
     expected = args.app_name + cfg["slots"][args.role]["suffix"]
