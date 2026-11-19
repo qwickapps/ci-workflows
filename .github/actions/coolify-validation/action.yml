@@ -1,0 +1,200 @@
+name: Momo Coolify validation deployment
+description: Closed build/UAT validation deployment with topology checks and rollback
+inputs:
+  role:
+    required: true
+  app-name:
+    required: true
+  resource-name:
+    required: true
+  environment:
+    required: true
+  env-render-script:
+    required: true
+  image-ref:
+    required: true
+  image-digest:
+    required: true
+  container-port:
+    required: true
+  health-path:
+    required: true
+  target-url:
+    required: true
+  critical-subsystems:
+    required: false
+    default: postgres
+  warning-subsystems:
+    required: false
+    default: ''
+  smoke-test-path:
+    required: false
+    default: ''
+  smoke-test-command:
+    required: false
+    default: ''
+  e2e-command:
+    required: false
+    default: ''
+  run-e2e:
+    required: false
+    default: 'false'
+  run-migrations:
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Resolve scoped Momo validation credentials
+      shell: bash
+      run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
+
+    - name: Render app env file in job-local storage
+      id: env-file
+      shell: bash
+      run: |
+        set -euo pipefail
+        SCRIPT="${{ inputs.env-render-script }}"
+        OUT="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}.env"
+        [ -f "$SCRIPT" ] || { echo "::error::env_render_script '$SCRIPT' not found"; exit 1; }
+        chmod +x "$SCRIPT"
+        "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app-name }}" "$OUT"
+        [ -s "$OUT" ] || { echo "::error::env renderer produced no non-empty file"; exit 1; }
+        echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+    - name: Live topology preflight for Momo validation slot
+      shell: bash
+      run: |
+        set -euo pipefail
+        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
+        python3 .ci-workflows/scripts/coolify-validation-topology.py \
+          --hostname "${{ inputs.resource-name }}" \
+          --resource-name "${{ inputs.resource-name }}" \
+          --caprover-hosts oci-gateway oci-main server1-qwickforge \
+          --ts-api-key "$TS_API_KEY_RESOLVED" \
+          --coolify-token "$COOLIFY_TOKEN"
+
+    - name: Deploy immutable image and verify Coolify readback
+      id: deploy
+      shell: bash
+      run: |
+        set -euo pipefail
+        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
+        SNAPSHOT="${RUNNER_TEMP}/coolify-${{ inputs.role }}-${{ inputs.app-name }}-snapshot.json"
+        echo "snapshot=$SNAPSHOT" >> "$GITHUB_OUTPUT"
+        python3 .ci-workflows/scripts/coolify-validation-deploy.py deploy \
+          --config .ci-workflows/config/coolify-secondary-validation.json \
+          --role "${{ inputs.role }}" \
+          --app-name "${{ inputs.app-name }}" \
+          --resource-name "${{ inputs.resource-name }}" \
+          --image-ref "${{ inputs.image-ref }}" \
+          --image-digest "${{ inputs.image-digest }}" \
+          --env-file "${{ steps.env-file.outputs.path }}" \
+          --container-port "${{ inputs.container-port }}" \
+          --snapshot "$SNAPSHOT"
+
+    - name: Validate Momo validation health
+      shell: bash
+      run: |
+        set -euo pipefail
+        for attempt in $(seq 1 15); do
+          if curl -fsS --max-time 10 "${{ inputs.target-url }}${{ inputs.health-path }}" >/dev/null; then
+            exit 0
+          fi
+          sleep 20
+        done
+        echo "::error::Momo validation health check failed"
+        exit 1
+
+    - name: Deep subsystem health check
+      shell: bash
+      run: |
+        set -euo pipefail
+        ARGS=(--url "${{ inputs.target-url }}${{ inputs.health-path }}" --timeout 15 --max-attempts 3 --sleep 10)
+        [ -z "${{ inputs.critical-subsystems }}" ] || ARGS+=(--critical-subsystems "${{ inputs.critical-subsystems }}")
+        [ -z "${{ inputs.warning-subsystems }}" ] || ARGS+=(--warning-subsystems "${{ inputs.warning-subsystems }}")
+        [ -z "${GITHUB_STEP_SUMMARY:-}" ] || ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
+        .github/scripts/deep-health-check.sh "${ARGS[@]}"
+
+    - name: Smoke test path
+      if: inputs.smoke-test-path != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsS --retry 2 --retry-delay 10 --max-time 15 "${{ inputs.target-url }}${{ inputs.smoke-test-path }}" >/dev/null
+
+    - name: Smoke test command
+      if: inputs.smoke-test-command != ''
+      shell: bash
+      env:
+        APP_URL: ${{ inputs.target-url }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        APP_NAME: ${{ inputs.app-name }}
+        ENV_LABEL: ${{ inputs.role }}
+      run: ${{ inputs.smoke-test-command }}
+
+    - name: Optional E2E dependencies and suite
+      if: inputs.run-e2e == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        corepack enable
+        corepack install
+        pnpm install --no-frozen-lockfile --store-dir .pnpm-store
+        pnpm playwright test --config=playwright.ci.config.ts --project=chromium --grep="smoke|home|health" --timeout=60000 --reporter=line tests/e2e/
+
+    - name: Migration check
+      if: inputs.run-migrations == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -x .github/scripts/check-migrations.sh ]; then
+          .github/scripts/check-migrations.sh
+        elif [ -x .github/scripts/run-migrations.sh ]; then
+          .github/scripts/run-migrations.sh
+        else
+          echo "::error::migration check requested but no migration script exists"
+          exit 1
+        fi
+
+    - name: Real E2E command
+      if: inputs.e2e-command != ''
+      shell: bash
+      env:
+        APP_URL: ${{ inputs.target-url }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        APP_NAME: ${{ inputs.app-name }}
+        ENV_LABEL: ${{ inputs.role }}
+      run: ${{ inputs.e2e-command }}
+
+    - name: Post-deploy topology conflict check
+      shell: bash
+      run: |
+        set -euo pipefail
+        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
+        python3 .ci-workflows/scripts/coolify-validation-topology.py \
+          --hostname "${{ inputs.resource-name }}" \
+          --resource-name "${{ inputs.resource-name }}" \
+          --caprover-hosts oci-gateway oci-main server1-qwickforge \
+          --ts-api-key "$TS_API_KEY_RESOLVED" \
+          --coolify-token "$COOLIFY_TOKEN"
+
+    - name: Roll back Momo validation mutation on failure
+      if: failure() && steps.deploy.outcome == 'success'
+      shell: bash
+      run: |
+        export COOLIFY_TOKEN="$COOLIFY_TOKEN_RESOLVED"
+        python3 .ci-workflows/scripts/coolify-validation-deploy.py rollback \
+          --config .ci-workflows/config/coolify-secondary-validation.json \
+          --role "${{ inputs.role }}" \
+          --app-name "${{ inputs.app-name }}" \
+          --resource-name "${{ inputs.resource-name }}" \
+          --snapshot "${{ steps.deploy.outputs.snapshot }}"
+
+    - name: Remove job-local secret files
+      if: always()
+      shell: bash
+      run: |
+        rm -f "${{ steps.env-file.outputs.path }}" "${{ steps.deploy.outputs.snapshot }}"

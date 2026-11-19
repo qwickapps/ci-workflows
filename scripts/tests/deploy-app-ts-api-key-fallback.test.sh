@@ -73,12 +73,12 @@ assert "fetches the same secrets-service path mcp's deploy.yml uses for TS_API_K
   test "$SECRETS_PATH_COUNT" -eq 4
 
 SERVICE_KEY_ENV_COUNT=$(grep -c 'SECRETS_SERVICE_KEY: \${{ secrets.SECRETS_SERVICE_KEY }}' "$WORKFLOW" || true)
-assert "SECRETS_SERVICE_KEY threaded into all four live-state-check step environments" \
-  test "$SERVICE_KEY_ENV_COUNT" -eq 4
+assert "SECRETS_SERVICE_KEY threaded into four primary checks and both explicit secondary jobs" \
+  test "$SERVICE_KEY_ENV_COUNT" -eq 6
 
 COOLIFY_SECRET_COUNT=$(grep -c 'COOLIFY_TOKEN: \${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}' "$WORKFLOW" || true)
-assert "the live momo scoped deploy token is threaded into both Coolify checks" \
-  test "$COOLIFY_SECRET_COUNT" -eq 2
+assert "the live momo scoped deploy token is threaded into both primary checks and both secondary jobs" \
+  test "$COOLIFY_SECRET_COUNT" -eq 4
 
 COOLIFY_PATH_COUNT=$(grep -c '\${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN' "$WORKFLOW" || true)
 assert "Coolify fallback reads the live scoped momo deploy token, not unprovisioned/stale aliases" \

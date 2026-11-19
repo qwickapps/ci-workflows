@@ -56,6 +56,7 @@ else:
     -e 's/\$\{\{ inputs\.caprover_url \}\}/$IN_CAPROVER_URL/g' \
     -e 's/\$\{\{ inputs\.container_port \}\}/$IN_CONTAINER_PORT/g' \
     -e 's/\$\{\{ inputs\.dockerfile_only \}\}/$IN_DOCKERFILE_ONLY/g' \
+    -e 's/\$\{\{ inputs\.lane \}\}/$IN_DEPLOYMENT_LANE/g' \
     -e 's/\$\{\{ inputs\.gateway_stable_url \}\}/$IN_GATEWAY_STABLE_URL/g' \
     -e 's/\$\{\{ inputs\.health_path \}\}/$IN_HEALTH_PATH/g' \
     -e 's/\$\{\{ inputs\.image_ref \}\}/$IN_IMAGE_REF/g' \
@@ -80,12 +81,12 @@ run_resolve_stage() {
     export REGISTRY=ghcr.io OWNER=qwickapps
     export IN_APP_NAME="${IN_APP_NAME:-}" IN_BOOTSTRAP_FIRST_STABLE="${IN_BOOTSTRAP_FIRST_STABLE:-false}" IN_CAPROVER_HOST="${IN_CAPROVER_HOST:-}" \
            IN_CAPROVER_URL="${IN_CAPROVER_URL:-}" IN_CONTAINER_PORT="${IN_CONTAINER_PORT:-8080}" \
-           IN_DOCKERFILE_ONLY="${IN_DOCKERFILE_ONLY:-true}" IN_GATEWAY_STABLE_URL="${IN_GATEWAY_STABLE_URL:-}" \
+           IN_DOCKERFILE_ONLY="${IN_DOCKERFILE_ONLY:-true}" IN_DEPLOYMENT_LANE="${IN_DEPLOYMENT_LANE:-primary}" IN_GATEWAY_STABLE_URL="${IN_GATEWAY_STABLE_URL:-}" \
            IN_HEALTH_PATH="${IN_HEALTH_PATH:-/health}" IN_IMAGE_REF="${IN_IMAGE_REF:-}" \
            IN_PACKAGE_JSON_PATH="${IN_PACKAGE_JSON_PATH:-}" IN_RUN_MIGRATIONS="${IN_RUN_MIGRATIONS:-false}" \
            IN_STAGE="${IN_STAGE:-}"
     export GITHUB_SHA="0123456789abcdef0123456789abcdef01234567"
-    export GITHUB_OUTPUT="$TMPDIR/gh-output-$$"
+    export GITHUB_OUTPUT="$TMPDIR/last-gh-output"
     : > "$GITHUB_OUTPUT"
     bash "$TMPDIR/resolve-stage.sh"
   ) > "$out_file" 2>&1
@@ -122,6 +123,30 @@ assert_succeeds() {
   else
     echo "  FAIL (green): $desc -- expected exit=0, got $rc"
     sed 's/^/      /' "$out"
+    fail=$((fail + 1))
+  fi
+}
+
+assert_succeeds_with_outputs() {
+  local desc="$1"; shift
+  local out="$TMPDIR/out-$RANDOM"
+  set +e
+  run_resolve_stage "$out"
+  local rc=$?
+  set -e
+  local missing=0
+  if [ "$rc" -eq 0 ]; then
+    for expected in "$@"; do
+      grep -qFx "$expected" "$TMPDIR/last-gh-output" || missing=1
+    done
+  else
+    missing=1
+  fi
+  if [ "$missing" -eq 0 ]; then
+    echo "  PASS (green): $desc"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL (green): $desc -- exit=$rc or expected outputs missing"
     fail=$((fail + 1))
   fi
 }
@@ -242,6 +267,50 @@ echo "== Check 1: case-insensitive host comparison =="
 # reject a caller who happens to pass e.g. Captain.App.QwickForge.Com.
 IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=Captain.App.QwickForge.Com \
   assert_succeeds "mixed-case uat host still matches the canonical oci-main host"
+
+echo ""
+echo "== Closed secondary Momo lane =="
+
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_succeeds_with_outputs "secondary build maps only to Momo <app>-build despite an OCI-main caller host" \
+  "deployment_backend=coolify-momo" "target_app=demo-build" "caprover_required=false"
+
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_succeeds_with_outputs "secondary UAT maps only to Momo <app>-uat despite an OCI-main caller host" \
+  "deployment_backend=coolify-momo" "target_app=demo-uat" "caprover_required=false"
+
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=live IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_fails_with "secondary live fails closed" "secondary deployment lane supports only explicit build and uat"
+
+IN_DEPLOYMENT_LANE=secondary IN_STAGE=stable IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_fails_with "secondary stable fails closed" "secondary deployment lane supports only explicit build and uat"
+
+IN_DEPLOYMENT_LANE=tertiary IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_fails_with "unknown lane value is refused (closed contract)" "invalid lane 'tertiary'"
+
+IN_DEPLOYMENT_LANE=primary IN_STAGE=build IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_succeeds_with_outputs "primary build keeps the legacy CapRover <app>-dev mapping" \
+  "deployment_backend=caprover-oci-main" "target_app=demo-dev" "caprover_required=true"
+
+IN_DEPLOYMENT_LANE=primary IN_STAGE=uat IN_APP_NAME=demo IN_CAPROVER_HOST=captain.app.qwickforge.com \
+  assert_succeeds_with_outputs "primary uat keeps the legacy CapRover <app>-uat mapping" \
+  "deployment_backend=caprover-oci-main" "target_app=demo-uat" "caprover_required=true"
+
+# Existing callers omit `lane`; GitHub then substitutes the declared default.
+# Prove the declared default is exactly 'primary' and the input is optional.
+LANE_DECL="$(python3 - "$WORKFLOW" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+on = d.get("on", d.get(True))
+i = on["workflow_call"]["inputs"]["lane"]
+print(f"{i.get('required')}|{i.get('default')}|{i.get('type')}")
+PY
+)"
+if [ "$LANE_DECL" = "False|primary|string" ]; then
+  echo "  PASS (green): lane input is optional and defaults to primary for existing callers"; pass=$((pass + 1))
+else
+  echo "  FAIL: lane input declaration is '$LANE_DECL' (want False|primary|string)"; fail=$((fail + 1))
+fi
 
 echo ""
 echo "Tests: $pass passed, $fail failed"
