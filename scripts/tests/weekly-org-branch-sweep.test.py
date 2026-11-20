@@ -39,6 +39,11 @@ def classify(api, item, prs=None):
     return sweep.classify(api, REPO, "main", item, prs or [], NOW)
 
 class WeeklySweepTests(unittest.TestCase):
+    def test_repository_default_branch_is_untouchable_even_when_not_a_reserved_name(self):
+        record = sweep.classify(FakeApi({}), REPO, "trunk", branch("trunk"), [], NOW)
+        self.assertEqual("skipped", record["action"])
+        self.assertEqual("protected branch name", record["reason"])
+
     def test_protected_patterns_are_untouchable(self):
         for name in ("main", "master", "dev", "develop", "release/1.0", "v1-stable"):
             with self.subTest(name=name):
@@ -80,8 +85,11 @@ class WeeklySweepTests(unittest.TestCase):
         api.responses[(f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE")] = (None, "")
         result = sweep.execute(api, record, dry_run=False)
         self.assertEqual("archived_deleted", result["action"])
+        calls = [(call[0], call[1]) for call in api.calls]
         writes = [(call[0], call[1]) for call in api.calls if call[1] != "GET"]
         self.assertEqual([(f"repos/{REPO}/git/refs", "POST"), (f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE")], writes)
+        self.assertLess(calls.index((f"repos/{REPO}/git/refs", "POST")), calls.index((f"repos/{REPO}/git/ref/tags/archive%2Ffeature%2Fold", "GET")))
+        self.assertLess(calls.index((f"repos/{REPO}/git/ref/tags/archive%2Ffeature%2Fold", "GET")), calls.index((f"repos/{REPO}/git/refs/heads/feature%2Fold", "DELETE")))
 
     def test_archive_tag_must_verify_before_delete(self):
         api = FakeApi(endpoints())
