@@ -78,6 +78,18 @@
       "images": ["ghcr.io/qwickapps/img-memories"]
     },
     {
+      "canonical_hostname": "qwickapps-memories-dev",
+      "workload_owner": "memory-platform",
+      "repo": "qwickapps/memories",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-memories-dev",
+      "required_host": "oci-main",
+      "role": "backend",
+      "load_balancer": false,
+      "state": {"mode": "ephemeral"},
+      "images": ["ghcr.io/qwickapps/img-memories"]
+    },
+    {
       "canonical_hostname": "qwickapps-memories-stable",
       "workload_owner": "memory-platform",
       "repo": "qwickapps/memories",

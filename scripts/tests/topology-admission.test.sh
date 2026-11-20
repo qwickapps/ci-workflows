@@ -16,9 +16,15 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 "${ADMIT[@]}" --render-windmill-inventory "$TMP/inventory.json" >/dev/null
 python3 - "$TMP/inventory.json" <<'PY'
 import json,sys
-item=json.load(open(sys.argv[1]))["services"][0]
+services=json.load(open(sys.argv[1]))["services"]
+item=services[0]
 assert item["hostname"] == "qwickapps-mcp"
 assert item["host"] == "oci-gateway"
+
+memories_dev=[item for item in services if item["hostname"] == "qwickapps-memories-dev"]
+assert len(memories_dev) == 1, f"expected exactly one registry identity for qwickapps-memories-dev, got {len(memories_dev)}"
+assert memories_dev[0]["app"] == "srv-captain--qwickapps-memories-dev"
+assert memories_dev[0]["host"] == "oci-main"
 PY
 echo "Tests: $pass passed, $fail failed"
 test "$fail" -eq 0
