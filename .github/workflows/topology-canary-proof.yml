@@ -1,0 +1,47 @@
+name: Topology Canary Proof
+
+# Real-pipeline proof for the topology admission control (t_085084a9 /
+# t_cf80e6ab). Dispatches the REAL deploy-app.yml for a disposable app and
+# expects it to FAIL at "Topology admission before mutation".
+#
+# reject: app topology-canary-reject (CapRover slot topology-canary-reject-dev
+#   on oci-main), image = the published qwickway LB image pinned by digest,
+#   rendered env TS_HOSTNAME=qwickapps-mcp. The registry pins qwickapps-mcp
+#   to oci-gateway, so admission must deny before any CapRover mutation.
+#   A GREEN run of this workflow means the control is broken.
+#
+# Only an explicit operator dispatch runs this; there is no push/PR trigger.
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary:
+        description: Which canary to run
+        required: true
+        type: choice
+        options: [reject]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  reject-canary:
+    if: inputs.canary == 'reject'
+    uses: ./.github/workflows/deploy-app.yml
+    with:
+      app_name: topology-canary-reject
+      environment: dev
+      stage: build
+      env_render_script: .github/scripts/topology-canary-env.sh
+      dockerfile_path: Dockerfile
+      dockerfile_only: 'true'
+      workspace_packages: ''
+      image_ref: ghcr.io/qwickapps/qwickway@sha256:8c2324fed8a8384723a9089f353aeed3e3e86a8b16a57fbb45fc02705223f82d
+      container_port: '80'
+      health_path: /health
+      caprover_host: captain.app.qwickforge.com
+      public_url: https://topology-canary-reject-dev.app.qwickforge.com
+      critical_subsystems: ''
+      route_gateway: false
+    secrets: inherit
