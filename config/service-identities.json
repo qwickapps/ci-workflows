@@ -78,11 +78,36 @@
       "images": ["ghcr.io/qwickapps/img-memories"]
     },
     {
+      "canonical_hostname": "qwickapps-memories-build",
+      "workload_owner": "memory-platform",
+      "repo": "qwickapps/memories",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-memories-dev",
+      "required_host": "oci-main",
+      "role": "backend",
+      "load_balancer": false,
+      "state": {"mode": "ephemeral"},
+      "images": ["ghcr.io/qwickapps/img-memories"],
+      "notes": "The build-stage Tailscale identity maps to the shared dev CapRover slot; live Docker service readback verified the app on oci-main on 2026-11-25."
+    },
+    {
       "canonical_hostname": "qwickapps-memories-dev",
       "workload_owner": "memory-platform",
       "repo": "qwickapps/memories",
       "platform": "caprover",
       "app": "srv-captain--qwickapps-memories-dev",
+      "required_host": "oci-main",
+      "role": "backend",
+      "load_balancer": false,
+      "state": {"mode": "ephemeral"},
+      "images": ["ghcr.io/qwickapps/img-memories"]
+    },
+    {
+      "canonical_hostname": "qwickapps-memories-uat",
+      "workload_owner": "memory-platform",
+      "repo": "qwickapps/memories",
+      "platform": "caprover",
+      "app": "srv-captain--qwickapps-memories-uat",
       "required_host": "oci-main",
       "role": "backend",
       "load_balancer": false,

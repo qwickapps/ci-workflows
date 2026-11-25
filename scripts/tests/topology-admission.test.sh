@@ -21,10 +21,16 @@ item=services[0]
 assert item["hostname"] == "qwickapps-mcp"
 assert item["host"] == "oci-gateway"
 
-memories_dev=[item for item in services if item["hostname"] == "qwickapps-memories-dev"]
-assert len(memories_dev) == 1, f"expected exactly one registry identity for qwickapps-memories-dev, got {len(memories_dev)}"
-assert memories_dev[0]["app"] == "srv-captain--qwickapps-memories-dev"
-assert memories_dev[0]["host"] == "oci-main"
+expected_memories = {
+    "qwickapps-memories-build": ("srv-captain--qwickapps-memories-dev", "oci-main"),
+    "qwickapps-memories-dev": ("srv-captain--qwickapps-memories-dev", "oci-main"),
+    "qwickapps-memories-uat": ("srv-captain--qwickapps-memories-uat", "oci-main"),
+}
+for hostname, (expected_app, expected_host) in expected_memories.items():
+    matches = [item for item in services if item["hostname"] == hostname]
+    assert len(matches) == 1, f"expected exactly one registry identity for {hostname}, got {len(matches)}"
+    assert matches[0]["app"] == expected_app
+    assert matches[0]["host"] == expected_host
 PY
 echo "Tests: $pass passed, $fail failed"
 test "$fail" -eq 0
