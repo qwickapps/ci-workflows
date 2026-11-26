@@ -69,6 +69,96 @@ threshold: 0.03
     def test_text_normalization_and_similarity(self) -> None:
         self.assertEqual(MODULE.normalize_text("  Hello\n WORLD "), "hello world")
         self.assertEqual(MODULE.text_similarity("Hello world", " hello   WORLD "), 1.0)
+        self.assertLess(MODULE.text_similarity("Festive Flash sale today", "Style Atelier collection"), 0.95)
+
+    @staticmethod
+    def _solid(width: int, height: int, rgba: tuple[int, int, int, int]) -> "MODULE.Image":
+        return MODULE.Image(width, height, bytes(rgba) * (width * height))
+
+    def test_pixelmatch_identical_and_perceptual_threshold(self) -> None:
+        white = self._solid(4, 4, (255, 255, 255, 255))
+        ratio, diff, changed, total = MODULE.compare_images(white, white, 0.1)
+        self.assertEqual((ratio, changed, total), (0.0, 0, 16))
+        self.assertEqual((diff.width, diff.height), (4, 4))
+        # a 2-level grey shift is below pixelmatch's YIQ threshold; red vs white is not
+        near_white = self._solid(4, 4, (253, 253, 253, 255))
+        self.assertEqual(MODULE.compare_images(white, near_white, 0.1)[2], 0)
+        red = self._solid(4, 4, (255, 0, 0, 255))
+        self.assertEqual(MODULE.compare_images(white, red, 0.1)[2], 16)
+        # threshold 0 counts any change
+        self.assertEqual(MODULE.compare_images(white, near_white, 0.0)[2], 16)
+
+    def test_pixelmatch_color_delta_matches_reference_values(self) -> None:
+        black = bytes((0, 0, 0, 255))
+        white = bytes((255, 255, 255, 255))
+        # pixelmatch: black->white YIQ delta is ~ the 35215 normaliser and negative when img1 is brighter
+        self.assertAlmostEqual(MODULE.color_delta(black, white, 0, 0), 32857.4, delta=1.0)
+        self.assertLess(MODULE.color_delta(white, black, 0, 0), 0)
+        # transparent pixels blend with white
+        self.assertEqual(MODULE.color_delta(bytes((0, 0, 0, 0)), white, 0, 0), 0.0)
+
+    def test_pixelmatch_ignores_antialiased_edge_pixels(self) -> None:
+        # A hard black/white vertical edge; the target softens one edge pixel to grey,
+        # which is exactly the font-smoothing noise pixelmatch classifies as anti-aliasing.
+        width, height = 6, 6
+        rows = [[(0, 0, 0, 255)] * 3 + [(255, 255, 255, 255)] * 3 for _ in range(height)]
+        base = MODULE.Image(width, height, bytes(c for row in rows for px in row for c in px))
+        rows[2][3] = (128, 128, 128, 255)
+        softened = MODULE.Image(width, height, bytes(c for row in rows for px in row for c in px))
+        _, diff, changed, _ = MODULE.compare_images(base, softened, 0.1)
+        self.assertEqual(changed, 0)
+        pos = (2 * width + 3) * 4
+        self.assertEqual(tuple(diff.rgba[pos : pos + 4]), (*MODULE.AA_COLOR, 255))
+
+    def test_size_mismatch_counts_missing_area_as_changed(self) -> None:
+        small = self._solid(2, 2, (10, 10, 10, 255))
+        large = self._solid(2, 4, (10, 10, 10, 255))
+        ratio, diff, changed, total = MODULE.compare_images(small, large, 0.1)
+        self.assertEqual((changed, total, ratio), (4, 8, 0.5))
+        self.assertEqual((diff.width, diff.height), (2, 4))
+
+    def test_structure_comparator_reports_first_mismatch(self) -> None:
+        artifact = {"headings": ["h1:festive flash", "h2:deals"], "landmarks": ["header", "main", "footer"]}
+        self.assertTrue(MODULE.compare_structure(artifact, dict(artifact))["pass"])
+        reordered = {"headings": ["h2:deals", "h1:festive flash"], "landmarks": ["header", "main", "footer"]}
+        result = MODULE.compare_structure(artifact, reordered)
+        self.assertFalse(result["pass"])
+        self.assertFalse(result["headingsMatch"])
+        self.assertTrue(result["landmarksMatch"])
+        self.assertEqual(result["firstMismatch"]["headings"], {"index": 0, "artifact": "h1:festive flash", "target": "h2:deals"})
+        truncated = {"headings": artifact["headings"], "landmarks": ["header", "main"]}
+        mismatch = MODULE.compare_structure(artifact, truncated)["firstMismatch"]["landmarks"]
+        self.assertEqual(mismatch, {"index": 2, "artifact": "footer", "target": None})
+
+    def test_style_comparator_normalizes_and_detects_changes(self) -> None:
+        artifact = {
+            "root_background": "rgb(255, 255, 255)",
+            "root_color": "rgb(0, 0, 0)",
+            "h1_font_family": '"Playfair Display", serif',
+            "body_font_family": "Inter, sans-serif",
+            "primary_button_background": "rgb(200, 30, 60)",
+        }
+        equivalent = {
+            "root_background": "rgba(255,255,255,1)",
+            "root_color": "rgb(0,0,0)",
+            "h1_font_family": "'Playfair Display',serif",
+            "body_font_family": "inter, sans-serif",
+            "primary_button_background": "rgb(200, 30, 60)",
+        }
+        self.assertEqual(MODULE.compare_styles(artifact, equivalent), {"pass": True, "mismatches": {}})
+        changed = dict(equivalent, h1_font_family="Cormorant, serif", primary_button_background="rgb(20, 20, 20)")
+        result = MODULE.compare_styles(artifact, changed)
+        self.assertFalse(result["pass"])
+        self.assertEqual(set(result["mismatches"]), {"h1_font_family", "primary_button_background"})
+        # a missing button on the target is a mismatch, not a silent pass
+        self.assertFalse(MODULE.compare_styles(artifact, dict(equivalent, primary_button_background=None))["pass"])
+
+    def test_cli_accepts_out_and_exits_2_on_tool_error(self) -> None:
+        self.assertEqual(MODULE.parse_args(["--out", "x"]).output, Path("x"))
+        self.assertEqual(MODULE.parse_args(["--output", "y"]).output, Path("y"))
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "absent.yml"
+            self.assertEqual(MODULE.main(["--manifest", str(missing), "--out", directory]), 2)
 
     def test_only_raaj_linked_exceptions_are_honored(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

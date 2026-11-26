@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 DEFAULT_VIEWPORTS = ((1440, 900), (390, 844))
 LANDMARK_SELECTOR = "header,nav,main,aside,footer,section,article,[role=main],[role=navigation],[role=banner],[role=contentinfo],[role=complementary]"
 PRIMARY_BUTTON_SELECTOR = "button,[role=button],input[type=submit],a.button,a.btn"
@@ -323,34 +323,230 @@ def write_png(path: Path, image: Image) -> None:
     path.write_bytes(payload)
 
 
-def compare_images(baseline: Image, target: Image, channel_threshold: float) -> tuple[float, Image, int, int]:
+# --- pixelmatch port -------------------------------------------------------
+# Pure-Python port of mapbox/pixelmatch (ISC licence): perceptual YIQ colour
+# delta with a squared-threshold cut-off and anti-aliasing detection, so that
+# font-smoothing noise is not reported as a design difference.
+
+PIXELMATCH_MAX_DELTA = 35215.0  # maximum possible YIQ delta value
+DIFF_COLOR = (255, 0, 0)
+AA_COLOR = (255, 255, 0)
+
+
+def _blend(channel: float, alpha: float) -> float:
+    # blend semi-transparent colour with white, as pixelmatch does
+    return 255.0 + (channel - 255.0) * alpha
+
+
+def _rgb2y(r: float, g: float, b: float) -> float:
+    return r * 0.29889531 + g * 0.58662247 + b * 0.11448223
+
+
+def _rgb2i(r: float, g: float, b: float) -> float:
+    return r * 0.59597799 - g * 0.27417610 - b * 0.32180189
+
+
+def _rgb2q(r: float, g: float, b: float) -> float:
+    return r * 0.21147017 - g * 0.52261711 + b * 0.31114694
+
+
+def color_delta(img1: bytes, img2: bytes, k: int, m: int, y_only: bool = False) -> float:
+    """Signed squared YIQ distance between pixel k of img1 and pixel m of img2."""
+    r1, g1, b1, a1 = img1[k], img1[k + 1], img1[k + 2], img1[k + 3]
+    r2, g2, b2, a2 = img2[m], img2[m + 1], img2[m + 2], img2[m + 3]
+    if a1 == a2 and r1 == r2 and g1 == g2 and b1 == b2:
+        return 0.0
+    fr1, fg1, fb1 = float(r1), float(g1), float(b1)
+    fr2, fg2, fb2 = float(r2), float(g2), float(b2)
+    if a1 < 255:
+        alpha = a1 / 255.0
+        fr1, fg1, fb1 = _blend(fr1, alpha), _blend(fg1, alpha), _blend(fb1, alpha)
+    if a2 < 255:
+        alpha = a2 / 255.0
+        fr2, fg2, fb2 = _blend(fr2, alpha), _blend(fg2, alpha), _blend(fb2, alpha)
+    y1 = _rgb2y(fr1, fg1, fb1)
+    y2 = _rgb2y(fr2, fg2, fb2)
+    y = y1 - y2
+    if y_only:
+        return y
+    i = _rgb2i(fr1, fg1, fb1) - _rgb2i(fr2, fg2, fb2)
+    q = _rgb2q(fr1, fg1, fb1) - _rgb2q(fr2, fg2, fb2)
+    delta = 0.5053 * y * y + 0.299 * i * i + 0.1957 * q * q
+    return -delta if y1 > y2 else delta
+
+
+def _has_many_siblings(img: bytes, x1: int, y1: int, width: int, height: int) -> bool:
+    x0, y0 = max(x1 - 1, 0), max(y1 - 1, 0)
+    x2, y2 = min(x1 + 1, width - 1), min(y1 + 1, height - 1)
+    pos = (y1 * width + x1) * 4
+    zeroes = 1 if x1 == x0 or x1 == x2 or y1 == y0 or y1 == y2 else 0
+    here = img[pos : pos + 4]
+    for x in range(x0, x2 + 1):
+        for y in range(y0, y2 + 1):
+            if x == x1 and y == y1:
+                continue
+            pos2 = (y * width + x) * 4
+            if img[pos2 : pos2 + 4] == here:
+                zeroes += 1
+            if zeroes > 2:
+                return True
+    return False
+
+
+def antialiased(img: bytes, x1: int, y1: int, width: int, height: int, img2: bytes) -> bool:
+    """pixelmatch's anti-aliasing heuristic (Vysniauskas 2009)."""
+    x0, y0 = max(x1 - 1, 0), max(y1 - 1, 0)
+    x2, y2 = min(x1 + 1, width - 1), min(y1 + 1, height - 1)
+    pos = (y1 * width + x1) * 4
+    zeroes = 1 if x1 == x0 or x1 == x2 or y1 == y0 or y1 == y2 else 0
+    min_delta = max_delta = 0.0
+    min_x = min_y = max_x = max_y = 0
+    for x in range(x0, x2 + 1):
+        for y in range(y0, y2 + 1):
+            if x == x1 and y == y1:
+                continue
+            delta = color_delta(img, img, pos, (y * width + x) * 4, True)
+            if delta == 0:
+                zeroes += 1
+                if zeroes > 2:
+                    return False
+            elif delta < min_delta:
+                min_delta, min_x, min_y = delta, x, y
+            elif delta > max_delta:
+                max_delta, max_x, max_y = delta, x, y
+    if min_delta == 0 or max_delta == 0:
+        return False
+    return (
+        _has_many_siblings(img, min_x, min_y, width, height) and _has_many_siblings(img2, min_x, min_y, width, height)
+    ) or (
+        _has_many_siblings(img, max_x, max_y, width, height) and _has_many_siblings(img2, max_x, max_y, width, height)
+    )
+
+
+def _crop(image: Image, width: int, height: int) -> bytes:
+    if image.width == width and image.height == height:
+        return image.rgba
+    row = image.width * 4
+    return b"".join(image.rgba[y * row : y * row + width * 4] for y in range(height))
+
+
+def pixelmatch(
+    img1: bytes,
+    img2: bytes,
+    width: int,
+    height: int,
+    threshold: float = 0.1,
+    include_aa: bool = False,
+    alpha: float = 0.1,
+) -> tuple[int, bytearray]:
+    """Return (mismatched pixel count, RGBA diff image) like pixelmatch()."""
+    if len(img1) != len(img2) or len(img1) != width * height * 4:
+        raise ValueError("image sizes do not match")
+    max_delta = PIXELMATCH_MAX_DELTA * threshold * threshold
+    output = bytearray(width * height * 4)
+    diff = 0
+    row_bytes = width * 4
+    for y in range(height):
+        row_start = y * row_bytes
+        same_row = img1[row_start : row_start + row_bytes] == img2[row_start : row_start + row_bytes]
+        for x in range(width):
+            pos = row_start + x * 4
+            delta = 0.0 if same_row else color_delta(img1, img2, pos, pos)
+            if abs(delta) > max_delta:
+                if not include_aa and (
+                    antialiased(img1, x, y, width, height, img2) or antialiased(img2, x, y, width, height, img1)
+                ):
+                    output[pos : pos + 4] = bytes((*AA_COLOR, 255))
+                else:
+                    output[pos : pos + 4] = bytes((*DIFF_COLOR, 255))
+                    diff += 1
+            else:
+                r, g, b, a = img1[pos], img1[pos + 1], img1[pos + 2], img1[pos + 3]
+                grey = _rgb2y(r, g, b)
+                value = int(round(_blend(grey, alpha * a / 255.0)))
+                output[pos : pos + 4] = bytes((value, value, value, 255))
+    return diff, output
+
+
+def compare_images(baseline: Image, target: Image, threshold: float) -> tuple[float, Image, int, int]:
+    """Masked-region diff ratio using pixelmatch over the common area.
+
+    Pixels that exist in only one image (size mismatch) always count as changed,
+    so a region that grew or shrank can never pass silently.
+    """
     width = max(baseline.width, target.width)
     height = max(baseline.height, target.height)
-    changed = 0
-    output = bytearray(width * height * 4)
-    threshold = max(0.0, min(1.0, channel_threshold)) * 255.0
-
-    def pixel(image: Image, x: int, y: int) -> tuple[int, int, int, int] | None:
-        if x >= image.width or y >= image.height:
-            return None
-        start = (y * image.width + x) * 4
-        return tuple(image.rgba[start : start + 4])  # type: ignore[return-value]
-
-    for y in range(height):
-        for x in range(width):
-            left = pixel(baseline, x, y)
-            right = pixel(target, x, y)
-            different = left is None or right is None or max(abs(a - b) for a, b in zip(left, right)) > threshold
-            out = (y * width + x) * 4
-            if different:
-                changed += 1
-                output[out : out + 4] = bytes((255, 0, 64, 255))
-            else:
-                assert left is not None and right is not None
-                grey = int(0.2126 * left[0] + 0.7152 * left[1] + 0.0722 * left[2])
-                output[out : out + 4] = bytes((grey, grey, grey, 150))
+    common_w = min(baseline.width, target.width)
+    common_h = min(baseline.height, target.height)
     total = width * height
-    return changed / total if total else 0.0, Image(width, height, bytes(output)), changed, total
+    if total == 0:
+        return 0.0, Image(0, 0, b""), 0, 0
+    changed, common_diff = (0, bytearray())
+    if common_w and common_h:
+        changed, common_diff = pixelmatch(
+            _crop(baseline, common_w, common_h), _crop(target, common_w, common_h), common_w, common_h, threshold
+        )
+    output = bytearray(bytes((*DIFF_COLOR, 255)) * total)
+    for y in range(common_h):
+        output[y * width * 4 : y * width * 4 + common_w * 4] = common_diff[y * common_w * 4 : (y + 1) * common_w * 4]
+    changed += total - common_w * common_h
+    return changed / total, Image(width, height, bytes(output)), changed, total
+
+
+def _normalize_font_family(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return ",".join(part.strip().strip("'\"").casefold() for part in value.split(",") if part.strip())
+
+
+def _normalize_color(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    compact = re.sub(r"\s+", "", value.casefold())
+    match = re.fullmatch(r"rgba\((\d+),(\d+),(\d+),(1|1\.0+)\)", compact)
+    if match:
+        return f"rgb({match.group(1)},{match.group(2)},{match.group(3)})"
+    if compact in {"transparent", "rgba(0,0,0,0)"}:
+        return "rgba(0,0,0,0)"
+    return compact
+
+
+def compare_structure(artifact: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    """Ordered h1-h3 and landmark comparison; reports the first divergence."""
+    result: dict[str, Any] = {"pass": True}
+    for key in ("headings", "landmarks"):
+        left = list(artifact.get(key) or [])
+        right = list(target.get(key) or [])
+        match = left == right
+        result[f"{key}Match"] = match
+        if not match:
+            result["pass"] = False
+            index = next((i for i, (a, b) in enumerate(zip(left, right)) if a != b), min(len(left), len(right)))
+            result.setdefault("firstMismatch", {})[key] = {
+                "index": index,
+                "artifact": left[index] if index < len(left) else None,
+                "target": right[index] if index < len(right) else None,
+            }
+    return result
+
+
+STYLE_NORMALIZERS = {
+    "root_background": _normalize_color,
+    "root_color": _normalize_color,
+    "primary_button_background": _normalize_color,
+    "h1_font_family": _normalize_font_family,
+    "body_font_family": _normalize_font_family,
+}
+
+
+def compare_styles(artifact: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    """Computed-style spot checks: region bg/colour, h1/body font, primary button bg."""
+    mismatches: dict[str, dict[str, Any]] = {}
+    for key, normalize in STYLE_NORMALIZERS.items():
+        left, right = normalize(artifact.get(key)), normalize(target.get(key))
+        if left != right:
+            mismatches[key] = {"artifact": artifact.get(key), "target": target.get(key)}
+    return {"pass": not mismatches, "mismatches": mismatches}
 
 
 def normalize_text(value: str) -> str:
@@ -609,7 +805,12 @@ def run_browser(config: dict[str, Any], output: Path, target_git_sha: str, healt
                 for width, height in config["viewports"]:
                     for theme in config["themes"]:
                         run_name = _safe_name(f"{screen_id}-{width}x{height}-{theme}")
-                        context = browser.new_context(viewport={"width": width, "height": height}, device_scale_factor=1)
+                        # dark/light themes also emulate prefers-color-scheme so
+                        # media-query driven theme switches render the same way
+                        color_scheme = theme if theme in {"dark", "light"} else "no-preference"
+                        context = browser.new_context(
+                            viewport={"width": width, "height": height}, device_scale_factor=1, color_scheme=color_scheme
+                        )
                         artifact_page = context.new_page()
                         target_page = context.new_page()
                         artifact_url = _artifact_url(config["baseline_path"], str(screen.get("artifact_route", "")))
@@ -650,8 +851,10 @@ def run_browser(config: dict[str, Any], output: Path, target_git_sha: str, healt
                             )
                             write_png(diff_path, diff_image)
                             similarity = text_similarity(artifact_data["text"], target_data["text"])
-                            structure_match = artifact_data["headings"] == target_data["headings"] and artifact_data["landmarks"] == target_data["landmarks"]
-                            style_match = artifact_data["styles"] == target_data["styles"]
+                            structure = compare_structure(artifact_data, target_data)
+                            styles = compare_styles(artifact_data["styles"], target_data["styles"])
+                            structure_match = structure["pass"]
+                            style_match = styles["pass"]
                             pixel_pass = ratio <= config["threshold"]
                             text_pass = similarity >= config["text_threshold"]
                             verdict = "PASS" if pixel_pass and text_pass and structure_match and style_match else "FAIL"
@@ -669,6 +872,8 @@ def run_browser(config: dict[str, Any], output: Path, target_git_sha: str, healt
                                     "textPass": text_pass,
                                     "structurePass": structure_match,
                                     "stylePass": style_match,
+                                    "structureDetail": structure,
+                                    "styleMismatches": styles["mismatches"],
                                     "artifactStructure": {"headings": artifact_data["headings"], "landmarks": artifact_data["landmarks"]},
                                     "targetStructure": {"headings": target_data["headings"], "landmarks": target_data["landmarks"]},
                                     "artifactStyles": artifact_data["styles"],
@@ -726,7 +931,7 @@ def write_html_report(path: Path, report: dict[str, Any]) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=Path("design-conform.yml"))
-    parser.add_argument("--output", type=Path, default=Path("design-conform-report"))
+    parser.add_argument("--out", "--output", dest="output", type=Path, default=Path("design-conform-report"))
     parser.add_argument("--target", help="override the manifest target URL")
     parser.add_argument("--timeout-ms", type=int, default=30_000)
     parser.add_argument("--validate-only", action="store_true")
