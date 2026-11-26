@@ -15,9 +15,9 @@
     "qwickapps/ci-workflows": {
       "visibility": "public",
       "job_classes": {
-        "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}]},
-        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["ubuntu-24.04"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}]},
-        "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
+        "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}, {"labels": ["interserver-x64", "julie"], "runner_groups": ["Default"], "runner_names": ["julie-x64-ghr1", "julie-x64-ghr2"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["ubuntu-24.04"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}, {"labels": ["interserver-x64", "julie"], "runner_groups": ["Default"], "runner_names": ["julie-x64-ghr1", "julie-x64-ghr2"]}]},
+        "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["interserver-x64", "julie"], "runner_groups": ["Default"], "runner_names": ["julie-x64-ghr1", "julie-x64-ghr2"]}]},
         "arm": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]},
         "deploy": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]}
       }

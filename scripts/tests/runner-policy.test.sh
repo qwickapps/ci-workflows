@@ -110,9 +110,10 @@ expected = {
     "runner_groups": ["Default"],
     "runner_names": ["julie-x64-ghr1", "julie-x64-ghr2"],
 }
-for job_class in ("build", "test", "security"):
-    allowed = policy["repositories"]["*"]["job_classes"][job_class]["allowed"]
-    assert expected in allowed, job_class
+for repository in ("*", "qwickapps/ci-workflows"):
+    for job_class in ("build", "test", "security"):
+        allowed = policy["repositories"][repository]["job_classes"][job_class]["allowed"]
+        assert expected in allowed, (repository, job_class)
 PY
 
 echo "== caller-facing reusable workflows use org runners =="

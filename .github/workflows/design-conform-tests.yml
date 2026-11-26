@@ -1,0 +1,47 @@
+name: Design Conform Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/runner-policy.json'
+      - '.github/workflows/design-conform.yml'
+      - '.github/workflows/design-conform-tests.yml'
+      - 'scripts/design-conform/**'
+      - 'scripts/tests/design-conform*'
+      - 'scripts/tests/runner-policy.test.sh'
+  push:
+    branches: [main]
+    paths:
+      - '.github/runner-policy.json'
+      - '.github/workflows/design-conform.yml'
+      - '.github/workflows/design-conform-tests.yml'
+      - 'scripts/design-conform/**'
+      - 'scripts/tests/design-conform*'
+      - 'scripts/tests/runner-policy.test.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  test-design-conform:
+    name: design-conform unit and browser tests
+    runs-on: [interserver-x64, julie]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned browser runtime
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/design-conform-test-venv"
+          "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.56.0'
+          PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TOOL_CACHE/design-conform-playwright" \
+            "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m playwright install chromium
+
+      - name: Run contract and browser tests
+        env:
+          DESIGN_CONFORM_BROWSER_TEST: '1'
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.tool_cache }}/design-conform-playwright
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/design-conform-test-venv/bin:$PATH"
+          scripts/tests/design-conform-workflow.test.sh

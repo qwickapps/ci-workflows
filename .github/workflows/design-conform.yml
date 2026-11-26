@@ -1,0 +1,126 @@
+name: Design Conformance Gate
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: Path to design-conform.yml in the caller repository
+        required: false
+        type: string
+        default: design-conform.yml
+      target_url:
+        description: Staged target base URL; overrides the manifest target
+        required: false
+        type: string
+        default: ''
+      artifact_name:
+        description: Uploaded report artifact name
+        required: false
+        type: string
+        default: design-conform-report
+      retention_days:
+        description: Report artifact retention in days
+        required: false
+        type: number
+        default: 14
+    outputs:
+      verdict:
+        description: PASS, FAIL, or TOOL_ERROR
+        value: ${{ jobs.design-conform.outputs.verdict }}
+      report_sha256:
+        description: SHA-256 of report.json when generated
+        value: ${{ jobs.design-conform.outputs.report_sha256 }}
+      target_git_sha:
+        description: Target deployment git SHA read from /api/health
+        value: ${{ jobs.design-conform.outputs.target_git_sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  design-conform:
+    name: Design conformance
+    runs-on: [interserver-x64, julie]
+    outputs:
+      verdict: ${{ steps.report.outputs.verdict }}
+      report_sha256: ${{ steps.report.outputs.report_sha256 }}
+      target_git_sha: ${{ steps.report.outputs.target_git_sha }}
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v4
+        with:
+          path: workspace
+
+      - name: Check out the exact reusable workflow source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .design-conform-tool
+
+      - name: Install pinned browser runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/design-conform-venv"
+          "$RUNNER_TEMP/design-conform-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.56.0'
+          PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TOOL_CACHE/design-conform-playwright" \
+            "$RUNNER_TEMP/design-conform-venv/bin/python" -m playwright install chromium
+
+      - name: Compare approved artifact with target
+        id: conform
+        shell: bash
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          TARGET_URL: ${{ inputs.target_url }}
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.tool_cache }}/design-conform-playwright
+        run: |
+          set -uo pipefail
+          args=(
+            --manifest "$GITHUB_WORKSPACE/workspace/$MANIFEST"
+            --output "$GITHUB_WORKSPACE/design-conform-report"
+          )
+          if [ -n "$TARGET_URL" ]; then
+            args+=(--target "$TARGET_URL")
+          fi
+          "$RUNNER_TEMP/design-conform-venv/bin/python" \
+            "$GITHUB_WORKSPACE/.design-conform-tool/scripts/design-conform/design_conform.py" \
+            "${args[@]}"
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Read fail-closed report outputs
+        id: report
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$GITHUB_WORKSPACE/design-conform-report/report.json"
+          if [ ! -f "$report" ]; then
+            echo "verdict=TOOL_ERROR" >> "$GITHUB_OUTPUT"
+            echo "report_sha256=" >> "$GITHUB_OUTPUT"
+            echo "target_git_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          REPORT="$report" python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["REPORT"])
+          payload = json.loads(path.read_text())
+          print(f"verdict={payload['verdict']}")
+          print(f"report_sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
+          print(f"target_git_sha={payload['targetGitSha']}")
+          PY
+
+      - name: Upload conformance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: design-conform-report/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
