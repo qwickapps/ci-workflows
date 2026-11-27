@@ -5,8 +5,8 @@
     "*": {
       "visibility": "private",
       "job_classes": {
-        "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}]},
-        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}]},
+        "build": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}, {"labels": ["self-hosted", "julie"], "runner_groups": ["Default"], "runner_names": ["julie-x64-ghr2"]}]},
+        "test": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}, {"labels": ["self-hosted", "macmini", "macmini-fast"], "runner_groups": ["Default"], "runner_names": ["critical-macmini"]}, {"labels": ["self-hosted", "julie"], "runner_groups": ["Default"], "runner_names": ["julie-x64-ghr2"]}]},
         "security": {"allowed": [{"labels": ["self-hosted", "choco"], "runner_groups": ["Default"], "runner_names": ["choco-ci-workflows"]}]},
         "arm": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]},
         "deploy": {"allowed": [{"labels": ["self-hosted", "macmini"], "runner_groups": ["Default"]}]}
