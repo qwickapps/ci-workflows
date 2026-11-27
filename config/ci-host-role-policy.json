@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "description": "Static CI host-role policy. qwickspace-choco is reserved for Hermes platform workloads; all other self-hosted Linux CI uses the reviewed Julie x64 pool. macmini is reserved for reviewed Apple-build jobs.",
+  "julie_required_labels": ["interserver-x64", "julie"],
+  "choco_allowlist": [],
+  "macmini_allowlist": []
+}
