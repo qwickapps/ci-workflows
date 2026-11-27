@@ -31,6 +31,21 @@ expect_no_match() {
 echo "== design-conform reusable workflow contract =="
 expect_match "workflow is callable" '^  workflow_call:$' "$WORKFLOW"
 expect_match "workflow uses the approved Julie pool" '^    runs-on: \[interserver-x64, julie\]$' "$WORKFLOW"
+expect_match "reusable job carries the canonical caller-context fork-PR guard" "^    if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository$" "$WORKFLOW"
+if python3 - "$WORKFLOW" <<'PY'
+import sys, yaml
+canonical = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
+bad = [j for j, spec in jobs.items() if " ".join(str(spec.get("if", "")).split()) != canonical]
+sys.exit(1 if bad else 0)
+PY
+then
+  echo "  PASS: every reusable-workflow job is fork-PR guarded (parsed YAML)"
+  pass=$((pass + 1))
+else
+  echo "  FAIL: every reusable-workflow job is fork-PR guarded (parsed YAML)" >&2
+  fail=$((fail + 1))
+fi
 expect_no_match "workflow never schedules on choco" 'runs-on:.*choco' "$WORKFLOW"
 expect_no_match "workflow never schedules on macmini" 'runs-on:.*macmini' "$WORKFLOW"
 expect_match "tool checkout is bound to reusable workflow repository" 'repository: \$\{\{ job\.workflow_repository \}\}' "$WORKFLOW"

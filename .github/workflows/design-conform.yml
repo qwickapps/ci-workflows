@@ -40,6 +40,9 @@ permissions:
 jobs:
   design-conform:
     name: Design conformance
+    # Caller-context fork-PR guard: in a reusable workflow the github context
+    # is the caller's, so this refuses fork-PR content on the self-hosted pool.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [interserver-x64, julie]
     outputs:
       verdict: ${{ steps.report.outputs.verdict }}
