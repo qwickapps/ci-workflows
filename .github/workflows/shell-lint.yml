@@ -11,7 +11,7 @@ jobs:
   shell-lint:
     name: Shell Lint
     # Reusable: runs in the CALLER's repo, so it must use an org runner.
-    # choco runners are repo-scoped (aos, ci-workflows) and never serve callers.
+    # Legacy repo-scoped runners never served callers.
     runs-on: [self-hosted, macmini, macmini-fast]
     steps:
       - uses: actions/checkout@v4

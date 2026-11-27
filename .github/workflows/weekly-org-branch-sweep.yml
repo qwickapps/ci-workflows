@@ -19,7 +19,7 @@ permissions:
 jobs:
   sweep:
     name: "Safe weekly branch sweep"
-    runs-on: [self-hosted, choco]
+    runs-on: [interserver-x64, julie]
     timeout-minutes: 120
     env:
       # Org-wide operations require the contents-write token sourced from

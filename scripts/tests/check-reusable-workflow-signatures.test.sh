@@ -238,17 +238,11 @@ assert "synthetic approval: reports accepted approval" \
 # exact marker from the approved login.
 echo ""
 echo "-- Test 6: PR-event-shaped exact base/head approval integration --"
-pr_base_sha="${PR_EVENT_BASE_SHA:-}"
-pr_head_sha="${PR_EVENT_HEAD_SHA:-}"
-if [ -z "$pr_base_sha" ]; then
-  pr_base_sha="$(cd "$ROOT_DIR" && git merge-base origin/main HEAD)"
-fi
-if [ -z "$pr_head_sha" ]; then
-  pr_head_sha="$(cd "$ROOT_DIR" && git rev-parse HEAD)"
-fi
+pr_base_sha="$fixture_base_sha"
+pr_head_sha="$fixture_head_sha"
 
-if git -C "$ROOT_DIR" rev-parse --verify --quiet "${pr_base_sha}^{commit}" >/dev/null \
-  && git -C "$ROOT_DIR" rev-parse --verify --quiet "${pr_head_sha}^{commit}" >/dev/null; then
+if git -C "$SCRATCH_DIR" rev-parse --verify --quiet "${pr_base_sha}^{commit}" >/dev/null \
+  && git -C "$SCRATCH_DIR" rev-parse --verify --quiet "${pr_head_sha}^{commit}" >/dev/null; then
   PR_EVENT_JSON="$SCRATCH_DIR/pr-event.json"
   STALE_EVENT_JSON="$SCRATCH_DIR/pr-event-stale-head.json"
   python3 - "$PR_EVENT_JSON" "$STALE_EVENT_JSON" "$pr_base_sha" "$pr_head_sha" <<'PY'
@@ -262,7 +256,7 @@ with open(sys.argv[2], "w", encoding="utf-8") as fh:
 PY
 
   run_pr_event_guard() {
-    (cd "$ROOT_DIR" && PATH="$MOCK_BIN:$PATH" MOCK_COMMENTS="$COMMENTS_JSON" \
+    (cd "$SCRATCH_DIR" && PATH="$MOCK_BIN:$PATH" MOCK_COMMENTS="$COMMENTS_JSON" \
       GITHUB_EVENT_PATH="$1" GITHUB_REPOSITORY=example/repo GH_TOKEN=test \
       SIGNATURE_APPROVAL_LOGIN=approver BASE_REF="$pr_base_sha" \
       HEAD_REF="$pr_head_sha" bash "$GUARD" 2>&1)
