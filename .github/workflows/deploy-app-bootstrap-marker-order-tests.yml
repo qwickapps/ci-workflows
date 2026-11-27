@@ -38,9 +38,9 @@ permissions:
 jobs:
   contract:
     name: deploy-app.yml bootstrap marker order tests
-    runs-on: [self-hosted, choco]
+    runs-on: [self-hosted, julie]
     # ci-workflows#184: this repo is public and this job runs on the
-    # fleet's self-hosted choco runner. Without this guard, a
+    # fleet's self-hosted julie runner. Without this guard, a
     # pull_request from a fork would execute its own workflow-file
     # changes (and step scripts) directly on that host.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

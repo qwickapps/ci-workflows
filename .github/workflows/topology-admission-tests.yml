@@ -29,9 +29,9 @@ permissions:
   contents: read
 jobs:
   topology-admission:
-    runs-on: [self-hosted, choco]
+    runs-on: [self-hosted, julie]
     # This public-repo job executes test scripts from pull requests on the
-    # fleet's self-hosted choco runner. Keep the canonical guard exact: the
+    # fleet's self-hosted julie runner. Keep the canonical guard exact: the
     # repo-wide fork-PR guard test rejects altered expressions.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:

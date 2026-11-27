@@ -33,7 +33,7 @@ permissions:
 jobs:
   prune:
     name: "Live-ref-aware GHCR prune"
-    runs-on: [self-hosted, choco]
+    runs-on: [self-hosted, julie]
     timeout-minutes: 60
     steps:
       - name: Checkout scripts
