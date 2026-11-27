@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/design-conform-test-venv"
           # PyYAML: scripts/runner-policy.py (run by the test script) imports yaml.
-          "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.56.0' 'PyYAML==6.0.2'
+          "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.65.2' 'PyYAML==6.0.2'
           PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TOOL_CACHE/design-conform-playwright" \
             "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m playwright install chromium
 

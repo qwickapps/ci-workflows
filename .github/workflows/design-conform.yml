@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/design-conform-venv"
-          "$RUNNER_TEMP/design-conform-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.56.0'
+          "$RUNNER_TEMP/design-conform-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.65.2'
           PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TOOL_CACHE/design-conform-playwright" \
             "$RUNNER_TEMP/design-conform-venv/bin/python" -m playwright install chromium
 
