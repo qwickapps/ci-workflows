@@ -1,0 +1,34 @@
+name: CI Host Role Lint Tests
+
+on:
+  pull_request:
+    paths:
+      - 'config/ci-host-role-policy.json'
+      - 'scripts/ci-host-role-lint.py'
+      - 'scripts/tests/ci-host-role-lint.test.sh'
+      - '.github/workflows/ci-host-role-lint*.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'config/ci-host-role-policy.json'
+      - 'scripts/ci-host-role-lint.py'
+      - 'scripts/tests/ci-host-role-lint.test.sh'
+      - '.github/workflows/ci-host-role-lint*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ci-host-role-lint-tests:
+    name: exact-path host-role fixture tests
+    runs-on: [interserver-x64, julie]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+      - name: Run host-role lint fixtures
+        run: bash scripts/tests/ci-host-role-lint.test.sh

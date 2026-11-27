@@ -1,0 +1,37 @@
+name: CI Host Role Lint
+
+on:
+  workflow_call:
+    inputs:
+      workflow_directory:
+        description: "Caller workflow directory to scan; defaults to .github/workflows."
+        required: false
+        type: string
+        default: ".github/workflows"
+
+permissions:
+  contents: read
+
+jobs:
+  ci-host-role-lint:
+    name: CI host-role policy
+    runs-on: [interserver-x64, julie]
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v5
+      - name: Checkout immutable lint source
+        run: |
+          git init .ci-host-role-lint
+          git -C .ci-host-role-lint remote add origin https://github.com/qwickapps/ci-workflows.git
+          git -C .ci-host-role-lint fetch --depth=1 origin "$GITHUB_WORKFLOW_SHA"
+          git -C .ci-host-role-lint checkout --detach FETCH_HEAD
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+      - name: Enforce CI host roles without evaluating repository secrets
+        run: |
+          python3 .ci-host-role-lint/scripts/ci-host-role-lint.py \
+            --policy .ci-host-role-lint/config/ci-host-role-policy.json \
+            --workflow-dir "${{ inputs.workflow_directory }}"

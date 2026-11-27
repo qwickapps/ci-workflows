@@ -63,6 +63,10 @@ env:
   OWNER: qwickapps
 
 jobs:
+  host-role-lint:
+    name: CI Host Role
+    uses: qwickapps/ci-workflows/.github/workflows/ci-host-role-lint.yml@main
+
   # ---------------------------------------------------------------------------
   # 0. Blue-green deploy contract guard
   # ---------------------------------------------------------------------------
@@ -119,6 +123,7 @@ jobs:
   test:
     name: Test
     runs-on: [self-hosted, macmini, macmini-fast]
+    needs: [host-role-lint]
     steps:
       - name: Prepare runner (per-job hygiene)
         shell: bash

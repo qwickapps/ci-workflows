@@ -85,6 +85,10 @@ on:
 #   • Actionlint:    Validate all workflow files in .github/workflows
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
+  host-role-lint:
+    name: "Gate 0 · CI Host Role"
+    uses: qwickapps/ci-workflows/.github/workflows/ci-host-role-lint.yml@main
+
   validate-commits:
     name: "Gate 1 · Validate Commits"
     runs-on: [self-hosted, choco]
@@ -149,7 +153,7 @@ jobs:
   lint-and-typecheck:
     name: "Gate 2a · Lint & Type-check"
     runs-on: [self-hosted, choco]
-    needs: [validate-commits]
+    needs: [validate-commits, host-role-lint]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -198,7 +202,7 @@ jobs:
   test:
     name: "Gate 2b · Test"
     runs-on: [self-hosted, choco]
-    needs: [validate-commits]
+    needs: [validate-commits, host-role-lint]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -384,7 +388,7 @@ jobs:
     name: "Gate 5 · Report Status"
     runs-on: [self-hosted, choco]
     if: always()
-    needs: [validate-commits, lint-and-typecheck, test, build, push-image, definition-of-done]
+    needs: [host-role-lint, validate-commits, lint-and-typecheck, test, build, push-image, definition-of-done]
     steps:
       - name: Checkout ci-workflows scripts
         uses: actions/checkout@v4
@@ -396,6 +400,7 @@ jobs:
       - name: Compute overall result
         id: overall
         env:
+          HOST_ROLE_RESULT: ${{ needs.host-role-lint.result }}
           VALIDATE_RESULT: ${{ needs.validate-commits.result }}
           LINT_RESULT:     ${{ needs.lint-and-typecheck.result }}
           TEST_RESULT:     ${{ needs.test.result }}
@@ -417,7 +422,7 @@ jobs:
           }
 
           OVERALL="success"
-          for R in "$VALIDATE_RESULT" "$LINT_RESULT" "$TEST_RESULT" "$BUILD_RESULT"; do
+          for R in "$HOST_ROLE_RESULT" "$VALIDATE_RESULT" "$LINT_RESULT" "$TEST_RESULT" "$BUILD_RESULT"; do
             if [ "$R" = "failure" ] || [ "$R" = "cancelled" ]; then
               OVERALL="failure"; break
             fi
@@ -447,6 +452,7 @@ jobs:
 
           CHECK_OUTPUT="Gate              Status    Details
           -----------------------------------------------------
+          CI Host Role      $(icon "$HOST_ROLE_RESULT")  ${HOST_ROLE_RESULT}  (Julie x64 / reviewed exceptions)
           Validate Commits  $(icon "$VALIDATE_RESULT")  ${VALIDATE_RESULT}  (attribution + branch target)
           Lint & Typecheck  $(icon "$LINT_RESULT")  ${LINT_RESULT}  (language: ${{ inputs.language }})
           Tests             $(icon "$TEST_RESULT")  ${TEST_RESULT}  (language: ${{ inputs.language }})

@@ -2,7 +2,10 @@ self-hosted-runner:
   # Labels of self-hosted runner in array of strings.
   labels:
     - macmini
+    - macmini-fast
     - choco
+    - interserver-x64
+    - julie
 
 # Configuration variables in array of strings defined in your repository or
 # organization. `null` means disabling configuration variables check.
