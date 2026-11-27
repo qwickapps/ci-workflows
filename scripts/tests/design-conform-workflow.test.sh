@@ -38,6 +38,12 @@ expect_match "tool checkout is bound to reusable workflow SHA" 'ref: \$\{\{ job\
 expect_match "evidence upload runs even on failure" '^        if: \$\{\{ always\(\) \}\}$' "$WORKFLOW"
 expect_match "missing evidence fails closed" 'if-no-files-found: error' "$WORKFLOW"
 expect_match "target SHA is a declared workflow output" '^      target_git_sha:$' "$WORKFLOW"
+expect_match "manifest_path is a workflow_call input" '^      manifest_path:$' "$WORKFLOW"
+expect_match "target_url is a workflow_call input" '^      target_url:$' "$WORKFLOW"
+expect_match "tool exit status fails the job" '^          exit "\$status"$' "$WORKFLOW"
+expect_no_match "third-party actions are SHA-pinned" 'uses: [^ ]+@v[0-9]' "$WORKFLOW"
+expect_no_match "test workflow actions are SHA-pinned" 'uses: [^ ]+@v[0-9]' "$ROOT_DIR/.github/workflows/design-conform-tests.yml"
+expect_match "test workflow installs PyYAML for runner-policy.py" "'PyYAML==[0-9.]+'" "$ROOT_DIR/.github/workflows/design-conform-tests.yml"
 
 echo "== design-conform Python contract =="
 expect_match "tool has an executable entrypoint" '^if __name__ == "__main__":$' "$TOOL"

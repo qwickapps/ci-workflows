@@ -9,7 +9,7 @@ jobs:
   design:
     uses: qwickapps/ci-workflows/.github/workflows/design-conform.yml@<pinned-sha>
     with:
-      manifest: design-conform.yml
+      manifest_path: design-conform.yml
       target_url: https://staging.example.com
 ```
 

@@ -26,14 +26,17 @@ jobs:
   test-design-conform:
     name: design-conform unit and browser tests
     runs-on: [interserver-x64, julie]
+    # Self-hosted runner: never run fork-PR code (scripts/tests/self-hosted-fork-pr-guard.test.sh).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install pinned browser runtime
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/design-conform-test-venv"
-          "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.56.0'
+          # PyYAML: scripts/runner-policy.py (run by the test script) imports yaml.
+          "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m pip install --disable-pip-version-check 'playwright==1.56.0' 'PyYAML==6.0.2'
           PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TOOL_CACHE/design-conform-playwright" \
             "$RUNNER_TEMP/design-conform-test-venv/bin/python" -m playwright install chromium
 
