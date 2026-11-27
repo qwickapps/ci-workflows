@@ -10,7 +10,9 @@ Shared CI workflow scripts for QwickApps repositories. Used as a **git submodule
 ci-workflows/
 ├── .github/workflows/
 │   ├── fetch-secrets.yml       # Reusable deploy secrets fetcher
-│   └── security-scan.yml       # Reusable govulncheck + Semgrep security scan
+│   ├── security-scan.yml       # Reusable govulncheck + Semgrep security scan
+│   ├── merge-gate.yml          # Reusable merge-gate pass/fail status + PR comment
+│   └── merge-gate-audit.yml    # Reusable post-merge bypass audit -> P0 Kanban card
 └── scripts/
     ├── attribution-check.sh    # Detects AI co-authorship in PR commits
     └── pr-status-comment.sh    # Posts CI validation results as a PR comment
@@ -121,6 +123,41 @@ permissions:
 jobs:
   security-scan:
     uses: qwickapps/ci-workflows/.github/workflows/security-scan.yml@main
+```
+
+---
+
+### `.github/workflows/merge-gate.yml` + `.github/workflows/merge-gate-audit.yml`
+
+merge-gates design step S2 (see `docs/merge-gate.md` for the full scope note
+and the S1 dependency). `merge-gate.yml` posts an advisory pass/fail status
+and a per-gate PR comment at the exact head SHA. `merge-gate-audit.yml`
+flags any merge commit to `main` with no merge-gate audit evidence and opens
+a P0 Kanban card. **Read `docs/merge-gate.md` before adopting this** — until
+design step S1 ships, the audit job will flag every merge, by design.
+
+#### Caller example
+
+```yaml
+# .github/workflows/merge-gate.yml
+name: merge-gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  status:
+    uses: qwickapps/ci-workflows/.github/workflows/merge-gate.yml@main
+```
+
+```yaml
+# .github/workflows/merge-gate-audit.yml
+name: merge-gate-audit
+on:
+  push:
+    branches: [main]
+jobs:
+  audit:
+    uses: qwickapps/ci-workflows/.github/workflows/merge-gate-audit.yml@main
 ```
 
 ## Scripts

@@ -1,0 +1,242 @@
+name: Merge Gate Status (Reusable)
+
+# merge-gates design S2 (Projects/merge-gates-design-2026-11-27.md,
+# sections 2, 4, 7 -- read those before changing this file).
+#
+# Posts a visible pass/fail commit status at the PR's exact head SHA (H),
+# plus a per-gate comment on the PR. On GitHub Free this status cannot
+# block a merge -- qwickapps is on the free plan, so private repos have no
+# required checks, no rulesets, no merge queue (design section 1). This
+# workflow is deliberately advisory: "a bypass leaves a visible red mark"
+# (design section 4). The enforcing half of S2 is merge-gate-audit.yml.
+#
+# Scope -- only the gates independently machine-checkable from a GitHub
+# Actions context, without the not-yet-built merge-gate CLI (design S1) or
+# a read path into the Kanban DB:
+#   G1  CI green        -- every other check-run/status at H is
+#                           success/skipped/neutral, none pending, list
+#                           non-empty
+#   G5  Secret scan      -- gitleaks over base...head
+#   G6  Linked to work   -- PR body has `Kanban: t_...` or `Closes #N`
+#   G7  Blast radius     -- changed lines/files vs. 800/40 defaults,
+#                           lockfiles excluded, label `large-change` waives
+#   G8  Protected paths  -- ADVISORY ONLY. Flags the touch; does not fail
+#                           the status. The actual H1 (two independent
+#                           APPROVEs) enforcement is design step S3, not
+#                           built, and S3 explicitly needs its own SDLC
+#                           exception -- this workflow must not pretend to
+#                           enforce it.
+#   G9  Migration flag   -- migrations/**, *.sql, or DROP/TRUNCATE/DELETE
+#                           in the diff needs label `migration` plus a
+#                           `Rollback:` line in the PR body
+#
+# G2 (independent Kanban-recorded review), G3 (tests-present) and G4
+# (design conformance) need either the merge-gate CLI (S1) or a Kanban DB
+# read that this reusable workflow does not have. They are reported as
+# "not evaluated by this workflow" -- never faked as a pass. See
+# docs/merge-gate.md for the full scope note and the S1 dependency.
+
+on:
+  workflow_call:
+    inputs:
+      blast_radius_lines:
+        description: "Max changed lines (excluding lockfiles) before G7 requires the large-change label"
+        required: false
+        type: number
+        default: 800
+      blast_radius_files:
+        description: "Max changed files (excluding lockfiles) before G7 requires the large-change label"
+        required: false
+        type: number
+        default: 40
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+  checks: read
+
+jobs:
+  merge-gate-status:
+    name: merge-gate status
+    # Reusable: runs in the CALLER's repo context but on the org's shared
+    # runner pool, same convention as validation-evidence-gate.yml --
+    # choco runners are repo-scoped (aos, ci-workflows) and never serve
+    # callers.
+    runs-on: [self-hosted, macmini, macmini-fast]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Compute gates and post status + comment
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MAX_LINES: ${{ inputs.blast_radius_lines }}
+          MAX_FILES: ${{ inputs.blast_radius_files }}
+        run: |
+          set -euo pipefail
+
+          FAILS=()
+          WARNS=()
+          REPORT=""
+
+          add_line() { REPORT="${REPORT}${1}
+          "; }
+
+          # ---- G1: CI green at H (every other check-run/status) --------
+          add_line "### G1 — CI green"
+          CHECKS_JSON=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --paginate 2>/dev/null || echo '{"check_runs":[]}')
+          STATUSES_JSON=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status" 2>/dev/null || echo '{"statuses":[]}')
+
+          OTHER_RUNS=$(echo "$CHECKS_JSON" | jq '[.check_runs[] | select(.name != "merge-gate status")]')
+          RUN_COUNT=$(echo "$OTHER_RUNS" | jq 'length')
+          PENDING=$(echo "$OTHER_RUNS" | jq '[.[] | select(.status != "completed")] | length')
+          FAILING=$(echo "$OTHER_RUNS" | jq '[.[] | select(.conclusion != null and (.conclusion | IN("success","skipped","neutral")) | not)] | length')
+          STATUS_FAILING=$(echo "$STATUSES_JSON" | jq '[.statuses[]? | select(.context != "merge-gate") | select(.state != "success" and .state != "pending")] | length' 2>/dev/null || echo 0)
+
+          if [ "$RUN_COUNT" -eq 0 ]; then
+            add_line "- no check-runs found at H yet — treated as not-ready, not pass"
+            FAILS+=("G1 CI green: no check-runs at H")
+          elif [ "$PENDING" -gt 0 ]; then
+            add_line "- ${PENDING} check-run(s) still pending"
+            FAILS+=("G1 CI green: ${PENDING} pending")
+          elif [ "$FAILING" -gt 0 ] || [ "$STATUS_FAILING" -gt 0 ]; then
+            add_line "- ${FAILING} failing check-run(s), ${STATUS_FAILING} failing status(es)"
+            FAILS+=("G1 CI green: failing checks")
+          else
+            add_line "- pass: ${RUN_COUNT} check-run(s), all success/skipped/neutral"
+          fi
+
+          # ---- G2/G3/G4: not evaluated here -----------------------------
+          add_line ""
+          add_line "### G2 / G3 / G4 — not evaluated by this workflow"
+          add_line "- G2 (independent Kanban review), G3 (tests present) and G4 (design"
+          add_line "  conformance) need the merge-gate CLI (design S1, not built) or a Kanban"
+          add_line "  DB read this workflow does not have. Treat these as unverified, not"
+          add_line "  passed — do not read a clean merge-gate status as covering them."
+
+          # ---- G5: secret scan (gitleaks over base...head) -------------
+          add_line ""
+          add_line "### G5 — Secret scan"
+          if command -v gitleaks >/dev/null 2>&1 && [ -n "${BASE_SHA:-}" ]; then
+            if gitleaks detect --log-opts="${BASE_SHA}..${HEAD_SHA}" --no-banner --exit-code 1 >/tmp/gitleaks.log 2>&1; then
+              add_line "- pass: gitleaks found nothing in base...head"
+            else
+              add_line "- gitleaks reported findings (see run log)"
+              FAILS+=("G5 secret scan: gitleaks findings")
+            fi
+          else
+            add_line "- skipped: gitleaks unavailable or no base SHA"
+            WARNS+=("G5 secret scan: skipped (gitleaks unavailable)")
+          fi
+
+          # ---- G6: linked to work ---------------------------------------
+          add_line ""
+          add_line "### G6 — Linked to work"
+          PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body // ""')
+          if echo "$PR_BODY" | grep -qE 'Kanban: *t_[0-9a-f]+' || echo "$PR_BODY" | grep -qiE 'Closes #[0-9]+'; then
+            add_line "- pass: PR body links a Kanban task or closes an issue"
+          else
+            add_line "- no \`Kanban: t_...\` line and no \`Closes #N\`"
+            WARNS+=("G6 linked to work: no Kanban/Closes reference")
+          fi
+
+          # ---- G7: blast radius ------------------------------------------
+          add_line ""
+          add_line "### G7 — Blast radius"
+          LOCKFILE_RE='(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|go\.sum|poetry\.lock|uv\.lock)$'
+          CHANGED_FILES=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}" 2>/dev/null | grep -vE "$LOCKFILE_RE" || true)
+          NUM_FILES=$(echo "$CHANGED_FILES" | grep -c . || true)
+          NUM_LINES=$(git diff --shortstat "${BASE_SHA}...${HEAD_SHA}" -- . ":(exclude)*lock*" 2>/dev/null | grep -oE '[0-9]+ insertion[s]?|[0-9]+ deletion[s]?' | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')
+          HAS_LARGE_LABEL=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | any(. == "large-change")')
+          if [ "$NUM_LINES" -gt "$MAX_LINES" ] || [ "$NUM_FILES" -gt "$MAX_FILES" ]; then
+            if [ "$HAS_LARGE_LABEL" = "true" ]; then
+              add_line "- ${NUM_LINES} lines / ${NUM_FILES} files, over default limits (${MAX_LINES}/${MAX_FILES}) but \`large-change\` label present"
+            else
+              add_line "- ${NUM_LINES} lines / ${NUM_FILES} files, over default limits (${MAX_LINES}/${MAX_FILES}), no \`large-change\` label"
+              FAILS+=("G7 blast radius: ${NUM_LINES} lines / ${NUM_FILES} files, no large-change label")
+            fi
+          else
+            add_line "- pass: ${NUM_LINES} lines / ${NUM_FILES} files (lockfiles excluded)"
+          fi
+
+          # ---- G8: protected paths (advisory only — H1 is S3, not built) -
+          add_line ""
+          add_line "### G8 — Protected paths (advisory; H1 enforcement is S3, not built)"
+          PROTECTED_RE='(^|/)(hermes-plugins/qwick-guard/|aos/guard/|rules\.json$|allow\.json$|environments\.yml$|qwick-secrets-|\.github/workflows/merge-gate|\.github/workflows/deploy-app\.yml|\.github/workflows/promote)'
+          TOUCHED_PROTECTED=$(echo "$CHANGED_FILES" | grep -E "$PROTECTED_RE" || true)
+          if [ -n "$TOUCHED_PROTECTED" ]; then
+            add_line "- touches protected path(s), H1 (two independent APPROVEs) would apply once S3 ships:"
+            while IFS= read -r f; do add_line "  - ${f}"; done <<< "$TOUCHED_PROTECTED"
+            WARNS+=("G8 protected paths: touched (H1 not enforced yet — see design S3)")
+          else
+            add_line "- pass: no protected paths touched"
+          fi
+
+          # ---- G9: migration / destructive flag ---------------------------
+          add_line ""
+          add_line "### G9 — Migration / destructive flag"
+          MIGRATION_TOUCHED=$(echo "$CHANGED_FILES" | grep -E '(^|/)(migrations/|.*\.sql$)' || true)
+          DESTRUCTIVE_DIFF=$(git diff "${BASE_SHA}...${HEAD_SHA}" 2>/dev/null | grep -iE '^\+.*\b(DROP|TRUNCATE|DELETE)\b' || true)
+          if [ -n "$MIGRATION_TOUCHED" ] || [ -n "$DESTRUCTIVE_DIFF" ]; then
+            HAS_MIGRATION_LABEL=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | any(. == "migration")')
+            HAS_ROLLBACK=$(echo "$PR_BODY" | grep -qiE '^Rollback:' && echo true || echo false)
+            if [ "$HAS_MIGRATION_LABEL" = "true" ] && [ "$HAS_ROLLBACK" = "true" ]; then
+              add_line "- migration/destructive diff present, \`migration\` label and \`Rollback:\` line both present"
+            else
+              add_line "- migration/destructive diff present, missing migration label and/or Rollback: line"
+              FAILS+=("G9 migration flag: missing label and/or Rollback: line")
+            fi
+          else
+            add_line "- pass: no migration/destructive pattern in diff"
+          fi
+
+          # ---- Decide overall status --------------------------------------
+          if [ "${#FAILS[@]}" -gt 0 ]; then
+            STATE="failure"
+            DESC="merge-gate: ${#FAILS[@]} gate(s) failed (${FAILS[0]})"
+          elif [ "${#WARNS[@]}" -gt 0 ]; then
+            STATE="success"
+            DESC="merge-gate: pass with ${#WARNS[@]} advisory note(s)"
+          else
+            STATE="success"
+            DESC="merge-gate: all evaluated gates pass"
+          fi
+
+          {
+            echo "## merge-gate status report — \`${HEAD_SHA:0:12}\`"
+            echo ""
+            echo "Overall: **${STATE}** — ${DESC}"
+            echo ""
+            echo "$REPORT"
+            echo "---"
+            echo "*G2/G3/G4 are not evaluated by this automated check (design S1 dependency)."
+            echo "This status is advisory on GitHub Free — see design section 4.*"
+            echo ""
+            echo "*Posted by [merge-gate](${RUN_URL}) at $(date -u '+%Y-%m-%d %H:%M:%S UTC')*"
+          } > /tmp/merge-gate-comment.md
+
+          # Upsert the PR comment (find-and-edit the marker, else create).
+          MARKER="<!-- merge-gate-report -->"
+          sed -i "1i ${MARKER}" /tmp/merge-gate-comment.md
+          EXISTING_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -1)
+          if [ -n "$EXISTING_ID" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${EXISTING_ID}" -f body="$(cat /tmp/merge-gate-comment.md)" >/dev/null
+          else
+            gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$(cat /tmp/merge-gate-comment.md)" >/dev/null
+          fi
+
+          gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state="$STATE" \
+            -f context="merge-gate" \
+            -f description="${DESC:0:140}" \
+            -f target_url="$RUN_URL" >/dev/null
+
+          echo "::notice::merge-gate status=${STATE} desc=${DESC}"
