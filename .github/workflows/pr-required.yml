@@ -1,0 +1,96 @@
+name: PR Required
+
+# Always-run anchor check so GitHub branch protection has at least one
+# required status check that reports on every PR -- including docs-only
+# changes that all 58 existing path-filtered workflows here skip, which
+# would otherwise leave a required check stuck "Expected" forever.
+#
+# Runner choice: this job classifies as job_class "build" under
+# scripts/runner-policy.py (filename/job-id contain none of the
+# test/lint/validate/scan/guard/deploy keywords it looks for), and
+# .github/runner-policy.json's "build" class for this repo does not
+# permit any GitHub-hosted label -- only "test" carries a narrow
+# ubuntu-24.04 allowance. So runs-on: ubuntu-latest would fail
+# runner-policy-tests.yml on every PR. Using the self-hosted
+# [interserver-x64, julie] label set (already approved for "build")
+# keeps this compliant.
+#
+# Because this repo is public and this job now runs self-hosted on
+# every pull_request (a fork-controllable trigger), it carries the
+# canonical fork-PR guard that self-hosted-fork-pr-guard-tests.yml
+# enforces verbatim. For a fork PR the job reports "skipped" -- which
+# still satisfies a required status check -- without ever executing
+# fork-controlled code on the runner.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pr-required:
+    name: pr-required
+    runs-on: [interserver-x64, julie]
+    # Canonical guard, must match scripts/tests/self-hosted-fork-pr-guard.test.sh verbatim.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Install PyYAML
+        run: |
+          if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            python3 -m pip install --user PyYAML
+          fi
+
+      - name: Validate workflow YAML syntax
+        run: |
+          python3 - <<'EOF'
+          import glob
+          import sys
+
+          import yaml
+
+          failed = False
+          paths = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+          if not paths:
+              print("No workflow files found under .github/workflows")
+              sys.exit(0)
+          for path in paths:
+              try:
+                  with open(path) as f:
+                      yaml.safe_load(f)
+              except yaml.YAMLError as exc:
+                  print(f"YAML parse error in {path}: {exc}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          EOF
+
+      # Scoped to files this PR actually changes (shell-lint.yml's own
+      # pattern) -- linting the whole directory would fail this always-run
+      # check on pre-existing debt in files untouched by the PR, which is
+      # exactly the kind of permanent-red required check this job must
+      # not become.
+      - name: Lint changed workflow files (actionlint)
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+          changed=$(git diff --name-only HEAD~1 HEAD -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+          if [[ -z "$changed" ]]; then
+            echo "No workflow files changed — skip actionlint"
+            exit 0
+          fi
+
+          failed=0
+          while IFS= read -r f; do
+            if [[ ! -f "$f" ]]; then
+              echo "SKIP (missing or deleted): $f"
+              continue
+            fi
+            echo "=== $f ==="
+            actionlint "$f" || failed=1
+          done <<< "$changed"
+          exit $failed
