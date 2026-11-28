@@ -1,0 +1,83 @@
+name: PR Required
+
+# Always-run branch-protection gate: NO `paths:` filter, so this can become
+# a required status check without deadlocking against the other
+# path-filtered workflows in this repo (a docs-only PR would otherwise
+# never trigger them and would stay "Expected" forever).
+#
+# Runner choice: `ubuntu-24.04` is the only GitHub-hosted label approved
+# for this repo in .github/runner-policy.json (confirmed via
+# `scripts/runner-policy.py validate`; `ubuntu-latest` is NOT an approved
+# label here). GitHub-hosted (not self-hosted) is required on purpose:
+# this job must execute unconditionally on every PR, including forks.
+# A self-hosted runner on a fork-controllable trigger must carry the
+# canonical fork-PR guard (scripts/tests/self-hosted-fork-pr-guard.test.sh),
+# which SKIPS the job on fork PRs -- that would defeat the whole point of
+# an always-reporting required check. Public repo + GitHub-hosted runner
+# carries no self-hosted fork-PR exposure.
+#
+# Job id is `validate` rather than `pr-required`: scripts/runner-policy.py
+# classifies jobs by filename+job-id keywords, and a job id of literally
+# `pr-required` has no recognized keyword and falls through to the
+# "build" class, which has no GitHub-hosted entry for this repo at all
+# (self-hosted only) -- confirmed by running the checker locally. `name:
+# pr-required` below is the required-check-facing display name that
+# branch protection will reference; `validate` makes the job classify
+# correctly as "test" (matches the job's actual behavior: YAML syntax +
+# actionlint, nothing else).
+on:
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: pr-required
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate workflow YAML syntax
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml" 2>/dev/null || pip install --user --break-system-packages PyYAML
+          python3 - <<'PY'
+          import glob
+          import sys
+
+          import yaml
+
+          failed = False
+          for path in sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml")):
+              try:
+                  with open(path) as handle:
+                      yaml.safe_load(handle)
+              except yaml.YAMLError as exc:
+                  print(f"YAML PARSE ERROR {path}: {exc}", file=sys.stderr)
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+      # Scoped to workflow files the PR actually touches, not a full-repo
+      # scan: actionlint already surfaces pre-existing findings elsewhere
+      # in this repo (unrelated runner-label/shellcheck debt). Scanning
+      # every workflow unconditionally would make this required check
+      # permanently red regardless of what a PR changes, which defeats
+      # the point of a required gate.
+      - name: Lint changed workflow files (actionlint)
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          changed="$(git diff --name-only "$base" "$head" -- '.github/workflows/*.yml' '.github/workflows/*.yaml')"
+          if [ -z "$changed" ]; then
+            echo "No changed workflow files -- skipping actionlint"
+            exit 0
+          fi
+          echo "$changed"
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          echo "$changed" | xargs ./actionlint -color
