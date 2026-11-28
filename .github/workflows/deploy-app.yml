@@ -18,6 +18,13 @@ name: Deploy App (Reusable)
 #
 # All stages run on [self-hosted, macmini].
 #
+# Lanes (input `lane`, closed set, default `primary` so existing callers are
+# unchanged):
+# - primary   -> the CapRover/oci-main mapping above.
+# - secondary -> qwickapps-momo Coolify, two explicit validation slots only:
+#                build -> <app>-build, uat -> <app>-uat. live/stable fail
+#                closed. Caller host inputs cannot steer this lane.
+#
 # Tag lineage (all on the same immutable digest):
 #   <sha-image> -> release-candidate -> release -> stable
 #
@@ -43,6 +50,12 @@ on:
         type: string
         required: false
         default: 'build'
+
+      lane:
+        description: 'Closed lane: primary keeps OCI-main CapRover; secondary targets Momo Coolify build/UAT validation slots only'
+        type: string
+        required: false
+        default: 'primary'
 
       # -- Env rendering (t_ffaf9f03) ------------------------------------------
       # The caller's rendered app env file used to be produced by a separate
@@ -234,6 +247,8 @@ jobs:
     runs-on: [self-hosted, macmini]
     outputs:
       stage: ${{ steps.meta.outputs.stage }}
+      deployment_lane: ${{ steps.meta.outputs.deployment_lane }}
+      deployment_backend: ${{ steps.meta.outputs.deployment_backend }}
       app_name: ${{ steps.meta.outputs.app_name }}
       env_label: ${{ steps.meta.outputs.env_label }}
       image_name: ${{ steps.meta.outputs.image_name }}
@@ -275,6 +290,7 @@ jobs:
           echo "deploy_start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
           STAGE_INPUT="${{ inputs.stage }}"
+          DEPLOYMENT_LANE="${{ inputs.lane }}"
           APP_NAME="${{ inputs.app_name }}"
           INPUT_IMAGE="${{ inputs.image_ref }}"
 
@@ -286,6 +302,31 @@ jobs:
               exit 1
               ;;
           esac
+
+          case "$DEPLOYMENT_LANE" in
+            primary|secondary) ;;
+            *) echo "ERROR: invalid lane '$DEPLOYMENT_LANE' (expected primary or secondary)"; exit 1 ;;
+          esac
+          if [ "$DEPLOYMENT_LANE" = "secondary" ] && [ "$STAGE_INPUT" != "build" ] && [ "$STAGE_INPUT" != "uat" ]; then
+            echo "ERROR: secondary deployment lane supports only explicit build and uat validation slots; live/stable fail closed"
+            exit 1
+          fi
+          # Primary-only safety features have no Momo Coolify implementation.
+          # Requesting one on the secondary lane is refused, never skipped.
+          if [ "$DEPLOYMENT_LANE" = "secondary" ]; then
+            UNSUPPORTED=""
+            [ "${{ inputs.record_first_stable_evidence }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED record_first_stable_evidence"
+            [ "${{ inputs.bootstrap_first_stable }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED bootstrap_first_stable"
+            [ "${{ inputs.require_live_approval_check }}" != "true" ] || UNSUPPORTED="$UNSUPPORTED require_live_approval_check"
+            [ -z "${{ inputs.cmd }}" ] || UNSUPPORTED="$UNSUPPORTED cmd"
+            # An explicit CapRover override is a caller error on the Coolify
+            # lane. caprover_host is required for every caller and is ignored.
+            [ -z "${{ inputs.caprover_url }}" ] || UNSUPPORTED="$UNSUPPORTED caprover_url"
+            if [ -n "$UNSUPPORTED" ]; then
+              echo "ERROR: secondary (Momo Coolify) lane does not implement:${UNSUPPORTED}; refusing instead of skipping. Use lane=primary for these features."
+              exit 1
+            fi
+          fi
 
           if [ -z "$APP_NAME" ]; then
             echo "ERROR: app_name is required"
@@ -318,6 +359,7 @@ jobs:
               ;;
           esac
 
+          if [ "$DEPLOYMENT_LANE" = "primary" ]; then
           # ci-workflows#153 check 1: stage/host agreement. `<app>-build`
           # must deploy to oci-dev; `<app>-uat`/`<app>-live`/`<app>-stable`
           # must deploy to oci-main. This is a caller-input check, not
@@ -418,6 +460,12 @@ jobs:
               echo "ERROR: stage '$STAGE_INPUT' must deploy to '$EXPECTED_HOST' (per the blue-green SOP, ci-workflows#153/#187: build->oci-dev, uat/live/stable->oci-main), but resolved host is '$RESOLVED_HOST'"
             fi
             exit 1
+          fi
+          else
+            # Legacy CapRover inputs remain required for compatibility, but
+            # secondary callers cannot use them to steer build/UAT back to
+            # OCI-main. The dedicated Momo jobs are the only mutation path.
+            RESOLVED_HOST=""
           fi
 
           if [ -n "$INPUT_IMAGE" ]; then
@@ -554,6 +602,29 @@ jobs:
               ;;
           esac
 
+          if [ "$DEPLOYMENT_LANE" = "secondary" ]; then
+            DEPLOYMENT_BACKEND="coolify-momo"
+            CAPROVER_REQUIRED="false"
+            CAPROVER_HOST_NAME=""
+            case "$STAGE" in
+              build)
+                TARGET_APP="${APP_NAME}-build"
+                TARGET_APP_URL="http://${APP_NAME}-build.taile324e7.ts.net:${{ inputs.container_port }}"
+                GATEWAY_APP_NAME="${APP_NAME}-build"
+                ENV_LABEL="build"
+                ;;
+              uat)
+                TARGET_APP="${APP_NAME}-uat"
+                TARGET_APP_URL="http://${APP_NAME}-uat.taile324e7.ts.net:${{ inputs.container_port }}"
+                GATEWAY_APP_NAME="${APP_NAME}-uat"
+                ENV_LABEL="uat"
+                ;;
+              *) echo "ERROR: secondary lane stage escaped the build/uat gate"; exit 1 ;;
+            esac
+          else
+            DEPLOYMENT_BACKEND="caprover-oci-main"
+          fi
+
           # ci-workflows#153 check 2: no per-environment build slots. A
           # CapRover app name matching -(uat|live|stable)-build$ is refused
           # outright -- `<app>-build` is the only legal build slot. The case
@@ -609,6 +680,8 @@ jobs:
           fi
 
           echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
+          echo "deployment_lane=${DEPLOYMENT_LANE}" >> "$GITHUB_OUTPUT"
+          echo "deployment_backend=${DEPLOYMENT_BACKEND}" >> "$GITHUB_OUTPUT"
           echo "app_name=${APP_NAME}" >> "$GITHUB_OUTPUT"
           echo "env_label=${ENV_LABEL}" >> "$GITHUB_OUTPUT"
           echo "image_name=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
@@ -843,6 +916,8 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
+    outputs:
+      image_digest: ${{ steps.image-check.outputs.digest }}
     # ci-workflows#137: this job only pulls/inspects images -- packages:
     # read was enough, no contents: read. The "Checkout ci-workflows
     # scripts" step below fetches ci-workflows' OWN public repo via a
@@ -963,14 +1038,17 @@ jobs:
           AUTH_B64=$(printf '%s:%s' "${{ github.actor }}" "$GHCR_TOKEN" | base64 | tr -d '\n')
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > "$DOCKER_CONFIG/config.json"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-      - name: Check image references exist
+      - name: Check image references exist and capture immutable digest
+        id: image-check
         run: |
           set -euo pipefail
           STAGE="${{ needs.resolve-stage.outputs.stage }}"
           IMAGE_REF="${{ needs.resolve-stage.outputs.image_ref }}"
           PRIOR_TAG="${{ needs.resolve-stage.outputs.prior_tag }}"
 
-          docker buildx imagetools inspect "$IMAGE_REF" >/dev/null
+          DIGEST="$(docker buildx imagetools inspect --format '{{.Digest}}' "$IMAGE_REF")"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ERROR: image digest is malformed"; exit 1; }
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
           if [ "$STAGE" != "build" ]; then
             if [ -z "$PRIOR_TAG" ]; then
@@ -1011,6 +1089,189 @@ jobs:
             *) echo "::error::refusing to delete outside RUNNER_TEMP: $TARGET"; exit 1 ;;
           esac
 
+  # -- Momo Coolify secondary validation lanes -------------------------------
+  deploy-coolify-build:
+    needs: [resolve-stage, validate-env, verify-provenance, build]
+    if: |
+      always() &&
+      needs.resolve-stage.result == 'success' &&
+      needs.validate-env.result == 'success' &&
+      needs.verify-provenance.result == 'success' &&
+      needs.resolve-stage.outputs.deployment_lane == 'secondary' &&
+      needs.resolve-stage.outputs.stage == 'build' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: [self-hosted, macmini]
+    concurrency:
+      group: coolify-momo-secondary-v1-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout explicit Momo validation implementation
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          # job.workflow_sha is the immutable commit of THIS reusable workflow
+          # (github.workflow_sha names the caller). Helpers must match the
+          # workflow under test, never main.
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            .github/actions/coolify-validation
+            scripts
+            config/coolify-secondary-validation.json
+          sparse-checkout-cone-mode: false
+      - name: Render app env file (caller secrets, this step only)
+        id: env-file
+        env: &coolify_render_env
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          QWICKSECRETS_DATABASE_URL: ${{ secrets.QWICKSECRETS_DATABASE_URL }}
+          QWICKSECRETS_DATABASE_URL_DEV: ${{ secrets.QWICKSECRETS_DATABASE_URL_DEV }}
+          QWICKSECRETS_DATABASE_URL_BACKUP: ${{ secrets.QWICKSECRETS_DATABASE_URL_BACKUP }}
+          QWICKSECRETS_DATABASE_URL_PROD: ${{ secrets.QWICKSECRETS_DATABASE_URL_PROD }}
+          QWICKSECRETS_SERVICE_KEY: ${{ secrets.QWICKSECRETS_SERVICE_KEY }}
+          QWICKSECRETS_SERVICE_KEY_DEV: ${{ secrets.QWICKSECRETS_SERVICE_KEY_DEV }}
+          QWICKSECRETS_SERVICE_KEY_BACKUP: ${{ secrets.QWICKSECRETS_SERVICE_KEY_BACKUP }}
+          QWICKSECRETS_SERVICE_KEY_PROD: ${{ secrets.QWICKSECRETS_SERVICE_KEY_PROD }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_DEV }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_BACKUP }}
+          QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD: ${{ secrets.QWICKSECRETS_MASTER_ENCRYPTION_KEY_PROD }}
+          QWICKSECRETS_DEPLOY_READ_TOKEN: ${{ secrets.QWICKSECRETS_DEPLOY_READ_TOKEN }}
+          TS_EPHEMERAL_AUTHKEY: ${{ secrets.TS_EPHEMERAL_AUTHKEY }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: |
+          set -euo pipefail
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/coolify-build-${{ inputs.app_name }}.env"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; secondary lane fails closed"
+            exit 1
+          fi
+          chmod 600 "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+      - name: Enforce exclusive Momo Coolify deploy token
+        run: python3 .ci-workflows/scripts/validate-coolify-token-exclusivity.py --root .ci-workflows
+      - name: Resolve scoped Momo validation credentials
+        # Only this step sees the secrets-service key. It exports just
+        # COOLIFY_MOMO_DEPLOY_TOKEN and TS_API_KEY_RESOLVED (masked); the
+        # composite action strips both before running any caller code.
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+        run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
+      - name: Deploy explicit Momo build validation slot
+        uses: ./.ci-workflows/.github/actions/coolify-validation
+        with:
+          role: build
+          app-name: ${{ inputs.app_name }}
+          resource-name: ${{ needs.resolve-stage.outputs.target_app }}
+          environment: ${{ inputs.environment }}
+          env-file: ${{ steps.env-file.outputs.path }}
+          image-ref: ${{ needs.resolve-stage.outputs.image_ref }}
+          image-digest: ${{ needs.verify-provenance.outputs.image_digest }}
+          container-port: ${{ inputs.container_port }}
+          health-path: ${{ inputs.health_path }}
+          target-url: ${{ needs.resolve-stage.outputs.target_app_url }}
+          critical-subsystems: ${{ inputs.critical_subsystems }}
+          prod-critical-subsystems: ${{ inputs.prod_critical_subsystems }}
+          warning-subsystems: ${{ inputs.warning_subsystems }}
+          smoke-test-path: ${{ inputs.smoke_test_path }}
+          smoke-test-command: ${{ inputs.smoke_test_command }}
+          e2e-command: ${{ inputs.e2e_command }}
+          run-e2e: ${{ inputs.run_e2e }}
+          run-migrations: 'false'
+
+  deploy-coolify-uat:
+    needs: [resolve-stage, validate-env, verify-provenance, build]
+    if: |
+      always() &&
+      needs.resolve-stage.result == 'success' &&
+      needs.validate-env.result == 'success' &&
+      needs.verify-provenance.result == 'success' &&
+      needs.resolve-stage.outputs.deployment_lane == 'secondary' &&
+      needs.resolve-stage.outputs.stage == 'uat' &&
+      needs.build.result == 'skipped'
+    runs-on: [self-hosted, macmini]
+    concurrency:
+      group: coolify-momo-secondary-v1-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout explicit Momo validation implementation
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          # job.workflow_sha is the immutable commit of THIS reusable workflow
+          # (github.workflow_sha names the caller). Helpers must match the
+          # workflow under test, never main.
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            .github/actions/coolify-validation
+            scripts
+            config/coolify-secondary-validation.json
+          sparse-checkout-cone-mode: false
+      - name: Render app env file (caller secrets, this step only)
+        id: env-file
+        env: *coolify_render_env
+        run: |
+          set -euo pipefail
+          SCRIPT="${{ inputs.env_render_script }}"
+          OUT="${RUNNER_TEMP}/coolify-uat-${{ inputs.app_name }}.env"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::env_render_script '$SCRIPT' not found in caller repo checkout (path is relative to repo root)"
+            exit 1
+          fi
+          chmod +x "$SCRIPT"
+          "$SCRIPT" "${{ inputs.environment }}" "${{ inputs.app_name }}" "$OUT"
+          if [ ! -s "$OUT" ]; then
+            echo "::error::env_render_script wrote no file (or an empty file) at $OUT -- refusing to continue; secondary lane fails closed"
+            exit 1
+          fi
+          chmod 600 "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+      - name: Enforce exclusive Momo Coolify deploy token
+        run: python3 .ci-workflows/scripts/validate-coolify-token-exclusivity.py --root .ci-workflows
+      - name: Resolve scoped Momo validation credentials
+        # Only this step sees the secrets-service key. It exports just
+        # COOLIFY_MOMO_DEPLOY_TOKEN and TS_API_KEY_RESOLVED (masked); the
+        # composite action strips both before running any caller code.
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+        run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
+      - name: Deploy explicit Momo UAT validation slot
+        uses: ./.ci-workflows/.github/actions/coolify-validation
+        with:
+          role: uat
+          app-name: ${{ inputs.app_name }}
+          resource-name: ${{ needs.resolve-stage.outputs.target_app }}
+          environment: ${{ inputs.environment }}
+          env-file: ${{ steps.env-file.outputs.path }}
+          image-ref: ${{ needs.resolve-stage.outputs.image_ref }}
+          image-digest: ${{ needs.verify-provenance.outputs.image_digest }}
+          container-port: ${{ inputs.container_port }}
+          health-path: ${{ inputs.health_path }}
+          target-url: ${{ needs.resolve-stage.outputs.target_app_url }}
+          critical-subsystems: ${{ inputs.critical_subsystems }}
+          prod-critical-subsystems: ${{ inputs.prod_critical_subsystems }}
+          warning-subsystems: ${{ inputs.warning_subsystems }}
+          smoke-test-path: ${{ inputs.smoke_test_path }}
+          smoke-test-command: ${{ inputs.smoke_test_command }}
+          e2e-command: ${{ inputs.e2e_command }}
+          run-e2e: ${{ inputs.run_e2e }}
+          run-migrations: ${{ needs.resolve-stage.outputs.run_migrations_for_stage }}
+
   # -- CapRover deployment --------------------------------------------
   deploy-caprover:
     needs: [resolve-stage, validate-env, verify-provenance, build]
@@ -1019,6 +1280,7 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       needs.validate-env.result == 'success' &&
       needs.verify-provenance.result == 'success' &&
+      needs.resolve-stage.outputs.deployment_lane == 'primary' &&
       needs.resolve-stage.outputs.caprover_required == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: [self-hosted, macmini]
@@ -1269,9 +1531,8 @@ jobs:
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          # The live momo API token is the scoped deploy token. Do not use
-          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          # The live Momo API credential uses the single approved scoped name.
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           ENV_FILE="${{ steps.env-file.outputs.path }}"
@@ -1322,21 +1583,17 @@ jobs:
             exit 1
           fi
 
-          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
-          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+          if [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ] || [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ]; then
             if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
               _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
               _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
-                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+                -H "x-service-key: $SECRETS_SERVICE_KEY" 2>/dev/null || echo "")
               if [ -n "$_SEC_RESP" ]; then
-                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
-                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
-                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
-                fi
+                COOLIFY_MOMO_DEPLOY_TOKEN=$(printf '%s' "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
               fi
             fi
           fi
-          if [ -z "$COOLIFY_TOKEN_RESOLVED" ] || [ "$COOLIFY_TOKEN_RESOLVED" = "-" ]; then
+          if [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ] || [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ]; then
             echo "::error::Coolify API token unresolved; Coolify is a live claimant source and cannot be skipped, failing closed"
             exit 1
           fi
@@ -1357,7 +1614,7 @@ jobs:
             --target-host "$HOST_KEY" \
             --caprover-hosts oci-gateway oci-main server1-qwickforge \
             --ts-api-key "$TS_API_KEY_RESOLVED" \
-            --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+            --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN" \
             --pre-mutation-state-out "$PRE_STATE"
 
       - name: Check first-deploy proof (aos#193 Phase 1 §2)
@@ -1513,9 +1770,8 @@ jobs:
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
-          # The live momo API token is the scoped deploy token. Do not use
-          # COOLIFY_API_TOKEN (not provisioned) or ADMIN/MANAGE (stale 401s).
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          # The live Momo API credential uses the single approved scoped name.
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
           TS_HOSTNAME="${{ steps.topology-live-preflight.outputs.ts-hostname }}"
@@ -1539,17 +1795,13 @@ jobs:
             fi
           fi
 
-          COOLIFY_TOKEN_RESOLVED="${COOLIFY_TOKEN:-}"
-          if [ "$COOLIFY_TOKEN_RESOLVED" = "-" ] || [ -z "$COOLIFY_TOKEN_RESOLVED" ]; then
+          if [ "$COOLIFY_MOMO_DEPLOY_TOKEN" = "-" ] || [ -z "$COOLIFY_MOMO_DEPLOY_TOKEN" ]; then
             if [ -n "${SECRETS_SERVICE_KEY:-}" ]; then
               _SEC_URL="http://qwickapps-secrets-live.taile324e7.ts.net:7007"
               _SEC_RESP=$(curl -sf --max-time 10 "${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN" \
-                -H "x-service-key: ${SECRETS_SERVICE_KEY}" 2>/dev/null || echo "")
+                -H "x-service-key: $SECRETS_SERVICE_KEY" 2>/dev/null || echo "")
               if [ -n "$_SEC_RESP" ]; then
-                _SEC_COOLIFY_TOKEN=$(echo "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
-                if [ -n "$_SEC_COOLIFY_TOKEN" ] && [ "$_SEC_COOLIFY_TOKEN" != "-" ]; then
-                  COOLIFY_TOKEN_RESOLVED="$_SEC_COOLIFY_TOKEN"
-                fi
+                COOLIFY_MOMO_DEPLOY_TOKEN=$(printf '%s' "$_SEC_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
               fi
             fi
           fi
@@ -1565,7 +1817,7 @@ jobs:
               --target-host "$HOST_KEY" \
               --caprover-hosts oci-gateway oci-main server1-qwickforge \
               --ts-api-key "$TS_API_KEY_RESOLVED" \
-              --coolify-token "$COOLIFY_TOKEN_RESOLVED" \
+              --coolify-token "$COOLIFY_MOMO_DEPLOY_TOKEN" \
               --result-json-out "$RESULT_JSON"
           PREFLIGHT_EXIT=$?
           set -e
@@ -2024,11 +2276,11 @@ jobs:
 
   # -- Tag lifecycle promotion ---------------------------------------------
   retag:
-    needs: [resolve-stage, deploy-caprover, validate-env]
+    needs: [resolve-stage, deploy-caprover, deploy-coolify-build, deploy-coolify-uat, validate-env]
     if: |
       always() &&
       needs.resolve-stage.result == 'success' &&
-      needs.deploy-caprover.result == 'success' &&
+      (needs.deploy-caprover.result == 'success' || needs.deploy-coolify-build.result == 'success' || needs.deploy-coolify-uat.result == 'success') &&
       needs.resolve-stage.outputs.stage != 'stable' &&
       needs.resolve-stage.outputs.next_tag != ''
     runs-on: [self-hosted, macmini]
@@ -2103,10 +2355,52 @@ jobs:
           /opt/homebrew/bin/docker-buildx imagetools create -t "$NEXT_TAG" "$SOURCE_IMAGE"
           echo "Retagged $SOURCE_IMAGE -> $NEXT_TAG"
 
+  # -- Momo build-slot cleanup (post-pass only) ------------------------------
+  stop-coolify-build-slot:
+    needs: [resolve-stage, retag]
+    if: always() && needs.resolve-stage.result == 'success' && needs.retag.result == 'success' && needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.deployment_lane == 'secondary'
+    runs-on: [self-hosted, macmini]
+    # Same per-slot lock as deploy-coolify-build (t_2740078a contract), so a
+    # stop can never interleave with a newer run's deploy of the same slot.
+    # The coolify-momo-secondary-v1- prefix is disjoint from caprover-deploy-*,
+    # so neither lane queues behind or cancels the other.
+    concurrency:
+      group: coolify-momo-secondary-v1-${{ inputs.app_name }}-${{ needs.resolve-stage.outputs.stage }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout explicit Momo validation implementation
+        uses: actions/checkout@v4
+        with:
+          repository: qwickapps/ci-workflows
+          # job.workflow_sha is the immutable commit of THIS reusable workflow
+          # (github.workflow_sha names the caller). Helpers must match the
+          # workflow under test, never main.
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            scripts
+            config/coolify-secondary-validation.json
+          sparse-checkout-cone-mode: false
+      - name: Resolve scoped Momo validation credentials
+        env:
+          COOLIFY_MOMO_DEPLOY_TOKEN: ${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+          SECRETS_SERVICE_KEY: ${{ secrets.SECRETS_SERVICE_KEY }}
+        run: bash .ci-workflows/scripts/resolve-coolify-validation-credentials.sh
+      - name: Stop build validation resource
+        run: |
+          set -euo pipefail
+          python3 .ci-workflows/scripts/coolify-validation-deploy.py stop \
+            --config .ci-workflows/config/coolify-secondary-validation.json \
+            --role build \
+            --app-name "${{ inputs.app_name }}" \
+            --resource-name "${{ needs.resolve-stage.outputs.target_app }}" \
+            --snapshot "${RUNNER_TEMP}/unused-coolify-build-snapshot.json"
+
   # -- Build slot cleanup (post-pass only) ----------------------------------
   scale-build-slot:
     needs: [resolve-stage, retag]
-    if: always() && needs.resolve-stage.result == 'success' && needs.retag.result == 'success' && needs.resolve-stage.outputs.stage == 'build'
+    if: always() && needs.resolve-stage.result == 'success' && needs.retag.result == 'success' && needs.resolve-stage.outputs.stage == 'build' && needs.resolve-stage.outputs.deployment_lane == 'primary'
     runs-on: [self-hosted, macmini]
     steps:
       - name: Checkout code
@@ -2189,6 +2483,7 @@ jobs:
       needs.resolve-stage.result == 'success' &&
       needs.validate-env.result == 'success' &&
       needs.verify-provenance.result == 'success' &&
+      needs.resolve-stage.outputs.deployment_lane == 'primary' &&
       needs.resolve-stage.outputs.stage == 'stable'
     runs-on: [self-hosted, macmini]
     # aos#193 Phase 1 review (round 2): no explicit `permissions:` block

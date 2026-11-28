@@ -73,20 +73,32 @@ assert "fetches the same secrets-service path mcp's deploy.yml uses for TS_API_K
   test "$SECRETS_PATH_COUNT" -eq 4
 
 SERVICE_KEY_ENV_COUNT=$(grep -c 'SECRETS_SERVICE_KEY: \${{ secrets.SECRETS_SERVICE_KEY }}' "$WORKFLOW" || true)
-assert "SECRETS_SERVICE_KEY threaded into all four live-state-check step environments" \
-  test "$SERVICE_KEY_ENV_COUNT" -eq 4
+# 4 primary live-state checks + the credential-resolve step of each secondary
+# deploy job (build, uat) + stop-coolify-build-slot. Never the composite action.
+assert "secrets-service key threaded into four primary checks, both secondary resolve steps and the build-slot stop" \
+  test "$SERVICE_KEY_ENV_COUNT" -eq 7
 
-COOLIFY_SECRET_COUNT=$(grep -c 'COOLIFY_TOKEN: \${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}' "$WORKFLOW" || true)
-assert "the live momo scoped deploy token is threaded into both Coolify checks" \
-  test "$COOLIFY_SECRET_COUNT" -eq 2
+COOLIFY_SECRET_COUNT=$(grep -c 'COOLIFY_MOMO_DEPLOY_TOKEN: \${{ secrets.COOLIFY_MOMO_DEPLOY_TOKEN }}' "$WORKFLOW" || true)
+assert "the live momo scoped deploy token is threaded into both primary checks, both secondary resolve steps and the build-slot stop" \
+  test "$COOLIFY_SECRET_COUNT" -eq 5
+
+# Narrowed secrets: the composite action (which runs caller smoke/E2E code)
+# must receive no secrets at all, and no secondary deploy step may carry the
+# caller secret bundle.
+ACTION="$ROOT_DIR/.github/actions/coolify-validation/action.yml"
+assert "secondary composite action receives no secrets" \
+  bash -c "! grep -q 'secrets\.' '$ACTION'"
+assert "secondary composite action never sees the secrets-service key" \
+  bash -c "! grep -q 'SERVICE_KEY' '$ACTION'"
+assert "caller-code steps strip deploy credentials before running" \
+  test "$(grep -c 'unset COOLIFY_MOMO_DEPLOY_TOKEN TS_API_KEY_RESOLVED' "$ACTION")" -eq 5
 
 COOLIFY_PATH_COUNT=$(grep -c '\${_SEC_URL}/v1/secrets/infrastructure/caprover/COOLIFY_MOMO_DEPLOY_TOKEN' "$WORKFLOW" || true)
 assert "Coolify fallback reads the live scoped momo deploy token, not unprovisioned/stale aliases" \
   test "$COOLIFY_PATH_COUNT" -eq 2
 
-COOLIFY_BAD_ALIAS_COUNT=$(grep -c 'secrets.COOLIFY_API_TOKEN\|/coolify/COOLIFY_API_TOKEN' "$WORKFLOW" || true)
-assert "no unprovisioned COOLIFY_API_TOKEN secret reference or fallback path remains" \
-  test "$COOLIFY_BAD_ALIAS_COUNT" -eq 0
+assert "exclusive token-name policy passes the complete deployment pipeline" \
+  python3 "$ROOT_DIR/scripts/validate-coolify-token-exclusivity.py" --root "$ROOT_DIR"
 
 echo ""
 echo "Tests: $pass passed, $fail failed"

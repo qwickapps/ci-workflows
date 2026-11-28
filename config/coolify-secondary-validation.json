@@ -1,0 +1,23 @@
+{
+  "schema": "coolify-secondary-validation/v1",
+  "api_base_url": "http://qwickapps-momo.taile324e7.ts.net:8000/api/v1",
+  "server": {
+    "name": "localhost",
+    "uuid": "oi7wjpr51crvbbcmlx20uujp",
+    "destination_uuid": "ha95lwiwzwjcgoxvzn5dflmz"
+  },
+  "project": {
+    "name": "fleet-infra",
+    "uuid": "4an7n2fy2va8xhybuvdpwyx3",
+    "environment_name": "production",
+    "environment_uuid": "wbsr3w2u0gq5yw8zcrz6v0mf"
+  },
+  "slots": {
+    "build": {
+      "suffix": "-build"
+    },
+    "uat": {
+      "suffix": "-uat"
+    }
+  }
+}

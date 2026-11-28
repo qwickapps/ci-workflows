@@ -156,7 +156,19 @@ for job_id, j in doc.get('jobs', {}).items():
     for s in steps_list:
         if isinstance(s, dict):
             texts.append(' '.join(filter(None, [s.get('name',''), s.get('run','') or ''])))
-    if 'coolify' in ' '.join(texts).lower():
+    joined = ' '.join(texts).lower()
+    if 'coolify' not in joined:
+        continue
+    # Allowlist (t_ba218534): the explicit Momo Coolify secondary lane. Its
+    # jobs may mention Coolify only when the job itself is gated to
+    # lane=secondary; resolve-stage may mention it only in the lane gate.
+    # Neither may revive the orphaned deploy-to-coolify.sh path.
+    if 'deploy-to-coolify' in joined:
+        other_jobs_coolify.append(job_id)
+    elif job_id in ('deploy-coolify-build', 'deploy-coolify-uat', 'stop-coolify-build-slot'):
+        if \"deployment_lane == 'secondary'\" not in str(j.get('if', '')):
+            other_jobs_coolify.append(job_id)
+    elif job_id != 'resolve-stage':
         other_jobs_coolify.append(job_id)
 result['other_jobs_coolify'] = other_jobs_coolify
 result['deploy_caprover_orphan_coolify'] = deploy_caprover_orphan_coolify
@@ -220,7 +232,7 @@ else
 fi
 
 OTHER_COOLIFY_JOBS="$(get other_jobs_coolify)"
-assert "no job besides deploy-stable/deploy-caprover mentions coolify" \
+assert "no job besides deploy-stable/deploy-caprover and the lane-gated Momo secondary jobs mentions coolify" \
   test "$OTHER_COOLIFY_JOBS" = "[]"
 if [ "$OTHER_COOLIFY_JOBS" != "[]" ]; then
   echo "    jobs still mentioning coolify: $OTHER_COOLIFY_JOBS" >&2
