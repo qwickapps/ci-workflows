@@ -38,6 +38,12 @@ jobs:
   merge-gate-audit:
     name: merge-gate post-merge audit
     runs-on: [self-hosted, macmini, macmini-fast]
+    # Fork-PR guard (ci-workflows#184/#185 regression gate, scripts/tests/
+    # self-hosted-fork-pr-guard.test.sh): merge-gate-self-check.yml's file
+    # also carries a pull_request trigger (for its sibling `status` job),
+    # so this reusable workflow's callee job must carry the canonical
+    # guard itself even though its own caller job gates on `push` only.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v5
         with:

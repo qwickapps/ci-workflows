@@ -64,6 +64,12 @@ jobs:
     # choco runners are repo-scoped (aos, ci-workflows) and never serve
     # callers.
     runs-on: [self-hosted, macmini, macmini-fast]
+    # Fork-PR guard (ci-workflows#184/#185 regression gate, scripts/tests/
+    # self-hosted-fork-pr-guard.test.sh): this reusable workflow runs on a
+    # self-hosted runner and merge-gate-self-check.yml calls it from a
+    # pull_request-triggered job, so it must carry the canonical guard
+    # itself rather than relying on the caller.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v5
         with:
