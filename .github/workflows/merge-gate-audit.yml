@@ -32,6 +32,7 @@ on:
 permissions:
   contents: read
   statuses: read
+  issues: write
 
 jobs:
   merge-gate-audit:
@@ -127,8 +128,16 @@ jobs:
                 gh label create "P0" --color "b60205" --description "Merge bypassed merge-gate" --repo "$REPO" --force 2>/dev/null || true
                 EXISTING=$(gh issue list --repo "$REPO" --label "P0" --state open --search "${SHA:0:12} in:title" --json number --jq 'length' 2>/dev/null || echo 0)
                 if [ "$EXISTING" = "0" ]; then
-                  gh issue create --repo "$REPO" --title "$TITLE" --label "P0" --body "$BODY" >/dev/null 2>&1 || true
+                  if gh issue create --repo "$REPO" --title "$TITLE" --label "P0" --body "$BODY" >/dev/null 2>&1; then
+                    CARD_OK=true
+                  fi
+                else
+                  CARD_OK=true
                 fi
+              fi
+
+              if [ "$CARD_OK" = "false" ]; then
+                echo "::error::merge-gate-audit: BOTH the hermes-CLI card and the GitHub issue fallback failed for ${SHA} on ${REPO} — this bypass went unflagged. Check runner's hermes CLI and the job's issues:write permission."
               fi
             fi
           done <<< "$SHAS"
