@@ -44,9 +44,9 @@ first_stable_evidence_require() {
     external_id="$(printf '%s' "$candidate" | jq -r '.external_id // ""')"
     if ! printf '%s' "$candidate" | jq -e \
       --arg repo "$repo" --arg app "$app_name" --arg sha "$sha" --arg digest "$image_digest" --arg kind "$kind" '
-        .conclusion == "success" and
         ((.output.text // "") | fromjson? // {}) as $p |
-        ($p.schema == "first-stable-source-proof/v1" and
+        (.conclusion == "success" and
+         $p.schema == "first-stable-source-proof/v1" and
          $p.kind == $kind and
          $p.repo == $repo and
          $p.app_name == $app and
