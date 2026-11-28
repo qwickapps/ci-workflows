@@ -1,0 +1,22 @@
+name: merge-gate (self-check)
+
+# ci-workflows dogfoods its own reusable merge-gate/merge-gate-audit
+# workflows on itself -- first wave of the design S2 rollout (see
+# docs/merge-gate.md). Named merge-gate-self-check.yml rather than
+# merge-gate.yml so it never collides with the reusable workflow file it
+# calls, which lives in this same repo.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+jobs:
+  status:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/merge-gate.yml
+
+  audit:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/merge-gate-audit.yml

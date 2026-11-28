@@ -1,0 +1,152 @@
+name: Merge Gate Post-Merge Audit (Reusable)
+
+# merge-gates design S2 (Projects/merge-gates-design-2026-11-27.md,
+# sections 2 (G10 lineage), 4, 7 -- read those before changing this file).
+#
+# Triggered by the caller's `on: push: branches: [main]`. For every commit
+# that landed on main in this push, checks whether it carries evidence that
+# it went through the merge-gate tool (design S1):
+#   (a) a commit status `merge-gate/audit` = success at that SHA, or
+#   (b) a line in `.merge-gate/audit.jsonl` (at that commit) whose
+#       `merge_sha` matches.
+#
+# Neither source exists yet anywhere in the org, because design step S1
+# (the merge-gate CLI that would write them) has not been built as of this
+# workflow landing (2026-11-27) and S3 (the guard rule that forces every
+# merge through it) needs its own recorded SDLC exception and has not
+# landed either. Concretely: THIS JOB WILL FLAG EVERY MERGE as a bypass
+# until S1 ships and repos adopt it. That is the correct, honest signal for
+# this rollout phase -- it is a true statement that nothing is routing
+# through merge-gate yet, not a bug in this workflow. See docs/merge-gate.md.
+#
+# On a flag, it opens (or updates, idempotently) a P0 Kanban card on
+# whichever host ran this job via the local `hermes` CLI. Every caller of
+# this reusable workflow runs on the macmini self-hosted pool (see
+# merge-gate.yml's runs-on comment), so cards land on macmini's own board
+# -- that is deliberate, not an accident of a particular caller repo.
+
+on:
+  workflow_call:
+    inputs: {}
+
+permissions:
+  contents: read
+  statuses: read
+  issues: write
+
+jobs:
+  merge-gate-audit:
+    name: merge-gate post-merge audit
+    runs-on: [self-hosted, macmini, macmini-fast]
+    # Fork-PR guard (ci-workflows#184/#185 regression gate, scripts/tests/
+    # self-hosted-fork-pr-guard.test.sh): merge-gate-self-check.yml's file
+    # also carries a pull_request trigger (for its sibling `status` job),
+    # so this reusable workflow's callee job must carry the canonical
+    # guard itself even though its own caller job gates on `push` only.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check each pushed commit for merge-gate audit evidence
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMITS_JSON: ${{ toJson(github.event.commits) }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          # github.event.commits is capped at 20 by GitHub for push events;
+          # fall back to a direct git log between before/after when the push
+          # carried more commits than that (force-push or a big batch land).
+          SHAS=$(echo "$COMMITS_JSON" | jq -r '.[].id' 2>/dev/null || true)
+          if [ -z "$SHAS" ] && [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            SHAS=$(git rev-list "${BEFORE_SHA}..${AFTER_SHA}" 2>/dev/null || true)
+          fi
+          if [ -z "$SHAS" ]; then
+            SHAS="$AFTER_SHA"
+          fi
+
+          UNAUDITED=0
+
+          while IFS= read -r SHA; do
+            [ -z "$SHA" ] && continue
+
+            AUDITED=false
+
+            # (a) commit status evidence
+            STATUS_STATE=$(gh api "repos/${REPO}/commits/${SHA}/status" --jq '[.statuses[]? | select(.context == "merge-gate/audit")][0].state // ""' 2>/dev/null || echo "")
+            if [ "$STATUS_STATE" = "success" ]; then
+              AUDITED=true
+            fi
+
+            # (b) in-repo audit log evidence at that commit
+            if [ "$AUDITED" = "false" ]; then
+              if git show "${SHA}:.merge-gate/audit.jsonl" 2>/dev/null | grep -qF "\"merge_sha\":\"${SHA}\""; then
+                AUDITED=true
+              fi
+            fi
+
+            if [ "$AUDITED" = "false" ]; then
+              UNAUDITED=$((UNAUDITED + 1))
+              AUTHOR=$(git log -1 --format='%an <%ae>' "$SHA" 2>/dev/null || echo "unknown")
+              SUBJECT=$(git log -1 --format='%s' "$SHA" 2>/dev/null || echo "")
+              TITLE="P0: merge bypassed merge-gate — ${REPO} ${SHA:0:12}"
+              BODY="Repo: ${REPO}
+          Commit: ${SHA}
+          Author: ${AUTHOR}
+          Subject: ${SUBJECT}
+          Run: ${RUN_URL}
+
+          No merge-gate audit evidence found for this commit on main (no
+          \`merge-gate/audit\` commit status, no matching line in
+          .merge-gate/audit.jsonl at this SHA).
+
+          Expected while design step S1 (the merge-gate CLI that writes
+          this evidence) is unbuilt and S3 (the guard rule routing every
+          merge through it) is not live — see
+          Projects/merge-gates-design-2026-11-27.md section 7. If S1/S3 are
+          already live when you read this, treat this card as a real
+          bypass and investigate who merged outside the tool."
+              echo "::warning::no merge-gate audit evidence for ${SHA} on ${REPO} — opening/updating P0 card"
+
+              CARD_OK=false
+              if command -v hermes >/dev/null 2>&1; then
+                if hermes kanban create "$TITLE" \
+                  --body "$BODY" \
+                  --assignee default \
+                  --priority 15000 \
+                  --idempotency-key "merge-gate-bypass-${REPO//\//-}-${SHA}" \
+                  --created-by merge-gate-audit \
+                  >/dev/null 2>&1; then
+                  CARD_OK=true
+                else
+                  echo "::error::hermes kanban create failed for ${SHA} — falling back to a GitHub issue"
+                fi
+              fi
+
+              if [ "$CARD_OK" = "false" ]; then
+                gh label create "P0" --color "b60205" --description "Merge bypassed merge-gate" --repo "$REPO" --force 2>/dev/null || true
+                EXISTING=$(gh issue list --repo "$REPO" --label "P0" --state open --search "${SHA:0:12} in:title" --json number --jq 'length' 2>/dev/null || echo 0)
+                if [ "$EXISTING" = "0" ]; then
+                  if gh issue create --repo "$REPO" --title "$TITLE" --label "P0" --body "$BODY" >/dev/null 2>&1; then
+                    CARD_OK=true
+                  fi
+                else
+                  CARD_OK=true
+                fi
+              fi
+
+              if [ "$CARD_OK" = "false" ]; then
+                echo "::error::merge-gate-audit: BOTH the hermes-CLI card and the GitHub issue fallback failed for ${SHA} on ${REPO} — this bypass went unflagged. Check runner's hermes CLI and the job's issues:write permission."
+              fi
+            fi
+          done <<< "$SHAS"
+
+          echo "unaudited=${UNAUDITED}" >> "$GITHUB_OUTPUT"
+          echo "::notice::merge-gate-audit: ${UNAUDITED} unaudited commit(s) flagged"
