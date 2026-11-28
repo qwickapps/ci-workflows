@@ -10,20 +10,20 @@ REF="ghcr.io/qwickapps/img-demo@${DIGEST}"
 
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-url="${*: -1}"
-case "$url" in
+args="$*"
+case "$args" in
   *packages/container*/versions*)
     case "${MODE:-happy}" in stable_present) echo '[{"metadata":{"container":{"tags":["stable"]}}}]';; probe_error) echo 'network failed' >&2; exit 1;; *) echo '[{"metadata":{"container":{"tags":["release"]}}}]';; esac;;
   *packages/container/*)
     case "${MODE:-happy}" in target_invisible) echo 'gh: Not Found (HTTP 404)' >&2; exit 1;; *) echo '{"name":"img-demo"}' ;; esac;;
   *commits/*/check-runs*)
-    if [[ "$url" == *first-stable-build* ]]; then
+    if [[ "$args" == *first-stable-build* ]]; then
       case "${MODE:-happy}" in
         missing_build) echo '{"total_count":0,"check_runs":[]}' ;;
         mismatch_build) echo "{\"total_count\":1,\"check_runs\":[{\"conclusion\":\"success\",\"output\":{\"text\":\"{\\\"schema\\\":\\\"first-stable-source-proof/v1\\\",\\\"kind\\\":\\\"build\\\",\\\"repo\\\":\\\"qwickapps/demo\\\",\\\"app_name\\\":\\\"demo\\\",\\\"source_sha\\\":\\\"$SHA\\\",\\\"image_digest\\\":\\\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\"},\"app\":{\"slug\":\"github-actions\"},\"external_id\":\"123-1\"}]}" ;;
         *) echo "{\"total_count\":1,\"check_runs\":[{\"conclusion\":\"success\",\"output\":{\"text\":\"{\\\"schema\\\":\\\"first-stable-source-proof/v1\\\",\\\"kind\\\":\\\"build\\\",\\\"repo\\\":\\\"qwickapps/demo\\\",\\\"app_name\\\":\\\"demo\\\",\\\"source_sha\\\":\\\"$SHA\\\",\\\"image_digest\\\":\\\"$DIGEST\\\"}\"},\"app\":{\"slug\":\"github-actions\"},\"external_id\":\"123-1\"}]}" ;;
       esac
-    elif [[ "$url" == *first-stable-uat* ]]; then
+    elif [[ "$args" == *first-stable-uat* ]]; then
       case "${MODE:-happy}" in
         missing_uat) echo '{"total_count":0,"check_runs":[]}' ;;
         mismatch_uat) echo "{\"total_count\":1,\"check_runs\":[{\"conclusion\":\"success\",\"output\":{\"text\":\"{\\\"schema\\\":\\\"first-stable-source-proof/v1\\\",\\\"kind\\\":\\\"uat\\\",\\\"repo\\\":\\\"qwickapps/demo\\\",\\\"app_name\\\":\\\"demo\\\",\\\"source_sha\\\":\\\"$SHA\\\",\\\"image_digest\\\":\\\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\",\\\"stage\\\":\\\"uat\\\"}\"},\"app\":{\"slug\":\"github-actions\"},\"external_id\":\"123-1\"}]}" ;;

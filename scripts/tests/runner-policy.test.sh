@@ -68,7 +68,8 @@ make_workflow "$TMPDIR/old-bare" 'self-hosted'
 make_workflow "$TMPDIR/old-hosted-private" 'ubuntu-24.04'
 make_workflow "$TMPDIR/old-hosted-unapproved" 'ubuntu-unapproved'
 make_dynamic_workflow "$TMPDIR/old-caller-override"
-make_workflow "$TMPDIR/new-approved" '[self-hosted, choco]'
+make_workflow "$TMPDIR/old-choco" '[self-hosted, choco]'
+make_workflow "$TMPDIR/new-approved" '[interserver-x64, julie]'
 make_workflow "$TMPDIR/new-hosted-approved" 'ubuntu-24.04'
 
 python3 - "$POLICY" "$TMPDIR/private-policy.json" <<'PY'
@@ -92,14 +93,32 @@ expect_fail "public fixture with an unapproved GitHub-hosted label is rejected" 
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/old-hosted-unapproved"
 expect_fail "caller-controlled runs-on that could override to an unapproved label is rejected" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/old-caller-override"
-expect_pass "new fixture with approved choco labels passes" \
+expect_fail "legacy choco labels are rejected" \
+  python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/old-choco"
+expect_pass "new fixture with approved julie labels passes" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/new-approved"
 expect_pass "public fixture with an approved GitHub-hosted label passes" \
   python3 "$CHECKER" --policy "$POLICY" validate --repo qwickapps/ci-workflows --workflow-dir "$TMPDIR/new-hosted-approved"
 
+expect_pass "Julie policy pins the Default group and both reviewed runner names" \
+  python3 - "$POLICY" <<'PY'
+import json, sys
+
+policy = json.load(open(sys.argv[1]))
+expected = {
+    "labels": ["interserver-x64", "julie"],
+    "runner_groups": ["Default"],
+    "runner_names": ["julie-x64-ghr1", "julie-x64-ghr2"],
+}
+for repo in ("*", "qwickapps/ci-workflows"):
+    for job_class in ("build", "test", "security"):
+        allowed = policy["repositories"][repo]["job_classes"][job_class]["allowed"]
+        assert expected in allowed, (repo, job_class)
+PY
+
 echo "== caller-facing reusable workflows use org runners =="
-# Reusable workflows execute in the caller's repository. choco runners are
-# repo-scoped, so a choco label there queues forever (protocols#1769).
+# Reusable workflows execute in the caller's repository. Legacy choco runners
+# were repo-scoped, so a choco label there queued forever (protocols#1769).
 for wf in shell-lint.yml validation-evidence-gate.yml main-push-guard.yml; do
   expect_pass "$wf requests the org macmini-fast runner" \
     grep -Eq '^    runs-on: \[self-hosted, macmini, macmini-fast\]$' "$ROOT_DIR/.github/workflows/$wf"
